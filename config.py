@@ -22,7 +22,7 @@ if not FRED_API_KEY:
 MAIN_INDICES = {
     '^NSEI': 'NIFTY 50',
     '^NSEBANK': 'BANK NIFTY',
-    # REMOVED: 'NIFTYMID50.NS': 'NIFTY MIDCAP 50' - Symbol not working
+    #'^CNXMIDCAP': 'NIFTY MIDCAP',
     '^CNXIT': 'NIFTY IT'
 }
 
@@ -208,7 +208,7 @@ def validate_config():
     issues = []
 
     # Check for broken symbols
-    if 'NIFTYMID50.NS' in str(MAIN_INDICES):
+    if '^NIFTY_MIDCAP_100.NS' in str(MAIN_INDICES):
         issues.append("⚠️  Broken Midcap symbol still in config")
 
     if issues:
