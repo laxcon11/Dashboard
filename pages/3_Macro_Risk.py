@@ -14,7 +14,7 @@ from data_fetch import (
 )
 
 
-from config import MACRO_THRESHOLDS
+from config import MACRO_THRESHOLDS, FRED_API_KEY, MACRO_WEIGHTS, MACRO_SYMBOLS
 
 st.set_page_config(layout="wide")
 st.title("🌍 India Macro Risk Dashboard")
@@ -23,11 +23,11 @@ st.caption(
     "Combines global markets, FX, yields, commodities, and volatility "
     "to estimate daily Risk-On / Risk-Off conditions."
 )
-FRED_API_KEY = os.getenv("FRED_API_KEY")
+
+liquidity_series = {}   # <-- initialize first
 
 if not FRED_API_KEY:
     st.warning("FRED API key not found. Liquidity indicators disabled.")
-    liquidity_series = {}
 else:
     with st.spinner("Fetching liquidity data..."):
         liquidity_series = {
@@ -35,6 +35,7 @@ else:
             "Reverse Repo": fetch_fred_series("RRPONTSYD", FRED_API_KEY, days=30),
             "Treasury General Account": fetch_fred_series("WTREGEN", FRED_API_KEY, days=30),
         }
+
 
 
 # ================= INDICATORS =================
@@ -142,6 +143,7 @@ def classify_regime(score, indicator_count):
         return "🟡 Neutral", "warning"
 
 
+
 # ================= PLOT FUNCTION =================
 
 def plot_smooth_chart(df, title):
@@ -193,7 +195,16 @@ for i, (symbol, name) in enumerate(all_items):
     if symbol == "INDIAVIX":
         price = vix_price
         change_pct = vix_change
-        score = None if change_pct is None else (-1 if change_pct > T["vix"] else 0)
+        if change_pct is None or price is None:
+            score = None
+
+        elif change_pct > T["vix"]:
+            score = -1
+        elif change_pct < -T["vix"]:
+            score = 1
+        else:
+            score = 0
+
 
 
 
@@ -201,12 +212,11 @@ for i, (symbol, name) in enumerate(all_items):
     else:
         # FIXED: Prioritize LIVE price (current market) over historical
         # This ensures Indicator Breakdown shows TODAY's actual changes
-        price, change, change_pct = get_ticker_price(symbol)
+        df = data_1mo.get(symbol)
+        price, change, change_pct = extract_price_data(df)
 
-        # Fallback to historical data if live fetch fails
-        if price is None or change_pct is None:
-            df = data_1mo.get(symbol)
-            price, change, change_pct = extract_price_data(df)
+        if price is None:
+            price, change, change_pct = get_ticker_price(symbol)
 
         # Score calculation still uses historical data for consistency
         df = data_1mo.get(symbol)
@@ -312,7 +322,8 @@ else:
 
 # ================= RISK GAUGE =================
 
-st.write("### Risk Gauge")
+st.subheader("Risk Gauge")
+
 
 max_expected_score = max(10, len(scores) * 2)
 scaled = (final_score + max_expected_score) / (2 * max_expected_score)
@@ -347,6 +358,9 @@ st.caption(
 st.subheader("📋 Indicator Breakdown")
 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+if failed_symbols:
+    st.caption("Data unavailable: " + ", ".join(failed_symbols))
+
 
 # ================= RISK TREND (7 DAYS) =================
 
@@ -370,8 +384,8 @@ for i in range(7):
                 weight = WEIGHTS.get(symbol, 1)
                 day_score += score * weight
                 valid_count += 1
-    day_score += liquidity_score
 
+    day_score += liquidity_score
     trend_scores.append(day_score)
 
     regime_name, _ = classify_regime(day_score, valid_count)
@@ -380,12 +394,21 @@ for i in range(7):
 trend_scores = list(reversed(trend_scores))
 trend_regimes = list(reversed(trend_regimes))
 
-trend_df = pd.DataFrame({
-    "Day": pd.date_range(end=pd.Timestamp.today(), periods=len(trend_scores)).date,
+if trend_scores:
+    days_index = pd.date_range(
+        end=pd.Timestamp.today(),
+        periods=len(trend_scores)
+    ).date
+else:
+    days_index = []
 
+trend_df = pd.DataFrame({
+    "Day": days_index,
     "Score": trend_scores,
     "Regime": trend_regimes
 })
+
+
 
 fig = go.Figure()
 
@@ -443,7 +466,8 @@ for idx in range(0, len(chart_items), 2):
 st.subheader("💧 Liquidity Drivers")
 
 for name, df in liquidity_series.items():
-    if df is not None and len(df) > 0:
+    if df is not None and not df.empty:
+
         with st.expander(name):
             if "date" in df.columns and "value" in df.columns:
                 st.line_chart(df.set_index("date")["value"])

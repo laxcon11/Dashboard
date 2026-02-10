@@ -12,6 +12,8 @@ from config import FRED_API_KEY  # ✅ FIXED: Import from config
 st.set_page_config(layout="wide")
 st.title("📊 Leading Indicators Dashboard")
 
+st.divider()
+
 st.caption(
     "Early signals of market direction based on liquidity, yields, "
     "currency strength and risk assets."
@@ -76,11 +78,14 @@ LEADING_SYMBOLS = {
 
 # ================= FETCH DATA =================
 
-with st.spinner("Fetching market data..."):
-    market_data = batch_download(list(MARKET_SYMBOLS.keys()), period="6mo")
+ALL_SYMBOLS = list(set(MARKET_SYMBOLS.keys()) | set(LEADING_SYMBOLS.keys()))
 
-with st.spinner("Fetching leading indicator data..."):
-    data = batch_download(list(LEADING_SYMBOLS.keys()), period="6mo")
+with st.spinner("Fetching market data..."):
+    all_data = batch_download(ALL_SYMBOLS, period="6mo")
+
+market_data = {k: all_data.get(k) for k in MARKET_SYMBOLS}
+data = {k: all_data.get(k) for k in LEADING_SYMBOLS}
+
 
 # ✅ FIXED: Check if critical symbols loaded
 missing_symbols = []
@@ -103,6 +108,7 @@ if FRED_API_KEY:
             liquidity_data[name] = fetch_fred_series(series, FRED_API_KEY, days=90)
 else:
     st.warning("⚠️ FRED API key not found in config.py. Liquidity indicators disabled.")
+    st.info("Liquidity indicators require a FRED API key.")
 
 # ✅ FIXED: Better debug output
 with st.expander("🔍 Data Loading Debug", expanded=False):
@@ -119,15 +125,15 @@ with st.expander("🔍 Data Loading Debug", expanded=False):
     st.write("**Credit Spread Debug:**")
     hyg = data.get("HYG")
     lqd = data.get("LQD")
-    if hyg is not None:
+    if hyg is not None and "Close" in hyg.columns:
         st.write(f"HYG: {len(hyg)} rows, latest close: ${hyg['Close'].iloc[-1]:.2f}")
     else:
-        st.write("HYG: ❌ Not loaded (check validate_symbol in data_fetch.py)")
+        st.write("HYG: ❌ Not loaded or missing Close column")
 
-    if lqd is not None:
+    if lqd is not None and "Close" in lqd.columns:
         st.write(f"LQD: {len(lqd)} rows, latest close: ${lqd['Close'].iloc[-1]:.2f}")
     else:
-        st.write("LQD: ❌ Not loaded (check validate_symbol in data_fetch.py)")
+        st.write("LQD: ❌ Not loaded Not loaded or missing Close column")
 
 
 # ================= HELPER FUNCTIONS =================
@@ -149,10 +155,11 @@ def copper_gold_signal(data):
     if "Close" not in copper.columns or "Close" not in gold.columns:
         return None, None
 
-    df = pd.DataFrame({
-        "copper": copper["Close"],
-        "gold": gold["Close"]
-    }).dropna().ffill()
+    df = pd.concat(
+        [copper["Close"].rename("copper"),
+         gold["Close"].rename("gold")],
+        axis=1
+    ).ffill().dropna()
 
     if len(df) < 15:
         return None, None
@@ -293,10 +300,17 @@ with col4:
 
 st.subheader("Liquidity Trend")
 
+liquidity_shown = False
+
 for name, df in liquidity_data.items():
     if df is not None and len(df) > 0 and {"date", "value"}.issubset(df.columns):
+        liquidity_shown = True
         with st.expander(name):
             st.line_chart(df.set_index("date")["value"])
+
+if not liquidity_shown:
+    st.caption("No liquidity data available.")
+
 
 # ================= MARKET LEADING INDICATORS =================
 
@@ -451,7 +465,7 @@ if credit_score is not None:
     impulse_score += credit_score
     factors += 1
 
-normalized = impulse_score / factors if factors else 0
+normalized = impulse_score / factors if factors >= 3 else 0
 
 fig = go.Figure(go.Indicator(
     mode="gauge+number",

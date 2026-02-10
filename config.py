@@ -1,6 +1,7 @@
 """
-Configuration file for Trading Dashboard
-Central place to customize symbols, indicators, and dashboard behavior
+Main Configuration file for Trading Dashboard Suite
+UPDATED: Removed Midcap indicator (broken symbol)
+NSE-specific config moved to nse_config.py
 """
 
 import os
@@ -12,39 +13,23 @@ load_dotenv()
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 
 if not FRED_API_KEY:
-    print("Warning: FRED_API_KEY not found. Liquidity dashboard will not load data.")
+    print("⚠️  FRED_API_KEY not found in .env - Liquidity dashboard features disabled")
 
 
-# ==================== WATCHLIST (USED BY NSE DASHBOARD) ====================
-
-WATCHLIST = [
-    'RELIANCE.NS',
-    'TCS.NS',
-    'INFY.NS',
-    'HDFCBANK.NS',
-    'ICICIBANK.NS',
-    'SBIN.NS',
-    'HINDUNILVR.NS',
-    'ITC.NS',
-    'BHARTIARTL.NS',
-    'KOTAKBANK.NS',
-    'KAYNES.NS',
-    'GODREJPROP.NS'
-]
-
-
-# ==================== INDIAN INDICES ====================
+# ==================== MAIN INDICES ====================
+# Used across all dashboards for market overview
 
 MAIN_INDICES = {
     '^NSEI': 'NIFTY 50',
     '^NSEBANK': 'BANK NIFTY',
-    'NIFTYMID50.NS': 'NIFTY MIDCAP 50',
+    # REMOVED: 'NIFTYMID50.NS': 'NIFTY MIDCAP 50' - Symbol not working
     '^CNXIT': 'NIFTY IT'
 }
 
 
-# ==================== GLOBAL SNAPSHOT ====================
+# ==================== GLOBAL MARKETS ====================
 
+# Quick risk snapshot (top of Global Markets dashboard)
 GLOBAL_RISK_SNAPSHOT = {
     "^GSPC": "S&P 500",
     "^IXIC": "NASDAQ",
@@ -55,9 +40,7 @@ GLOBAL_RISK_SNAPSHOT = {
     "BTC-USD": "Bitcoin"
 }
 
-
-# ==================== GLOBAL INDICES ====================
-
+# All global indices
 GLOBAL_INDICES = {
     "^GSPC": "S&P 500",
     "^IXIC": "NASDAQ",
@@ -71,9 +54,7 @@ GLOBAL_INDICES = {
     "^KS11": "KOSPI"
 }
 
-
-# ==================== CURRENCIES ====================
-
+# Currency pairs
 CURRENCIES = {
     "EURUSD=X": "EUR/USD",
     "GBPUSD=X": "GBP/USD",
@@ -84,9 +65,7 @@ CURRENCIES = {
     "USDCAD=X": "USD/CAD"
 }
 
-
-# ==================== COMMODITIES ====================
-
+# Commodities
 COMMODITIES = {
     "GC=F": "Gold",
     "SI=F": "Silver",
@@ -95,34 +74,82 @@ COMMODITIES = {
     "ZNC=F": "Zinc"
 }
 
-
-# ==================== CRYPTO ====================
-
+# Cryptocurrencies
 CRYPTO = {
     "BTC-USD": "Bitcoin",
     "ETH-USD": "Ethereum"
 }
 
-
-# ==================== BOND MARKETS ====================
-
+# Bond markets
 BOND_MARKETS = {
     "^TNX": "US 10Y Yield",
     "^IRX": "US 3M Yield"
 }
 
 
+# ==================== MACRO RISK DASHBOARD ====================
+
+MACRO_SYMBOLS = {
+    "^DJI": "Dow Jones",
+    "^IXIC": "Nasdaq",
+    "^NSEI": "NIFTY 50",
+    "^NSEBANK": "Bank NIFTY",
+    "DX-Y.NYB": "Dollar Index",
+    "USDINR=X": "USD/INR",
+    "^TNX": "US 10Y Yield",
+    "GC=F": "Gold",
+    "CL=F": "Crude Oil",
+    "BTC-USD": "Bitcoin"
+}
+
+MACRO_WEIGHTS = {
+    "^DJI": 2,
+    "^IXIC": 2,
+    "^NSEI": 2,
+    "^NSEBANK": 1,
+    "DX-Y.NYB": 2,
+    "^TNX": 2,
+    "CL=F": 1,
+    "GC=F": 1,
+    "BTC-USD": 1,
+    "USDINR=X": 1
+}
+
+MACRO_THRESHOLDS = {
+    "equity": 0.5,
+    "dxy": 0.5,
+    "yield": 0.5,
+    "crude": 0.5,
+    "gold": 0.7,
+    "vix": 2.0
+}
+
+
+# ==================== LEADING INDICATORS ====================
+
+LEADING_SYMBOLS = {
+    "HG=F": "Copper",
+    "GC=F": "Gold",
+    "HYG": "High Yield Bonds (HYG)",
+    "LQD": "Investment Grade Bonds (LQD)",
+    "^TNX": "US 10Y Yield",
+    "^IRX": "US 3M Yield",
+    "^NSEI": "NIFTY 50",
+    "DX-Y.NYB": "Dollar Index"
+}
+
+
 # ==================== FRED SERIES (LIQUIDITY DASHBOARD) ====================
 
 FRED_SERIES = {
-    "M2SL": "US M2 Money Supply",
-    "WALCL": "Fed Balance Sheet",
-    "RRPONTSYD": "Reverse Repo",
-    "DGS10": "US 10Y Treasury Yield",
-    "SOFR": "SOFR Rate",
-    "IORB": "Interest on Reserve Balances (IORB)",
-    "DFF": "Effective Fed Funds Rate",
-    "WTREGEN": "Treasury General Account (TGA)"
+    "Fed Balance Sheet": "WALCL",
+    "Reverse Repo": "RRPONTSYD",
+    "Treasury General Account (TGA)": "WTREGEN",
+    "US M2 Money Supply": "M2SL",
+    "US 10Y Treasury Yield": "DGS10",
+    "SOFR Rate": "SOFR",
+    "Interest on Reserve Balances (IORB)": "IORB",
+    "Effective Fed Funds Rate": "DFF"
 }
 
 
@@ -147,18 +174,6 @@ SWING_SCORE_WEIGHTS = {
     "trend": 2
 }
 
-# ==================== MACRO THRESHOLDS ====================
-
-MACRO_THRESHOLDS = {
-    "equity": 0.5,
-    "dxy": 0.5,
-    "yield": 0.5,
-    "crude": 0.5,
-    "gold": 0.7,
-    "vix": 2.0
-}
-
-
 
 # ==================== CHART SETTINGS ====================
 
@@ -170,11 +185,13 @@ CHART_PERIODS = {
 }
 
 DEFAULT_CHART_PERIOD = '3mo'
+DEFAULT_PERIOD = "3mo"
+DEFAULT_SHORT_PERIOD = "1mo"
 
 
 # ==================== DATA REFRESH ====================
 
-CACHE_TTL = 300
+CACHE_TTL = 300  # 5 minutes
 
 
 # ==================== PATH SETTINGS ====================
@@ -184,13 +201,23 @@ NOTES_PATH = './notes/'
 LOG_PATH = './logs/'
 
 
-# ==================== TRADING RULES ====================
+# ==================== VALIDATION ====================
 
-TRADING_RULES = """
-My Trading Rules:
-1. Never risk more than 2% per trade
-2. Always use stop losses
-3. Cut losses quickly, let profits run
-4. Avoid trading on major news days
-5. Review trades weekly
-"""
+def validate_config():
+    """Validate configuration on import"""
+    issues = []
+
+    # Check for broken symbols
+    if 'NIFTYMID50.NS' in str(MAIN_INDICES):
+        issues.append("⚠️  Broken Midcap symbol still in config")
+
+    if issues:
+        print("\n".join(issues))
+        return False
+
+    print("✅ Main config validated")
+    return True
+
+
+# Auto-validate on import
+validate_config()

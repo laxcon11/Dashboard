@@ -1,4 +1,5 @@
 import streamlit as st
+st.sidebar.success("Select a dashboard above")
 
 st.set_page_config(
     page_title="Trading Dashboard Suite",
@@ -13,30 +14,55 @@ Welcome to your integrated trading dashboard.
 
 ## 🎯 Quick Start Guide
 
-### 1️⃣ Global Macro Dashboard
+### 1️⃣ Global Markets
 Start here to understand overall market sentiment:
 - Global indices (S&P 500, NASDAQ, etc.)
 - Currency markets
 - Commodities (Oil, Gold)
 - Bond yields
+- Crypto
 
-**Use case**: Identify risk-on vs risk-off environment
+**Use case**: Identify global risk-on vs risk-off environment
 
 ---
 
-### 2️⃣ Liquidity & Money Supply
+### 2️⃣ Money Supply & Liquidity
 Check monetary conditions:
 - Fed balance sheet
 - Reverse repo operations  
 - Money supply (M2)
 - Interest rates
 
-**Use case**: Understand if liquidity supports rally
+**Use case**: Understand if liquidity supports rallies
 
 ---
 
-### 3️⃣ NSE Swing Trading ⭐
-Your main trading dashboard:
+### 3️⃣ Macro Risk Dashboard
+A fast snapshot of daily market risk:
+- Equity momentum
+- Dollar and yields
+- Commodities
+- Liquidity score
+- Risk regime classification
+
+**Use case**: Daily directional bias
+
+---
+
+### 4️⃣ Leading Indicators Dashboard
+Forward-looking market signals:
+- Yield curve
+- Copper/Gold ratio
+- Credit spreads
+- Dollar trend
+- Market impulse gauge
+
+**Use case**: Detect turning points early
+
+---
+
+### 5️⃣ NSE Dashboard ⭐
+Your trading dashboard:
 - Indian stock watchlist from `config.py`
 - Gap scanner
 - Breakout detection
@@ -50,13 +76,28 @@ Your main trading dashboard:
 ## 🔧 Configuration
 
 All settings in **`config.py`**:
-- `WATCHLIST` - Your NSE stocks (edit here!)
+- `NSE_WATCHLIST` - NSE trading universe
 - `GLOBAL_INDICES` - Markets to track
+- `MACRO_SYMBOLS` - Macro dashboard indicators
+- `LEADING_SYMBOLS` - Leading indicators
 - `FRED_API_KEY` - For liquidity data
+
+## 🗂 Dashboard Structure
+
+Pages:
+- 0_NSE_Dashboard.py
+- 1_Global_Markets.py
+- 2_Money_Supply.py
+- 3_Macro_Risk.py
+- 4_Leading_Indicators.py
+
+Shared modules:
+- config.py → settings
+- data_fetch.py → APIs and caching
 
 **To add stocks:**
 1. Open `config.py`
-2. Add to `WATCHLIST` list (format: `'SYMBOL.NS'`)
+2. Add to `NSE_WATCHLIST` list (format: `'SYMBOL.NS'`)
 3. Refresh dashboard
 
 ---
@@ -95,7 +136,8 @@ with col3:
     st.info("📚 **Pro Tip**\n\nUse Swing Rankings to find best setups")
 
 st.markdown("---")
-st.caption("Trading Dashboard Suite v3.0 | Integrated multi-market analysis")
-st.caption("Version 1.0 | Updated Feb 2026")
+st.caption("Trading Dashboard Suite | Feb 2026 Build")
+
+
 
 
