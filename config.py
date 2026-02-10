@@ -22,7 +22,8 @@ if not FRED_API_KEY:
 MAIN_INDICES = {
     '^NSEI': 'NIFTY 50',
     '^NSEBANK': 'BANK NIFTY',
-    #'^CNXMIDCAP': 'NIFTY MIDCAP',
+    '^CRSMID': 'NIFTY MIDCAP',
+    '^CNXSC': 'NIFTY SMALLCAP',
     '^CNXIT': 'NIFTY IT'
 }
 
