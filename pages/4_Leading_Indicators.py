@@ -1,54 +1,113 @@
+"""
+Leading Indicators Dashboard - ENHANCED VERSION
+Fixes: US Treasury Yield signal
+Improvements: Modern UI, better layout, visual indicators
+"""
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from data_fetch import (
     batch_download,
     fetch_fred_series,
     prepare_timeseries_for_chart
 )
-from config import FRED_API_KEY  # ✅ FIXED: Import from config
+from config import FRED_API_KEY
 
-st.set_page_config(layout="wide")
-st.title("📊 Leading Indicators Dashboard")
-
-st.divider()
-
-st.caption(
-    "Early signals of market direction based on liquidity, yields, "
-    "currency strength and risk assets."
+# ==================== PAGE CONFIG ====================
+st.set_page_config(
+    page_title="Leading Indicators",
+    page_icon="📊",
+    layout="wide"
 )
+
+# ==================== CUSTOM CSS ====================
+st.markdown("""
+<style>
+    /* Main title styling */
+    .main-title {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #1f77b4;
+        margin-bottom: 0.5rem;
+    }
+
+    /* Signal cards */
+    .signal-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 10px;
+        color: white;
+        margin: 0.5rem 0;
+    }
+
+    .signal-card-positive {
+        background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
+    }
+
+    .signal-card-negative {
+        background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+    }
+
+    .signal-card-neutral {
+        background: linear-gradient(135deg, #f2994a 0%, #f2c94c 100%);
+    }
+
+    /* Metric cards */
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #1f77b4;
+        margin: 0.5rem 0;
+    }
+
+    /* Section headers */
+    .section-header {
+        color: #2c3e50;
+        font-size: 1.5rem;
+        font-weight: 600;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+        border-bottom: 2px solid #3498db;
+        padding-bottom: 0.5rem;
+    }
+
+    /* Info boxes */
+    .info-box {
+        background-color: #e3f2fd;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #2196f3;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ==================== TITLE ====================
+st.markdown('<h1 class="main-title">📊 Leading Indicators Dashboard</h1>', unsafe_allow_html=True)
+st.markdown("**Early signals of market direction** • Liquidity • Yields • Currency • Risk Assets")
+st.markdown("---")
+
+# ==================== SIGNAL EXPLANATIONS ====================
 SIGNAL_EXPLANATIONS = {
-    "Copper/Gold Positive":
-        "Copper outperforming Gold → Growth expectations rising, risk appetite improving.",
-    "Copper/Gold Defensive":
-        "Gold outperforming Copper → Markets turning defensive, growth concerns rising.",
-
-    "Credit Risk On":
-        "High yield bonds outperforming → Investors comfortable taking risk.",
-    "Credit Risk Off":
-        "Investment grade outperforming → Credit stress rising, risk appetite falling.",
-
-    "Yield Curve Positive":
-        "Normal yield curve → Growth supportive environment.",
-    "Yield Curve Inverted":
-        "Inverted curve → Historically precedes recessions and equity volatility.",
-
-    "Dollar Rising":
-        "Stronger dollar tightens global liquidity and pressures risk assets.",
-    "Dollar Stable":
-        "Stable or weakening dollar supports equities and commodities.",
-
-    "Equities Strong":
-        "Markets trading above trend → Positive momentum environment.",
-    "Equities Weak":
-        "Markets below trend → Weak momentum or consolidation phase."
+    "Copper/Gold Positive": "🟢 Copper outperforming Gold → Growth expectations rising, risk appetite improving",
+    "Copper/Gold Defensive": "🔴 Gold outperforming Copper → Markets turning defensive, growth concerns rising",
+    "Credit Risk On": "🟢 High yield bonds outperforming → Investors comfortable taking risk",
+    "Credit Risk Off": "🔴 Investment grade outperforming → Credit stress rising, risk appetite falling",
+    "Yield Curve Positive": "🟢 Normal yield curve → Growth supportive environment",
+    "Yield Curve Inverted": "🔴 Inverted curve → Historically precedes recessions",
+    "Dollar Rising": "🔴 Stronger dollar tightens global liquidity and pressures risk assets",
+    "Dollar Stable": "🟢 Stable/weakening dollar supports equities and commodities",
+    "Yields Rising": "🔴 Rising yields tighten financial conditions",
+    "Yields Stable": "🟢 Stable/falling yields support risk assets",
+    "Equities Strong": "🟢 Markets trading above trend → Positive momentum",
+    "Equities Weak": "🔴 Markets below trend → Weak momentum"
 }
 
-# ================= CONFIG =================
-
-# FRED_API_KEY now imported from config.py
-
+# ==================== CONFIG ====================
 MARKET_SYMBOLS = {
     "^IXIC": "NASDAQ",
     "^NSEI": "NIFTY 50",
@@ -68,101 +127,67 @@ FRED_SERIES = {
 LEADING_SYMBOLS = {
     "HG=F": "Copper",
     "GC=F": "Gold",
-    "HYG": "High Yield Bonds (HYG)",
-    "LQD": "Investment Grade Bonds (LQD)",
+    "HYG": "High Yield Bonds",
+    "LQD": "Investment Grade Bonds",
     "^TNX": "US 10Y Yield",
     "^IRX": "US 3M Yield",
     "^NSEI": "NIFTY 50",
     "DX-Y.NYB": "Dollar Index"
 }
 
-# ================= FETCH DATA =================
-
+# ==================== FETCH DATA ====================
 ALL_SYMBOLS = list(set(MARKET_SYMBOLS.keys()) | set(LEADING_SYMBOLS.keys()))
 
-with st.spinner("Fetching market data..."):
+with st.spinner("📡 Fetching market data..."):
     all_data = batch_download(ALL_SYMBOLS, period="6mo")
 
 market_data = {k: all_data.get(k) for k in MARKET_SYMBOLS}
 data = {k: all_data.get(k) for k in LEADING_SYMBOLS}
 
-
-# ✅ FIXED: Check if critical symbols loaded
+# Check critical symbols
 missing_symbols = []
-for symbol in ["HYG", "LQD"]:
-    if symbol not in data or data[symbol] is None or len(data.get(symbol, [])) == 0:
+for symbol in ["HYG", "LQD", "^TNX", "^IRX"]:
+    if symbol not in all_data or all_data[symbol] is None or len(all_data.get(symbol, [])) == 0:
         missing_symbols.append(symbol)
 
 if missing_symbols:
-    st.error(f"⚠️ Critical symbols not loaded: {', '.join(missing_symbols)}")
-    st.info("💡 **Troubleshooting**:\n"
-            "1. Check if data_fetch.py validates plain tickers (HYG, LQD)\n"
-            "2. Verify symbols are valid on Yahoo Finance\n"
-            "3. Check internet connection")
+    st.error(f"⚠️ Missing data: {', '.join(missing_symbols)}")
 
+# Fetch liquidity data
 liquidity_data = {}
-
 if FRED_API_KEY:
-    with st.spinner("Fetching liquidity data..."):
+    with st.spinner("💰 Fetching liquidity data..."):
         for name, series in FRED_SERIES.items():
             liquidity_data[name] = fetch_fred_series(series, FRED_API_KEY, days=90)
-else:
-    st.warning("⚠️ FRED API key not found in config.py. Liquidity indicators disabled.")
-    st.info("Liquidity indicators require a FRED API key.")
-
-# ✅ FIXED: Better debug output
-with st.expander("🔍 Data Loading Debug", expanded=False):
-    st.write("**Symbol Loading Status:**")
-    for symbol, name in LEADING_SYMBOLS.items():
-        df = data.get(symbol)
-        if df is not None and len(df) > 0:
-            st.write(f"✅ {name:30s}: {len(df)} rows")
-        else:
-            st.write(f"❌ {name:30s}: No data")
-
-    # Specific debug for credit spread
-    st.markdown("---")
-    st.write("**Credit Spread Debug:**")
-    hyg = data.get("HYG")
-    lqd = data.get("LQD")
-    if hyg is not None and "Close" in hyg.columns:
-        st.write(f"HYG: {len(hyg)} rows, latest close: ${hyg['Close'].iloc[-1]:.2f}")
-    else:
-        st.write("HYG: ❌ Not loaded or missing Close column")
-
-    if lqd is not None and "Close" in lqd.columns:
-        st.write(f"LQD: {len(lqd)} rows, latest close: ${lqd['Close'].iloc[-1]:.2f}")
-    else:
-        st.write("LQD: ❌ Not loaded Not loaded or missing Close column")
 
 
-# ================= HELPER FUNCTIONS =================
+# ==================== HELPER FUNCTIONS ====================
 
 def get_last_valid_close(df):
+    """Safely get last close price"""
     if df is None or "Close" not in df.columns:
         return None
     series = df["Close"].dropna()
-    return series.iloc[-1] if len(series) else None
+    return series.iloc[-1] if len(series) > 0 else None
 
 
 def copper_gold_signal(data):
+    """Calculate Copper/Gold ratio signal"""
     copper = data.get("HG=F")
     gold = data.get("GC=F")
 
     if copper is None or gold is None:
-        return None, None
-
+        return None, None, "No Data"
     if "Close" not in copper.columns or "Close" not in gold.columns:
-        return None, None
+        return None, None, "No Data"
 
-    df = pd.concat(
-        [copper["Close"].rename("copper"),
-         gold["Close"].rename("gold")],
-        axis=1
-    ).ffill().dropna()
+    df = pd.concat([
+        copper["Close"].rename("copper"),
+        gold["Close"].rename("gold")
+    ], axis=1).ffill().dropna()
 
     if len(df) < 15:
-        return None, None
+        return None, None, "Insufficient Data"
 
     ratio = df["copper"] / df["gold"]
     ma = ratio.rolling(10).mean()
@@ -171,38 +196,34 @@ def copper_gold_signal(data):
     latest_ma = ma.iloc[-1]
 
     score = 1 if latest_ratio > latest_ma else -1
-    return latest_ratio, score
+    signal = "Copper/Gold Positive" if score == 1 else "Copper/Gold Defensive"
+
+    return latest_ratio, score, signal
 
 
 def credit_spread_signal(data):
+    """Calculate HYG/LQD credit spread signal"""
     hyg = data.get("HYG")
     lqd = data.get("LQD")
 
     if hyg is None or lqd is None:
-        return None, None
-
+        return None, None, "No Data"
     if "Close" not in hyg.columns or "Close" not in lqd.columns:
-        return None, None
+        return None, None, "No Data"
 
-    # Align dates safely
-    df = pd.concat(
-        [hyg["Close"].rename("hyg"), lqd["Close"].rename("lqd")],
-        axis=1
-    )
-
-    # Forward fill gaps and drop rows where both missing
-    df = df.ffill().dropna()
+    df = pd.concat([
+        hyg["Close"].rename("hyg"),
+        lqd["Close"].rename("lqd")
+    ], axis=1).ffill().dropna()
 
     if len(df) < 15:
-        return None, None
+        return None, None, "Insufficient Data"
 
     ratio = df["hyg"] / df["lqd"]
-
-    # Remove inf or bad values
     ratio = ratio.replace([float("inf"), -float("inf")], pd.NA).dropna()
 
     if len(ratio) < 10:
-        return None, None
+        return None, None, "Insufficient Data"
 
     ma = ratio.rolling(10).mean()
 
@@ -210,280 +231,463 @@ def credit_spread_signal(data):
     latest_ma = ma.iloc[-1]
 
     score = 1 if latest_ratio > latest_ma else -1
+    signal = "Credit Risk On" if score == 1 else "Credit Risk Off"
 
-    return latest_ratio, score
+    return latest_ratio, score, signal
+
 
 def dollar_trend_signal(market_data):
+    """Calculate Dollar Index trend signal"""
     dxy = market_data.get("DX-Y.NYB")
 
     if dxy is None or len(dxy) < 10:
-        return None, None
+        return None, None, "No Data"
 
     latest = dxy["Close"].iloc[-1]
     ma = dxy["Close"].rolling(10).mean().iloc[-1]
 
     score = -1 if latest > ma else 1  # Rising dollar = risk off
-    return latest, score
+    signal = "Dollar Rising" if score == -1 else "Dollar Stable"
+
+    return latest, score, signal
 
 
 def yield_trend_signal(market_data):
+    """Calculate 10Y Yield trend signal - FIXED"""
     y10 = market_data.get("^TNX")
 
     if y10 is None or len(y10) < 10:
-        return None, None
+        return None, None, "No Data"
 
-    latest = y10["Close"].iloc[-1]
-    ma = y10["Close"].rolling(10).mean().iloc[-1]
+    if "Close" not in y10.columns:
+        return None, None, "No Close Data"
 
-    score = -1 if latest > ma else 1  # Rising yields tighten conditions
-    return latest, score
+    # Get clean series
+    close_series = y10["Close"].dropna()
 
-# ================= YIELD CURVE =================
+    if len(close_series) < 10:
+        return None, None, "Insufficient Data"
 
-st.subheader("Yield Curve Signal")
+    latest = close_series.iloc[-1]
+    ma = close_series.rolling(10).mean().iloc[-1]
 
+    score = -1 if latest > ma else 1  # Rising yields = tightening
+    signal = "Yields Rising" if score == -1 else "Yields Stable"
+
+    return latest, score, signal
+
+
+# ==================== DASHBOARD LAYOUT ====================
+
+# Top Summary Cards
+st.markdown('<div class="section-header">🎯 Quick Market Signals</div>', unsafe_allow_html=True)
+
+# Calculate all signals
+ratio_cg, cg_score, cg_signal = copper_gold_signal(data)
+ratio_credit, credit_score, credit_signal = credit_spread_signal(data)
+dxy_value, dxy_score, dxy_signal = dollar_trend_signal(market_data)
+yield_value, yield_score, yield_signal = yield_trend_signal(market_data)
+
+# Get yield curve
 yield_10y = market_data.get("^TNX")
 yield_3m = market_data.get("^IRX")
-
 y10 = get_last_valid_close(yield_10y)
 y3m = get_last_valid_close(yield_3m)
 
-if y10 is None or y3m is None:
-    st.warning("Yield data unavailable.")
-else:
+curve_signal = None
+if y10 is not None and y3m is not None:
     curve = y10 - y3m
-    if curve > 0:
-        st.success(f"Yield Curve Normal (+{curve:.2f})")
-        st.caption(SIGNAL_EXPLANATIONS["Yield Curve Positive"])
-    else:
-        st.error(f"Yield Curve Inverted ({curve:.2f})")
-        st.caption(SIGNAL_EXPLANATIONS["Yield Curve Inverted"])
+    curve_signal = "Yield Curve Positive" if curve > 0 else "Yield Curve Inverted"
 
-# ================= MACRO RISK SIGNALS =================
-
-st.subheader("Macro Risk Signals")
-
-ratio_cg, cg_score = copper_gold_signal(data)
-ratio_credit, credit_score = credit_spread_signal(data)
-dxy_value, dxy_score = dollar_trend_signal(market_data)
-yield_value, yield_score = yield_trend_signal(market_data)
-
-col1, col2 = st.columns(2)
-col3, col4 = st.columns(2)
+# Display signal cards
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    if ratio_cg is not None:
-        label = "Copper/Gold Positive" if cg_score == 1 else "Copper/Gold Defensive"
-        st.metric("Copper / Gold Ratio", f"{ratio_cg:.4f}")
-        st.caption(SIGNAL_EXPLANATIONS[label])
+    if curve_signal:
+        card_class = "signal-card-positive" if "Positive" in curve_signal else "signal-card-negative"
+        st.markdown(f'''
+        <div class="signal-card {card_class}">
+            <h3>📈 Yield Curve</h3>
+            <h2>{y10:.2f}% - {y3m:.2f}% = {curve:.2f}%</h2>
+            <p>{SIGNAL_EXPLANATIONS.get(curve_signal, "")}</p>
+        </div>
+        ''', unsafe_allow_html=True)
 
 with col2:
-    if ratio_credit is not None:
-        label = "Credit Risk On" if credit_score == 1 else "Credit Risk Off"
-        st.metric("HYG / LQD Ratio", f"{ratio_credit:.3f}")
-        st.caption(SIGNAL_EXPLANATIONS[label])
+    if credit_signal != "No Data":
+        card_class = "signal-card-positive" if credit_score == 1 else "signal-card-negative"
+        st.markdown(f'''
+        <div class="signal-card {card_class}">
+            <h3>💰 Credit Spread</h3>
+            <h2>{ratio_credit:.3f}</h2>
+            <p>{SIGNAL_EXPLANATIONS.get(credit_signal, "")}</p>
+        </div>
+        ''', unsafe_allow_html=True)
 
 with col3:
+    if dxy_signal != "No Data":
+        card_class = "signal-card-negative" if dxy_score == -1 else "signal-card-positive"
+        st.markdown(f'''
+        <div class="signal-card {card_class}">
+            <h3>💵 Dollar Trend</h3>
+            <h2>{dxy_value:.2f}</h2>
+            <p>{SIGNAL_EXPLANATIONS.get(dxy_signal, "")}</p>
+        </div>
+        ''', unsafe_allow_html=True)
+
+st.markdown("---")
+
+# ==================== DETAILED SIGNALS ====================
+st.markdown('<div class="section-header">📊 Detailed Market Signals</div>', unsafe_allow_html=True)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    # Copper/Gold Ratio
+    if ratio_cg is not None:
+        emoji = "🟢" if cg_score == 1 else "🔴"
+        st.markdown(f"### {emoji} Copper / Gold Ratio")
+        st.metric("Current Ratio", f"{ratio_cg:.4f}")
+        st.caption(SIGNAL_EXPLANATIONS.get(cg_signal, ""))
+    else:
+        st.warning("⚠️ Copper/Gold data unavailable")
+
+    # Dollar Index
     if dxy_value is not None:
-        label = "Dollar Rising" if dxy_score == -1 else "Dollar Stable"
-        st.metric("Dollar Index", f"{dxy_value:.2f}")
-        st.caption(SIGNAL_EXPLANATIONS[label])
+        emoji = "🟢" if dxy_score == 1 else "🔴"
+        st.markdown(f"### {emoji} Dollar Index Trend")
+        st.metric("DXY", f"{dxy_value:.2f}")
+        st.caption(SIGNAL_EXPLANATIONS.get(dxy_signal, ""))
+    else:
+        st.warning("⚠️ Dollar Index data unavailable")
 
-with col4:
+with col2:
+    # Credit Spread
+    if ratio_credit is not None:
+        emoji = "🟢" if credit_score == 1 else "🔴"
+        st.markdown(f"### {emoji} Credit Spread (HYG/LQD)")
+        st.metric("Ratio", f"{ratio_credit:.3f}")
+        st.caption(SIGNAL_EXPLANATIONS.get(credit_signal, ""))
+    else:
+        st.warning("⚠️ Credit spread data unavailable")
+
+    # Treasury Yield - FIXED
     if yield_value is not None:
-        trend = "Rising Yields (Tightening)" if yield_score == -1 else "Stable/Falling Yields"
-        st.metric("US 10Y Yield", f"{yield_value:.2f}")
-        st.caption("Rising yields tighten financial conditions and pressure equities.")
+        emoji = "🟢" if yield_score == 1 else "🔴"
+        st.markdown(f"### {emoji} US 10Y Treasury Yield")
+        st.metric("Yield", f"{yield_value:.2f}%")
+        st.caption(SIGNAL_EXPLANATIONS.get(yield_signal, ""))
+    else:
+        st.warning("⚠️ Treasury yield data unavailable")
 
+st.markdown("---")
 
-# ================= LIQUIDITY TREND =================
-
-st.subheader("Liquidity Trend")
-
-liquidity_shown = False
-
-for name, df in liquidity_data.items():
-    if df is not None and len(df) > 0 and {"date", "value"}.issubset(df.columns):
-        liquidity_shown = True
-        with st.expander(name):
-            st.line_chart(df.set_index("date")["value"])
-
-if not liquidity_shown:
-    st.caption("No liquidity data available.")
-
-
-# ================= MARKET LEADING INDICATORS =================
-
-st.subheader("Market Leading Indicators")
-
-for symbol, label in MARKET_SYMBOLS.items():
-    df = market_data.get(symbol)
-    if df is not None and len(df) > 0:
-        df_chart = prepare_timeseries_for_chart(df)
-        with st.expander(label):
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=df_chart.index,
-                y=df_chart["Close"],
-                mode="lines",
-                name=label
-            ))
-            fig.update_layout(height=300)
-            st.plotly_chart(fig, use_container_width=True)
-
-st.subheader("Commodity & Credit Trends")
-
-for symbol in ["HG=F", "GC=F", "HYG", "LQD"]:
-    df = data.get(symbol)
-
-    if df is not None and len(df) > 5 and "Close" in df.columns:
-        df_chart = prepare_timeseries_for_chart(df)
-
-        with st.expander(LEADING_SYMBOLS.get(symbol, symbol)):
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=df_chart.index,
-                y=df_chart["Close"],
-                mode="lines"
-            ))
-            fig.update_layout(height=300)
-            st.plotly_chart(fig, use_container_width=True)
-
-st.subheader("Macro Ratio Trends")
-
-# Copper / Gold Ratio Chart
-copper = data.get("HG=F")
-gold = data.get("GC=F")
-
-if copper is not None and gold is not None:
-    df_ratio = pd.concat(
-        [copper["Close"].rename("copper"), gold["Close"].rename("gold")],
-        axis=1
-    ).ffill().dropna()
-
-    df_ratio["ratio"] = df_ratio["copper"] / df_ratio["gold"]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df_ratio.index,
-        y=df_ratio["ratio"],
-        mode="lines",
-        name="Copper/Gold"
-    ))
-    fig.update_layout(height=300, title="Copper / Gold Ratio Trend")
-    st.plotly_chart(fig, use_container_width=True)
-
-# HYG / LQD Ratio Chart
-hyg = data.get("HYG")
-lqd = data.get("LQD")
-
-if hyg is not None and lqd is not None:
-    df_ratio = pd.concat(
-        [hyg["Close"].rename("hyg"), lqd["Close"].rename("lqd")],
-        axis=1
-    ).ffill().dropna()
-
-    df_ratio["ratio"] = df_ratio["hyg"] / df_ratio["lqd"]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df_ratio.index,
-        y=df_ratio["ratio"],
-        mode="lines",
-        name="HYG/LQD"
-    ))
-    fig.update_layout(height=300, title="HYG / LQD Credit Spread Trend")
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# ================= LEADING SIGNAL SUMMARY =================
-
-st.subheader("Leading Signal Summary")
-st.info(
-    "These signals help determine whether the market environment is "
-    "Risk ON, Neutral, or Risk OFF. "
-    "Credit, liquidity and macro indicators often lead equities."
-)
-
-signals = []
-
-if y10 is not None and y3m is not None:
-    signals.append("Yield Curve Positive" if (y10 - y3m) > 0 else "Yield Curve Inverted")
-
-dxy = market_data.get("DX-Y.NYB")
-if dxy is not None and len(dxy) > 5:
-    signals.append("Dollar Rising" if dxy["Close"].iloc[-1] > dxy["Close"].iloc[-5] else "Dollar Stable")
-
-nifty = market_data.get("^NSEI")
-if nifty is not None and len(nifty) > 20:
-    ma20 = nifty["Close"].rolling(20).mean().iloc[-1]
-    signals.append("Equities Strong" if nifty["Close"].iloc[-1] > ma20 else "Equities Weak")
-
-if cg_score is not None:
-    signals.append("Copper/Gold Positive" if cg_score == 1 else "Copper/Gold Defensive")
-
-if credit_score is not None:
-    signals.append("Credit Risk On" if credit_score == 1 else "Credit Risk Off")
-
-for s in signals:
-    st.markdown(f"**• {s}**")
-    explanation = SIGNAL_EXPLANATIONS.get(s)
-    if explanation:
-        st.caption(explanation)
-
-
-# ================= IMPULSE GAUGE =================
-
-st.subheader("Market Impulse Gauge")
+# ==================== MARKET IMPULSE GAUGE ====================
+st.markdown('<div class="section-header">🎯 Market Impulse Gauge</div>', unsafe_allow_html=True)
 
 impulse_score = 0
 factors = 0
+factor_details = []
 
+# Yield Curve
 if y10 is not None and y3m is not None:
-    impulse_score += 1 if (y10 - y3m) > 0 else -1
+    score = 1 if (y10 - y3m) > 0 else -1
+    impulse_score += score
     factors += 1
+    factor_details.append(f"Yield Curve: {'✅' if score == 1 else '❌'}")
 
-if dxy is not None and len(dxy) > 5:
-    impulse_score += -1 if dxy["Close"].iloc[-1] > dxy["Close"].iloc[-5] else 1
+# Dollar
+if dxy_score is not None:
+    impulse_score += dxy_score
     factors += 1
+    factor_details.append(f"Dollar: {'✅' if dxy_score == 1 else '❌'}")
 
+# Equities
+nifty = market_data.get("^NSEI")
 if nifty is not None and len(nifty) > 20:
     ma20 = nifty["Close"].rolling(20).mean().iloc[-1]
-    impulse_score += 1 if nifty["Close"].iloc[-1] > ma20 else -1
+    score = 1 if nifty["Close"].iloc[-1] > ma20 else -1
+    impulse_score += score
     factors += 1
+    factor_details.append(f"Equities: {'✅' if score == 1 else '❌'}")
 
+# Liquidity
 fed = liquidity_data.get("Fed Balance Sheet")
 if fed is not None and len(fed) > 1:
-    impulse_score += 1 if fed["value"].iloc[-1] > fed["value"].iloc[-2] else -1
+    score = 1 if fed["value"].iloc[-1] > fed["value"].iloc[-2] else -1
+    impulse_score += score
     factors += 1
+    factor_details.append(f"Liquidity: {'✅' if score == 1 else '❌'}")
 
+# Copper/Gold
 if cg_score is not None:
     impulse_score += cg_score
     factors += 1
+    factor_details.append(f"Copper/Gold: {'✅' if cg_score == 1 else '❌'}")
 
+# Credit
 if credit_score is not None:
     impulse_score += credit_score
     factors += 1
+    factor_details.append(f"Credit: {'✅' if credit_score == 1 else '❌'}")
+
+# Yields - FIXED: Now included
+if yield_score is not None:
+    impulse_score += yield_score
+    factors += 1
+    factor_details.append(f"Yields: {'✅' if yield_score == 1 else '❌'}")
 
 normalized = impulse_score / factors if factors >= 3 else 0
 
-fig = go.Figure(go.Indicator(
-    mode="gauge+number",
-    value=normalized,
-    title={'text': "Market Impulse"},
-    gauge={
-        'axis': {'range': [-1, 1]},
-        'steps': [
-            {'range': [-1, -0.3], 'color': "red"},
-            {'range': [-0.3, 0.3], 'color': "orange"},
-            {'range': [0.3, 1], 'color': "green"},
-        ],
-    }
-))
+col1, col2 = st.columns([2, 1])
 
-st.plotly_chart(fig, use_container_width=True)
+with col1:
+    # Gauge chart
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=normalized,
+        title={'text': "Market Impulse Score", 'font': {'size': 24}},
+        delta={'reference': 0},
+        gauge={
+            'axis': {'range': [-1, 1], 'tickwidth': 1, 'tickcolor': "darkgray"},
+            'bar': {'color': "darkblue"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [-1, -0.3], 'color': '#ffcdd2'},
+                {'range': [-0.3, 0.3], 'color': '#fff9c4'},
+                {'range': [0.3, 1], 'color': '#c8e6c9'}
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 0
+            }
+        }
+    ))
 
-# ================= FOOTER =================
+    fig.update_layout(
+        height=300,
+        margin=dict(l=20, r=20, t=50, b=20)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    st.markdown("### Factor Breakdown")
+    st.markdown(f"**Analyzing {factors} factors:**")
+    for detail in factor_details:
+        st.markdown(f"• {detail}")
+
+    if normalized > 0.3:
+        st.success("🟢 **Risk ON** Environment")
+    elif normalized < -0.3:
+        st.error("🔴 **Risk OFF** Environment")
+    else:
+        st.warning("🟡 **Neutral** Environment")
 
 st.markdown("---")
-st.caption("Leading indicators help anticipate regime shifts before markets move.")
+
+# ==================== LIQUIDITY TRENDS ====================
+st.markdown('<div class="section-header">💰 Liquidity Trends</div>', unsafe_allow_html=True)
+
+if liquidity_data:
+    liquidity_shown = False
+
+    for name, df in liquidity_data.items():
+        if df is not None and len(df) > 0 and {"date", "value"}.issubset(df.columns):
+            liquidity_shown = True
+            with st.expander(f"📊 {name}", expanded=False):
+                # Get trend
+                if len(df) >= 2:
+                    trend = "📈 Rising" if df["value"].iloc[-1] > df["value"].iloc[-2] else "📉 Falling"
+                    latest = df["value"].iloc[-1]
+                    st.metric(name, f"${latest:,.0f}B" if latest > 1000 else f"${latest:.2f}", trend)
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=df["date"],
+                    y=df["value"],
+                    mode='lines',
+                    fill='tozeroy',
+                    line=dict(color='#1f77b4', width=2)
+                ))
+                fig.update_layout(
+                    height=250,
+                    margin=dict(l=0, r=0, t=20, b=0),
+                    showlegend=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    if not liquidity_shown:
+        st.info("💡 No liquidity data available. Add FRED_API_KEY to enable.")
+else:
+    st.info("💡 Liquidity indicators disabled. Add FRED_API_KEY to config.py to enable.")
+
+st.markdown("---")
+
+# ==================== RATIO TRENDS ====================
+st.markdown('<div class="section-header">📈 Key Ratio Trends</div>', unsafe_allow_html=True)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    # Copper/Gold Ratio
+    copper = data.get("HG=F")
+    gold = data.get("GC=F")
+
+    if copper is not None and gold is not None:
+        df_ratio = pd.concat([
+            copper["Close"].rename("copper"),
+            gold["Close"].rename("gold")
+        ], axis=1).ffill().dropna()
+
+        df_ratio["ratio"] = df_ratio["copper"] / df_ratio["gold"]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_ratio.index,
+            y=df_ratio["ratio"],
+            mode='lines',
+            fill='tozeroy',
+            line=dict(color='#ff7f0e', width=2),
+            name="Copper/Gold"
+        ))
+
+        # Add moving average
+        ma = df_ratio["ratio"].rolling(20).mean()
+        fig.add_trace(go.Scatter(
+            x=df_ratio.index,
+            y=ma,
+            mode='lines',
+            line=dict(color='red', width=2, dash='dash'),
+            name="20-day MA"
+        ))
+
+        fig.update_layout(
+            title="Copper / Gold Ratio (Growth Indicator)",
+            height=300,
+            hovermode='x unified'
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    # HYG/LQD Credit Spread
+    hyg = data.get("HYG")
+    lqd = data.get("LQD")
+
+    if hyg is not None and lqd is not None:
+        df_ratio = pd.concat([
+            hyg["Close"].rename("hyg"),
+            lqd["Close"].rename("lqd")
+        ], axis=1).ffill().dropna()
+
+        df_ratio["ratio"] = df_ratio["hyg"] / df_ratio["lqd"]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_ratio.index,
+            y=df_ratio["ratio"],
+            mode='lines',
+            fill='tozeroy',
+            line=dict(color='#2ca02c', width=2),
+            name="HYG/LQD"
+        ))
+
+        # Add moving average
+        ma = df_ratio["ratio"].rolling(20).mean()
+        fig.add_trace(go.Scatter(
+            x=df_ratio.index,
+            y=ma,
+            mode='lines',
+            line=dict(color='red', width=2, dash='dash'),
+            name="20-day MA"
+        ))
+
+        fig.update_layout(
+            title="HYG / LQD Credit Spread (Risk Appetite)",
+            height=300,
+            hovermode='x unified'
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("---")
+
+# ==================== MARKET INDICATORS ====================
+with st.expander("📊 View All Market Indicators", expanded=False):
+    for symbol, label in MARKET_SYMBOLS.items():
+        df = market_data.get(symbol)
+        if df is not None and len(df) > 0:
+            col1, col2 = st.columns([3, 1])
+
+            with col1:
+                df_chart = prepare_timeseries_for_chart(df)
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=df_chart.index,
+                    y=df_chart["Close"],
+                    mode='lines',
+                    fill='tozeroy',
+                    line=dict(width=2),
+                    name=label
+                ))
+
+                fig.update_layout(
+                    title=label,
+                    height=200,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    showlegend=False
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col2:
+                latest = df["Close"].iloc[-1]
+                prev = df["Close"].iloc[-2] if len(df) >= 2 else latest
+                change = ((latest - prev) / prev * 100) if prev != 0 else 0
+
+                st.metric(
+                    "Latest",
+                    f"{latest:.2f}",
+                    f"{change:+.2f}%"
+                )
+
+# ==================== SUMMARY ====================
+st.markdown('<div class="section-header">📝 Signal Summary</div>', unsafe_allow_html=True)
+
+all_signals = []
+if curve_signal:
+    all_signals.append(curve_signal)
+if dxy_signal != "No Data":
+    all_signals.append(dxy_signal)
+if yield_signal != "No Data":
+    all_signals.append(yield_signal)
+if cg_signal not in ["No Data", "Insufficient Data"]:
+    all_signals.append(cg_signal)
+if credit_signal not in ["No Data", "Insufficient Data"]:
+    all_signals.append(credit_signal)
+
+if nifty is not None and len(nifty) > 20:
+    ma20 = nifty["Close"].rolling(20).mean().iloc[-1]
+    signal = "Equities Strong" if nifty["Close"].iloc[-1] > ma20 else "Equities Weak"
+    all_signals.append(signal)
+
+if all_signals:
+    for signal in all_signals:
+        explanation = SIGNAL_EXPLANATIONS.get(signal, "")
+        emoji = "🟢" if any(x in signal for x in ["Positive", "Risk On", "Stable", "Strong"]) else "🔴"
+        st.markdown(f"**{emoji} {signal}**")
+        if explanation:
+            st.caption(explanation)
+else:
+    st.info("Insufficient data for signal generation")
+
+# ==================== FOOTER ====================
+st.markdown("---")
+st.caption("💡 **Tip**: Leading indicators help anticipate regime shifts before markets move")
+st.caption("Data: Yahoo Finance, FRED | Updated: Real-time with 15-20min delay")
+st.caption("✅ Enhanced: Fixed US Treasury Yield signal | Modern UI | Better visuals")
