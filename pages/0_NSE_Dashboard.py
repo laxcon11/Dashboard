@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import watchlist_manager as wm
 from datetime import datetime
 import numpy as np
 from pathlib import Path
@@ -40,8 +41,14 @@ from NSE_Config import (
 from data_fetch import batch_download, extract_price_data
 from indicators import calculate_rsi, calculate_ema, calculate_atr
 
+# Import analytics for centralized logic
+import analytics
+
 # Import utils for consistency
 from utils import (
+    setup_page,
+    display_price_metric,
+    display_market_breadth,
     format_price,
     format_change,
     create_line_chart,
@@ -63,170 +70,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== PAGE CONFIG ====================
-st.set_page_config(
-    page_title="NSE Swing Trading",
-    page_icon="📈",
-    layout="wide"
-)
+setup_page("Dashboard Launcher")
 
-st.title("📈 NSE Swing Trading Dashboard")
+st.title("🚀 NSE Dashboard Launcher")
 st.caption("Advanced swing trading analysis for Indian markets - NIFTY 200 Coverage")
 
-# ==================== HELPER FUNCTIONS ====================
-
-def detect_gap(df):
-    """Detect gap up/down"""
-    if df is None or len(df) < 2:
-        return 0, 0
-
-    try:
-        prev_close = df['Close'].iloc[-2]
-        current_open = df['Open'].iloc[-1]
-
-        if prev_close and current_open and prev_close != 0:
-            gap = current_open - prev_close
-            gap_pct = (gap / prev_close) * 100
-            return gap, gap_pct
-    except:
-        pass
-
-    return 0, 0
-
-
-def calculate_volume_ratio(df) -> float:
-    """Calculate volume ratio"""
-    if df is None or len(df) < 20:
-        return 0
-
-    try:
-        avg_vol = df['Volume'].tail(20).mean()
-        latest_vol = df['Volume'].iloc[-1]
-
-        if avg_vol == 0 or pd.isna(avg_vol):
-            return 0
-
-        return latest_vol / avg_vol
-    except:
-        return 0
-
-
-def calculate_vwap(df):
-    """Calculate VWAP (Volume Weighted Average Price)"""
-    if df is None or len(df) < 1:
-        return None
-
-    try:
-        # Typical price
-        typical_price = (df['High'] + df['Low'] + df['Close']) / 3
-
-        # VWAP = Cumulative(Typical Price * Volume) / Cumulative(Volume)
-        vwap = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
-
-        return vwap
-    except:
-        return None
-
-
-def detect_breakout(df, window: int = BREAKOUT_WINDOW) -> bool:
-    """Detect breakout"""
-    if df is None or len(df) < window + 1:
-        return False
-
-    try:
-        recent = df['High'].iloc[-(window+1):-1]
-        if len(recent) == 0:
-            return False
-        recent_high = recent.max()
-        current = df['Close'].iloc[-1]
-        return current > recent_high
-    except:
-        return False
-
-
-def calculate_relative_strength(symbol_df, index_df, period: int = 20) -> float:
-    """Calculate relative strength vs index"""
-    if symbol_df is None or index_df is None:
-        return 0
-
-    try:
-        if len(symbol_df) < period or len(index_df) < period:
-            return 0
-
-        stock_return = ((symbol_df['Close'].iloc[-1] / symbol_df['Close'].iloc[-period]) - 1) * 100
-        index_return = ((index_df['Close'].iloc[-1] / index_df['Close'].iloc[-period]) - 1) * 100
-
-        return stock_return - index_return
-    except:
-        return 0
-
-
-def calculate_swing_score(stock_data, index_data) -> int:
-    """Calculate comprehensive swing score (0-14 points)"""
-    if stock_data is None or len(stock_data) < 20:
-        return 0
-
-    score = 0
-
-    # 1. Gap analysis (0-2 points)
-    gap, gap_pct = detect_gap(stock_data)
-    if abs(gap_pct) > 2:
-        score += 2
-    elif abs(gap_pct) > 1:
-        score += 1
-
-    # 2. Volume surge (0-3 points)
-    vol_ratio = calculate_volume_ratio(stock_data)
-    if vol_ratio > 2:
-        score += 3
-    elif vol_ratio > 1.5:
-        score += 2
-    elif vol_ratio > 1.2:
-        score += 1
-
-    # 3. Relative strength (0-3 points)
-    rs = calculate_relative_strength(stock_data, index_data)
-    if rs > 5:
-        score += 3
-    elif rs > 2:
-        score += 2
-    elif rs > 0:
-        score += 1
-
-    # 4. Breakout (0-3 points)
-    if detect_breakout(stock_data):
-        score += 3
-
-    # 5. Trend alignment (0-3 points)
-    try:
-        if len(stock_data) >= 50:
-            ema20 = calculate_ema(stock_data, 20).iloc[-1]
-            ema50 = calculate_ema(stock_data, 50).iloc[-1]
-            current = stock_data['Close'].iloc[-1]
-
-            if current > ema20 > ema50:
-                score += 3
-            elif current > ema20:
-                score += 2
-            elif current > ema50:
-                score += 1
-    except:
-        pass
-
-    return score
-
-
-def calculate_support_resistance(df, period: int = 20):
-    """Calculate support and resistance levels"""
-    if df is None or len(df) < period:
-        return None, None
-
-    try:
-        recent = df.tail(period)
-        resistance = recent['High'].max()
-        support = recent['Low'].min()
-        return support, resistance
-    except:
-        return None, None
+# Helper functions have been moved to analytics.py
 
 
 # ==================== SIDEBAR - STOCK SELECTION ====================
@@ -241,13 +90,43 @@ selection_method = st.sidebar.radio(
 selected_stocks = []
 
 if selection_method == "Preset Watchlists":
-    preset = st.sidebar.selectbox(
-        "Choose Watchlist",
-        list(PRESET_WATCHLISTS.keys()),
-        help="Pre-configured watchlists"
-    )
-    selected_stocks = PRESET_WATCHLISTS[preset]
-    st.sidebar.success(f"✅ {len(selected_stocks)} stocks selected")
+    # Dynamic Watchlist Loading
+    watchlists = wm.load_watchlists()
+    watchlist_names = list(watchlists.keys())
+    
+    col1, col2 = st.sidebar.columns([3, 1])
+    with col1:
+        preset = st.selectbox(
+            "Choose Watchlist",
+            watchlist_names,
+            help="Select a saved watchlist"
+        )
+    with col2:
+        if st.button("🔄", help="Refresh Watchlists"):
+            st.rerun()
+
+    if preset:
+        selected_stocks = watchlists[preset]
+        st.sidebar.success(f"✅ {len(selected_stocks)} stocks loaded")
+        
+        # Watchlist Management Options
+        with st.sidebar.expander("📝 Manage Watchlist"):
+            new_name = st.text_input("New List Name")
+            if st.button("Save Current Selection as New List"):
+                if new_name and selected_stocks:
+                    wm.add_watchlist(new_name, selected_stocks)
+                    st.success(f"Saved '{new_name}'!")
+                    st.rerun()
+                else:
+                    st.error("Enter a name and ensure stocks are selected")
+            
+            if st.button("❌ Delete Current List"):
+                if preset in PRESET_WATCHLISTS:
+                    st.error("Cannot delete default system presets")
+                else:
+                    wm.delete_watchlist(preset)
+                    st.success(f"Deleted '{preset}'!")
+                    st.rerun()
 
 elif selection_method == "By Category":
     category = st.sidebar.selectbox(
@@ -281,6 +160,23 @@ mode = st.sidebar.radio(
     help="Different analysis modes"
 )
 
+st.sidebar.markdown("---")
+st.sidebar.header("⚓ VWAP Settings")
+vwap_period = st.sidebar.selectbox(
+    "VWAP Anchor",
+    ["Weekly (5 Days)", "Monthly (20 Days)", "Quarterly (60 Days)"],
+    index=0,
+    help="Calculate VWAP from the last N days"
+)
+
+# Map selection to days
+vwap_map = {
+    "Weekly (5 Days)": 5,
+    "Monthly (20 Days)": 20,
+    "Quarterly (60 Days)": 60
+}
+vwap_days = vwap_map[vwap_period]
+
 # ==================== FETCH DATA ====================
 if not selected_stocks:
     st.warning("⚠️ Please select at least one stock from the sidebar")
@@ -310,52 +206,53 @@ for col, (symbol, name) in zip(cols, MAIN_INDICES.items()):
         col.metric(name, "No Data")
 
 # ==================== SECTORAL VIEW - IMPROVED BAR CHART ====================
-st.subheader("📊 Sectoral Performance")
-st.caption("✅ Includes Banking & Capital Market sectors")
+if mode != "Swing Rankings":
+    st.subheader("📊 Sectoral Performance")
+    st.caption("✅ Includes Banking & Capital Market sectors")
 
-sector_performance = []
-for symbol, name in NSE_SECTOR_INDICES.items():
-    df = sector_data.get(symbol)
-    price, change, change_pct = get_live_price_safe(symbol, df)
+    sector_performance = []
+    for symbol, name in NSE_SECTOR_INDICES.items():
+        df = sector_data.get(symbol)
+        price, change, change_pct = get_live_price_safe(symbol, df)
 
-    if change_pct is not None:
-        sector_performance.append({
-            'Sector': name,
-            'Change %': change_pct
-        })
+        if change_pct is not None:
+            sector_performance.append({
+                'Sector': name,
+                'Change %': change_pct
+            })
 
-if sector_performance:
-    sector_df = pd.DataFrame(sector_performance).sort_values('Change %', ascending=False)
+    if sector_performance:
+        sector_df = pd.DataFrame(sector_performance).sort_values('Change %', ascending=False)
 
-    # IMPROVED: Better text positioning for readability
-    fig = go.Figure()
+        # IMPROVED: Better text positioning for readability
+        fig = go.Figure()
 
-    colors = ['green' if x > 0 else 'red' for x in sector_df['Change %']]
+        colors = ['green' if x > 0 else 'red' for x in sector_df['Change %']]
 
-    fig.add_trace(go.Bar(
-        x=sector_df['Sector'],
-        y=sector_df['Change %'],
-        marker_color=colors,
-        text=sector_df['Change %'].apply(lambda x: f"{x:.2f}%"),
-        textposition='auto',  # FIXED: Auto positioning for better readability
-        textangle=0,
-        hovertemplate='<b>%{x}</b><br>Change: %{y:.2f}%<extra></extra>'
-    ))
+        fig.add_trace(go.Bar(
+            x=sector_df['Sector'],
+            y=sector_df['Change %'],
+            marker_color=colors,
+            text=sector_df['Change %'].apply(lambda x: f"{x:.2f}%"),
+            textposition='auto',  # FIXED: Auto positioning for better readability
+            textangle=0,
+            hovertemplate='<b>%{x}</b><br>Change: %{y:.2f}%<extra></extra>'
+        ))
 
-    fig.update_layout(
-        title="Sector Performance (Sorted by Change %)",
-        xaxis_title="Sector",
-        yaxis_title="Change %",
-        height=400,
-        showlegend=False,
-        hovermode='x',
-        # Add more space for text labels
-        margin=dict(t=50, b=100)
-    )
+        fig.update_layout(
+            title="Sector Performance (Sorted by Change %)",
+            xaxis_title="Sector",
+            yaxis_title="Change %",
+            height=400,
+            showlegend=False,
+            hovermode='x',
+            # Add more space for text labels
+            margin=dict(t=50, b=100)
+        )
 
-    fig.update_xaxes(tickangle=-45)
+        fig.update_xaxes(tickangle=-45)
 
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
 # ==================== MODE-SPECIFIC DISPLAYS ====================
 
@@ -385,28 +282,8 @@ if mode == "Morning Review":
     total = advances + declines + unchanged
 
     if total > 0:
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            st.metric("Advances", advances, f"{(advances/total)*100:.1f}%")
-
-        with col2:
-            st.metric("Declines", declines, f"{(declines/total)*100:.1f}%")
-
-        with col3:
-            st.metric("Unchanged", unchanged, f"{(unchanged/total)*100:.1f}%")
-
-        with col4:
-            ad_ratio = advances / declines if declines > 0 else advances
-            st.metric("A/D Ratio", f"{ad_ratio:.2f}")
-
-        # Status indicator
-        if advances > declines * 1.5:
-            st.success("✅ Strong advancing day - Bullish sentiment")
-        elif declines > advances * 1.5:
-            st.error("⚠️ Strong declining day - Bearish sentiment")
-        else:
-            st.info("➡️ Mixed market - Neutral sentiment")
+       # Market Breadth Display
+        display_market_breadth(advances, declines, unchanged)
 
     st.markdown("---")
 
@@ -417,9 +294,9 @@ if mode == "Morning Review":
     for symbol in selected_stocks:
         df = watchlist_data.get(symbol)
         if df is not None and len(df) >= 2:
-            gap, gap_pct = detect_gap(df)
+            gap, gap_pct = analytics.detect_gap(df)
             if abs(gap_pct) > 0.5:
-                vol_ratio = calculate_volume_ratio(df)
+                vol_ratio = analytics.calculate_volume_ratio(df)
                 price, change, change_pct = extract_price_data(df)
 
                 stock_info = {
@@ -474,67 +351,112 @@ if mode == "Morning Review":
     if not gap_up_stocks and not gap_down_stocks:
         st.info("ℹ️ No significant gaps detected in selected stocks")
 
+    st.markdown("---")
+    st.subheader("🌀 Volatility Contraction (NR7)")
+    st.caption("Stocks with the narrowest range in 7 days - Watch for expansion/breakout")
+
+    nr7_stocks = []
+    
+    for symbol in selected_stocks:
+        df = watchlist_data.get(symbol)
+        if analytics.detect_nr7(df):
+            price, change, change_pct = get_live_price_safe(symbol, df)
+            vol_ratio = analytics.calculate_volume_ratio(df)
+            
+            nr7_stocks.append({
+                "Symbol": symbol.replace('.NS', ''),
+                "Price": price,
+                "Change %": change_pct,
+                "Vol Ratio": vol_ratio
+            })
+            
+    if nr7_stocks:
+        nr7_df = pd.DataFrame(nr7_stocks)
+        
+        # Format
+        nr7_df['Price'] = nr7_df['Price'].apply(lambda x: format_price(x) if x else 'N/A')
+        nr7_df['Change %'] = nr7_df['Change %'].apply(lambda x: format_change(x) if x else 'N/A')
+        nr7_df['Vol Ratio'] = nr7_df['Vol Ratio'].apply(lambda x: f"{x:.2f}x")
+        
+        st.dataframe(nr7_df, use_container_width=True, hide_index=True)
+        st.success(f"🔥 Found {len(nr7_stocks)} stocks coiling for a move!")
+    else:
+        st.info("No NR7 setups detected today.")
+
 elif mode == "End of Day":
     st.subheader("🌆 End of Day Review")
     st.caption(f"Analyzing {len(selected_stocks)} selected stocks")
 
-    # IMPROVEMENT 1: VWAP Analysis
+    # IMPROVEMENT 1: VWAP Analysis - Side by Side Tables
     st.markdown("### 📊 VWAP Analysis")
 
-    above_vwap = 0
-    below_vwap = 0
-    vwap_stocks = []
+    above_vwap_list = []
+    below_vwap_list = []
 
     for symbol in selected_stocks:
         df = watchlist_data.get(symbol)
         if df is not None and len(df) >= 1:
-            vwap = calculate_vwap(df)
+            # Calculate VWAP based on selected anchor
+            df_vwap = df.tail(vwap_days)
+            vwap = analytics.calculate_vwap(df_vwap)
             if vwap is not None:
                 current_price = df['Close'].iloc[-1]
                 vwap_value = vwap.iloc[-1]
+                
+                entry = {
+                    'Symbol': symbol.replace('.NS', ''),
+                    'Close': current_price,
+                    'VWAP': vwap_value
+                }
 
                 if current_price > vwap_value:
-                    above_vwap += 1
-                    vwap_stocks.append({
-                        'Symbol': symbol.replace('.NS', ''),
-                        'Close': current_price,
-                        'VWAP': vwap_value,
-                        'Position': 'Above VWAP'
-                    })
+                    above_vwap_list.append(entry)
                 else:
-                    below_vwap += 1
-                    vwap_stocks.append({
-                        'Symbol': symbol.replace('.NS', ''),
-                        'Close': current_price,
-                        'VWAP': vwap_value,
-                        'Position': 'Below VWAP'
-                    })
+                    below_vwap_list.append(entry)
 
+    # Calculate counts for metrics
+    above_count = len(above_vwap_list)
+    below_count = len(below_vwap_list)
+    total_vwap = above_count + below_count
+
+    # Metrics
     col1, col2, col3 = st.columns(3)
-
     with col1:
-        st.metric("Above VWAP", above_vwap, f"{(above_vwap/(above_vwap+below_vwap)*100):.1f}%" if (above_vwap+below_vwap) > 0 else "N/A")
-
+        st.metric("Above VWAP", above_count, f"{(above_count/total_vwap*100):.1f}%" if total_vwap > 0 else "N/A")
     with col2:
-        st.metric("Below VWAP", below_vwap, f"{(below_vwap/(above_vwap+below_vwap)*100):.1f}%" if (above_vwap+below_vwap) > 0 else "N/A")
-
+        st.metric("Below VWAP", below_count, f"{(below_count/total_vwap*100):.1f}%" if total_vwap > 0 else "N/A")
     with col3:
-        if above_vwap > below_vwap:
-            st.success("🟢 Bullish (More above VWAP)")
+        if above_count > below_count:
+            st.success("🟢 Bullish Bias")
         else:
-            st.error("🔴 Bearish (More below VWAP)")
+            st.error("🔴 Bearish Bias")
 
-    # VWAP table
-    if vwap_stocks:
-        with st.expander("📋 View VWAP Details"):
-            vwap_df = pd.DataFrame(vwap_stocks)
-            vwap_df['Close'] = vwap_df['Close'].apply(lambda x: f"₹{x:.2f}")
-            vwap_df['VWAP'] = vwap_df['VWAP'].apply(lambda x: f"₹{x:.2f}")
-            st.dataframe(vwap_df, use_container_width=True, hide_index=True)
+    # Side-by-Side Tables
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.markdown("#### 🟢 Above VWAP")
+        if above_vwap_list:
+            df_above = pd.DataFrame(above_vwap_list)
+            df_above['Close'] = df_above['Close'].apply(lambda x: f"₹{x:.2f}")
+            df_above['VWAP'] = df_above['VWAP'].apply(lambda x: f"₹{x:.2f}")
+            st.dataframe(df_above, use_container_width=True, hide_index=True)
+        else:
+            st.info("No stocks above VWAP")
+
+    with col_right:
+        st.markdown("#### 🔴 Below VWAP")
+        if below_vwap_list:
+            df_below = pd.DataFrame(below_vwap_list)
+            df_below['Close'] = df_below['Close'].apply(lambda x: f"₹{x:.2f}")
+            df_below['VWAP'] = df_below['VWAP'].apply(lambda x: f"₹{x:.2f}")
+            st.dataframe(df_below, use_container_width=True, hide_index=True)
+        else:
+            st.info("No stocks below VWAP")
 
     st.markdown("---")
 
-    # IMPROVEMENT 2: Advance/Decline
+    # IMPROVEMENT 2: Advance/Decline - Table + Pie Chart
     st.markdown("### 📊 Advance/Decline Analysis")
 
     advances = 0
@@ -556,29 +478,19 @@ elif mode == "End of Day":
     total = advances + declines + unchanged
 
     if total > 0:
-        col1, col2 = st.columns(2)
+        col_table, col_chart = st.columns([1, 1])
 
-        with col1:
-            # Pie chart for breadth
-            fig = go.Figure(data=[go.Pie(
-                labels=['Advances', 'Declines', 'Unchanged'],
-                values=[advances, declines, unchanged],
-                marker_colors=['green', 'red', 'gray'],
-                hole=0.4
-            )])
-
-            fig.update_layout(
-                title=f"Market Breadth ({total} stocks)",
-                height=300
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col2:
-            st.metric("Advances", advances, f"{(advances/total)*100:.1f}%")
-            st.metric("Declines", declines, f"{(declines/total)*100:.1f}%")
-            st.metric("Unchanged", unchanged, f"{(unchanged/total)*100:.1f}%")
-
+        with col_table:
+            st.markdown("#### Market Breadth Stats")
+            ad_data = [
+                {"Category": "Advances 🟢", "Count": advances, "Percent": f"{(advances/total)*100:.1f}%"},
+                {"Category": "Declines 🔴", "Count": declines, "Percent": f"{(declines/total)*100:.1f}%"},
+                {"Category": "Unchanged ⚪", "Count": unchanged, "Percent": f"{(unchanged/total)*100:.1f}%"}
+            ]
+            st.dataframe(pd.DataFrame(ad_data), use_container_width=True, hide_index=True)
+            
+            # Summary stats below table
+            st.markdown("#### Summary")
             ad_ratio = advances / declines if declines > 0 else advances
             st.metric("A/D Ratio", f"{ad_ratio:.2f}")
 
@@ -588,6 +500,17 @@ elif mode == "End of Day":
                 st.error("⚠️ Strong declining day")
             else:
                 st.info("➡️ Mixed market")
+
+        with col_chart:
+            # Pie chart
+            fig = go.Figure(data=[go.Pie(
+                labels=['Advances', 'Declines', 'Unchanged'],
+                values=[advances, declines, unchanged],
+                marker_colors=['green', 'red', 'gray'],
+                hole=0.4
+            )])
+            fig.update_layout(height=300, margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
@@ -657,11 +580,12 @@ elif mode == "Full Analysis":
     df = watchlist_data.get(symbol)
 
     if df is not None and len(df) > 20:
-        # Calculate VWAP
-        vwap = calculate_vwap(df)
+        # Calculate VWAP based on selected anchor
+        df_vwap = df.tail(vwap_days)
+        vwap = analytics.calculate_vwap(df_vwap)
 
         # Metrics row
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)  # Increased to 5 columns for VWAP
 
         price, change, change_pct = get_live_price_safe(symbol, df)
 
@@ -669,6 +593,10 @@ elif mode == "Full Analysis":
             st.metric("Current Price", format_price(price), format_change(change_pct))
 
         with col2:
+            vwap_val = vwap.iloc[-1] if vwap is not None else None
+            st.metric("VWAP", format_price(vwap_val) if vwap_val else "N/A")
+
+        with col3:
             try:
                 rsi = calculate_rsi(df, RSI_PERIOD).iloc[-1]
                 rsi_status = "Overbought" if rsi >= RSI_OVERBOUGHT else ("Oversold" if rsi <= RSI_OVERSOLD else "Neutral")
@@ -676,7 +604,7 @@ elif mode == "Full Analysis":
             except:
                 st.metric("RSI (14)", "N/A")
 
-        with col3:
+        with col4:
             try:
                 atr = calculate_atr(df, ATR_PERIOD).iloc[-1]
                 stop_loss = price - (atr * ATR_MULTIPLIER) if price and atr else None
@@ -684,13 +612,13 @@ elif mode == "Full Analysis":
             except:
                 st.metric("ATR Stop Loss", "N/A")
 
-        with col4:
-            vol_ratio = calculate_volume_ratio(df)
+        with col5:
+            vol_ratio = analytics.calculate_volume_ratio(df)
             vol_status = "High" if vol_ratio > 1.5 else ("Low" if vol_ratio < 0.8 else "Normal")
             st.metric("Volume", f"{vol_ratio:.2f}x", vol_status)
 
         # Support & Resistance
-        support, resistance = calculate_support_resistance(df, period=20)
+        support, resistance = analytics.calculate_support_resistance(df, period=20)
 
         if support and resistance:
             st.markdown("### 📊 Support & Resistance Levels (20-day)")
@@ -708,6 +636,44 @@ elif mode == "Full Analysis":
             with col3:
                 st.metric("Resistance", format_price(resistance),
                          f"{((resistance - price) / price * 100):.2f}% away" if price else "")
+
+        # Smart Trade Planner
+        st.markdown("---")
+        with st.expander("🛡️ Smart Trade Planner (Risk/Reward Calculator)", expanded=True):
+            avg_range = calculate_atr(df, 14).iloc[-1]
+            
+            p_col1, p_col2, p_col3 = st.columns(3)
+            
+            with p_col1:
+                risk_amt = st.number_input("Max Risk (Loss) ₹", value=5000, step=1000, help="Amount you are willing to lose if Stop Loss is hit")
+                entry = st.number_input("Entry Price", value=float(price))
+            
+            with p_col2:
+                sl_type = st.selectbox("Stop Loss Strategy", ["2x ATR (Vol Based)", "Recent Low (20D)", "3% Fixed"])
+                
+                if "ATR" in sl_type:
+                    stop_loss = entry - (avg_range * 2)
+                    sl_desc = f"Based on 2x ATR ({avg_range:.2f})"
+                elif "Recent Low" in sl_type:
+                    stop_loss = df['Low'].tail(20).min()
+                    sl_desc = "Lowest low of last 20 days"
+                else:
+                    stop_loss = entry * 0.97
+                    sl_desc = "Fixed 3% Stop"
+                
+                st.metric("Suggested Stop Loss", format_price(stop_loss), sl_desc)
+                
+            with p_col3:
+                risk_per_share = entry - stop_loss
+                if risk_per_share > 0:
+                    qty = int(risk_amt / risk_per_share)
+                    target = entry + (risk_per_share * 2) # 1:2
+                    capital_req = qty * entry
+                    
+                    st.metric("Target (1:2 Risk)", format_price(target), f"Capital Req: {format_price(capital_req)}")
+                    st.success(f"Position Size: **{qty} shares**")
+                else:
+                    st.error("Invalid Stop Loss (Must be < Entry)")
 
         # IMPROVEMENT: VWAP added to chart
         st.markdown("**📊 Price Chart with Moving Averages, VWAP & Levels**")
@@ -746,9 +712,12 @@ elif mode == "Full Analysis":
 
         # Add VWAP line
         if vwap is not None:
+            # Reindex to match full chart timeline (it will start mid-chart)
+            vwap_series = vwap.reindex(df.index)
+            
             fig.add_trace(go.Scatter(
-                x=df.index, y=vwap,
-                name='VWAP',
+                x=vwap_series.index, y=vwap_series,
+                name=f'VWAP ({vwap_days}D)',
                 line=dict(color='purple', width=2, dash='dot')
             ))
 
@@ -827,146 +796,139 @@ elif mode == "Swing Rankings":
 
     nifty_df = index_data.get('^NSEI')
 
-    rankings = []
+    rankings_momentum = []
+    rankings_pullback = []
 
-    with st.spinner("Calculating swing scores..."):
+    with st.spinner("Calculating strategy scores..."):
         for symbol in selected_stocks:
             df = watchlist_data.get(symbol)
             if df is not None and len(df) >= 20:
                 try:
-                    score = calculate_swing_score(df, nifty_df)
                     price, change, change_pct = get_live_price_safe(symbol, df)
-                    gap, gap_pct = detect_gap(df)
-                    vol_ratio = calculate_volume_ratio(df)
-                    rs = calculate_relative_strength(df, nifty_df)
-
-                    # Calculate VWAP
-                    vwap = calculate_vwap(df)
+                    vol_ratio = analytics.calculate_volume_ratio(df)
+                    rs = analytics.calculate_relative_strength(df, nifty_df)
+                    
+                    # Calculate VWAP based on selected anchor
+                    df_vwap = df.tail(vwap_days)
+                    vwap = analytics.calculate_vwap(df_vwap)
                     vwap_value = vwap.iloc[-1] if vwap is not None else None
                     vwap_position = "Above" if (price and vwap_value and price > vwap_value) else "Below"
-
-                    rankings.append({
+                    
+                    # 1. Momentum Score
+                    mom_score = analytics.calculate_momentum_score(df, nifty_df)
+                    rankings_momentum.append({
                         'Symbol': symbol.replace('.NS', ''),
-                        'Score': score,
+                        'Score': mom_score,
                         'Price': price,
-                        'VWAP': vwap_value,
-                        'vs VWAP': vwap_position,
                         'Change %': change_pct,
-                        'Gap %': gap_pct,
                         'Vol Ratio': vol_ratio,
-                        'Rel Strength': rs
+                        'RSI': calculate_rsi(df).iloc[-1] if len(df) > 14 else 0,
+                        'Trend': 'Bullish' if calculate_ema(df, 20).iloc[-1] > calculate_ema(df, 50).iloc[-1] else 'Bearish'
                     })
+                    
+                    # 2. Pullback Score
+                    pb_score = analytics.calculate_pullback_score(df, nifty_df)
+                    rankings_pullback.append({
+                        'Symbol': symbol.replace('.NS', ''),
+                        'Score': pb_score,
+                        'Price': price,
+                        'dist EMA20': f"{((price - calculate_ema(df, 20).iloc[-1])/calculate_ema(df, 20).iloc[-1]*100):.1f}%",
+                        'RSI': calculate_rsi(df).iloc[-1] if len(df) > 14 else 0,
+                        'Auto-Setup': 'NR7' if analytics.detect_nr7(df) else '-'
+                    })
+
                 except Exception as e:
                     logger.error(f"Error calculating score for {symbol}: {e}")
 
-    if rankings:
-        rankings_df = pd.DataFrame(rankings).sort_values('Score', ascending=False)
+    # Combine and find Top 3 Overall
+    all_setups = []
+    
+    # Process Momentum for Top 3
+    for r in rankings_momentum:
+        r['Setup Type'] = 'Momentum 🚀'
+        all_setups.append(r)
+        
+    # Process Pullback for Top 3
+    for r in rankings_pullback:
+        r['Setup Type'] = 'Pullback 🛒'
+        all_setups.append(r)
+        
+    # Sort by Score descending
+    all_setups.sort(key=lambda x: x['Score'], reverse=True)
+    top_3 = all_setups[:3]
 
-        # Swing Rankings Table
-        st.markdown("### 📊 Swing Trade Rankings")
-
-        display_df = rankings_df.copy()
-        display_df['Price'] = display_df['Price'].apply(lambda x: format_price(x) if x else 'N/A')
-        display_df['VWAP'] = display_df['VWAP'].apply(lambda x: f"₹{x:.2f}" if x and not pd.isna(x) else 'N/A')
-        display_df['Change %'] = display_df['Change %'].apply(lambda x: f"{x:+.2f}%" if x is not None else 'N/A')
-        display_df['Gap %'] = display_df['Gap %'].apply(lambda x: f"{x:+.2f}%" if x else '0.00%')
-        display_df['Vol Ratio'] = display_df['Vol Ratio'].apply(lambda x: f"{x:.2f}x")
-        display_df['Rel Strength'] = display_df['Rel Strength'].apply(lambda x: f"{x:+.2f}")
-
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-        # IMPROVEMENT: Score Categories Only (removed histogram)
-        st.markdown("### 📊 Score Categories")
-
-        col1, col2 = st.columns([1, 1])
-
-        with col1:
-            # Score categories pie chart
-            strong = len(rankings_df[rankings_df['Score'] >= 10])
-            good = len(rankings_df[(rankings_df['Score'] >= 7) & (rankings_df['Score'] < 10)])
-            average = len(rankings_df[(rankings_df['Score'] >= 4) & (rankings_df['Score'] < 7)])
-            weak = len(rankings_df[rankings_df['Score'] < 4])
-
-            fig_pie = go.Figure(data=[go.Pie(
-                labels=['Strong (10+)', 'Good (7-9)', 'Average (4-6)', 'Weak (<4)'],
-                values=[strong, good, average, weak],
-                marker_colors=['darkgreen', 'lightgreen', 'orange', 'lightcoral'],
-                hole=0.4,
-                textinfo='label+value+percent',
-                textfont_size=12
-            )])
-
-            fig_pie.update_layout(
-                title="Score Distribution by Category",
-                height=400
-            )
-
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-        with col2:
-            # VWAP Position analysis
-            above_vwap = len(rankings_df[rankings_df['vs VWAP'] == 'Above'])
-            below_vwap = len(rankings_df[rankings_df['vs VWAP'] == 'Below'])
-
-            fig_vwap = go.Figure(data=[go.Pie(
-                labels=['Above VWAP', 'Below VWAP'],
-                values=[above_vwap, below_vwap],
-                marker_colors=['green', 'red'],
-                hole=0.4,
-                textinfo='label+value+percent',
-                textfont_size=12
-            )])
-
-            fig_vwap.update_layout(
-                title="VWAP Position Distribution",
-                height=400
-            )
-
-            st.plotly_chart(fig_vwap, use_container_width=True)
-
-        # Score Statistics
-        st.markdown("### 📈 Score Statistics")
-
-        stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
-
-        with stat_col1:
-            st.metric("Average Score", f"{rankings_df['Score'].mean():.2f}")
-
-        with stat_col2:
-            st.metric("Median Score", f"{rankings_df['Score'].median():.0f}")
-
-        with stat_col3:
-            st.metric("Highest Score", f"{rankings_df['Score'].max():.0f}")
-
-        with stat_col4:
-            st.metric("Strong Setups (10+)", f"{strong}")
-
-        # Top 3 Picks
-        if len(rankings_df) >= 3:
-            st.markdown("### ⭐ Top 3 Swing Picks")
-
-            top3_cols = st.columns(3)
-
-            for i, (idx, row) in enumerate(rankings_df.head(3).iterrows()):
-                with top3_cols[i]:
-                    score_color = "🟢" if row['Score'] >= 10 else ("🟡" if row['Score'] >= 7 else "🔴")
-                    st.markdown(f"### {i+1}. {score_color} {rankings_df.iloc[i]['Symbol']}")
-                    st.metric("Swing Score", f"{row['Score']}/14")
-                    st.write(f"**Price**: {display_df.iloc[i]['Price']}")
-                    st.write(f"**VWAP**: {display_df.iloc[i]['VWAP']} ({row['vs VWAP']})")
-                    st.write(f"**Change**: {display_df.iloc[i]['Change %']}")
-                    st.write(f"**Gap**: {display_df.iloc[i]['Gap %']}")
-                    st.write(f"**Volume**: {display_df.iloc[i]['Vol Ratio']}")
-                    st.write(f"**Rel. Strength**: {display_df.iloc[i]['Rel Strength']}")
-
-                    if row['Score'] >= 10:
-                        st.success("🔥 Strong Setup")
-                    elif row['Score'] >= 7:
-                        st.info("✅ Good Setup")
+    if top_3:
+        st.markdown("### 🏆 Top 3 Swing Picks Today")
+        top_cols = st.columns(3)
+        
+        for i, setup in enumerate(top_3):
+            with top_cols[i]:
+                # Color code score
+                score = setup['Score']
+                color = "green" if score >= 8 else "orange"
+                
+                with st.container(border=True):
+                    st.markdown(f"#### {i+1}. {setup['Symbol']}")
+                    st.markdown(f"**Score: :{color}[{score}/10]**")
+                    st.caption(f"Strategy: {setup['Setup Type']}")
+                    
+                    st.divider()
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.metric("Price", format_price(setup['Price']))
+                    with c2:
+                         st.metric("RSI", f"{setup['RSI']:.1f}" if isinstance(setup['RSI'], (int, float)) else setup['RSI'])
+                    
+                    if setup['Setup Type'] == 'Momentum 🚀':
+                        st.caption(f"Trend: {setup.get('Trend', 'N/A')}")
                     else:
-                        st.warning("⚠️ Moderate Setup")
+                        st.caption(f"EMA20: {setup.get('dist EMA20', 'N/A')}")
 
-    else:
+    st.markdown("---")
+
+    # Custom styling function for scores
+    def style_score(v):
+        try:
+            val = float(v)
+            if val >= 10:
+                return 'background-color: #008000; color: white; font-weight: bold'  # Solid Green
+            elif val >= 7:
+                return 'background-color: #90EE90; color: black'  # Light Green
+            else:
+                return ''
+        except:
+            return ''
+
+    # Display Momentum Rankings
+    st.markdown("### 🚀 Momentum / Breakout Candidates")
+    if rankings_momentum:
+        mom_df = pd.DataFrame(rankings_momentum).sort_values(by='Score', ascending=False)
+        mom_style = mom_df.copy() # Keep numeric for styling
+        
+        # Format for display
+        mom_df['Price'] = mom_df['Price'].apply(lambda x: format_price(x) if x else 'N/A')
+        mom_df['Change %'] = mom_df['Change %'].apply(lambda x: format_change(x) if x else 'N/A')
+        mom_df['Vol Ratio'] = mom_df['Vol Ratio'].apply(lambda x: f"{x:.2f}x")
+        mom_df['RSI'] = mom_df['RSI'].apply(lambda x: f"{x:.1f}")
+        
+        # Apply strict score styling
+        st.dataframe(mom_df.style.map(style_score, subset=['Score']), use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    
+    # Display Pullback Rankings
+    st.markdown("### 🛒 Pullback / Value Candidates")
+    if rankings_pullback:
+        pb_df = pd.DataFrame(rankings_pullback).sort_values(by='Score', ascending=False)
+        
+        pb_df['Price'] = pb_df['Price'].apply(lambda x: format_price(x) if x else 'N/A')
+        pb_df['RSI'] = pb_df['RSI'].apply(lambda x: f"{x:.1f}")
+        
+        st.dataframe(pb_df.style.map(style_score, subset=['Score']), use_container_width=True, hide_index=True)
+
+
+    if not rankings_momentum and not rankings_pullback:
         st.info("Insufficient data to calculate swing rankings")
 
 # ==================== FOOTER ====================

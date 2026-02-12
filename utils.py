@@ -12,6 +12,63 @@ from typing import Optional, Tuple, Dict, Any
 logger = logging.getLogger(__name__)
 
 
+# ==================== PAGE SETUP ====================
+
+def setup_page(title: str, layout: str = "wide"):
+    """Standardized page configuration and styling"""
+    st.set_page_config(
+        page_title=title,
+        page_icon="🚀",
+        layout=layout
+    )
+    
+    # Common shared CSS for consistent aesthetics
+    st.markdown("""
+    <style>
+        .main-title {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: #1f77b4;
+            margin-bottom: 0.2rem;
+        }
+        .stMetric {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            border-left: 3px solid #1f77b4;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+# ==================== UI COMPONENTS ====================
+
+def display_market_breadth(advances: int, declines: int, unchanged: int):
+    """Standardized market breadth display"""
+    total = advances + declines + unchanged
+    if total == 0:
+        st.info("No data available for market breadth")
+        return
+
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("Advances", advances, f"{(advances/total)*100:.1f}%")
+    with cols[1]:
+        st.metric("Declines", declines, f"{(declines/total)*100:.1f}%")
+    with cols[2]:
+        st.metric("Unchanged", unchanged, f"{(unchanged/total)*100:.1f}%")
+    with cols[3]:
+        ad_ratio = advances / declines if declines > 0 else (advances if advances > 0 else 0)
+        st.metric("A/D Ratio", f"{ad_ratio:.2f}")
+
+    if advances > declines * 1.5:
+        st.success("✅ Strong advancing day - Bullish sentiment")
+    elif declines > advances * 1.5:
+        st.error("⚠️ Strong declining day - Bearish sentiment")
+    else:
+        st.info("➡️ Mixed market - Neutral sentiment")
+
+
 # ==================== PRICE FORMATTING ====================
 
 def format_price(price: Optional[float], symbol_type: str = 'equity') -> str:

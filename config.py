@@ -22,7 +22,7 @@ if not FRED_API_KEY:
 MAIN_INDICES = {
     '^NSEI': 'NIFTY 50',
     '^NSEBANK': 'BANK NIFTY',
-    '^CRSMID': 'NIFTY MIDCAP',
+    'NIFTY_MIDCAP_100.NS': 'NIFTY MIDCAP',
     '^CNXSC': 'NIFTY SMALLCAP',
     '^CNXIT': 'NIFTY IT'
 }
@@ -88,6 +88,18 @@ BOND_MARKETS = {
 }
 
 
+# ==================== MARKET OVERVIEW SYMBOLS ====================
+MARKET_SYMBOLS = {
+    "^IXIC": "NASDAQ",
+    "^NSEI": "NIFTY 50",
+    "DX-Y.NYB": "Dollar Index",
+    "USDINR=X": "USD/INR",
+    "GC=F": "Gold",
+    "^TNX": "US 10Y Yield",
+    "^IRX": "US 3M Yield"
+}
+
+
 # ==================== MACRO RISK DASHBOARD ====================
 
 MACRO_SYMBOLS = {
@@ -137,6 +149,16 @@ LEADING_SYMBOLS = {
     "^IRX": "US 3M Yield",
     "^NSEI": "NIFTY 50",
     "DX-Y.NYB": "Dollar Index"
+}
+
+
+# ==================== LIQUIDITY MONITORING (MONEY MARKET) ====================
+
+LIQUIDITY_THRESHOLDS = {
+    "WALCL": {"weekly_pct": 1.0, "description": "Fed Balance Sheet Change"},
+    "RRPONTSYD": {"weekly_abs": 50.0, "description": "Reverse Repo Shift ($B)"},
+    "WTREGEN": {"weekly_abs": 50.0, "description": "TGA Fiscal Drain ($B)"},
+    "SOFR": {"absolute_change": 0.10, "description": "Interbank Stress (10bps move)"}
 }
 
 
@@ -208,9 +230,8 @@ def validate_config():
     """Validate configuration on import"""
     issues = []
 
-    # Check for broken symbols
-    if '^NIFTY_MIDCAP_100.NS' in str(MAIN_INDICES):
-        issues.append("⚠️  Broken Midcap symbol still in config")
+    # Validation logic here (currently none required for indices)
+    pass
 
     if issues:
         print("\n".join(issues))

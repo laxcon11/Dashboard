@@ -1,4 +1,4 @@
-# Trading & Macro Dashboard
+# 🚀 Dashboard Launcher
 
 A multi-page Streamlit dashboard that tracks market conditions, liquidity, and leading indicators to help evaluate **Risk-On / Risk-Off regimes** and macro trends.
 
@@ -51,7 +51,14 @@ The goal is to provide a **fast, practical view of market conditions** in one pl
 * Dollar and yield trends
 * Market impulse gauge
 
+### 6. Trading Journal
+
+* Log and track trades
+* Performance statistics
+* Historical trade analysis
+
 ---
+
 
 ## Project Structure
 
@@ -67,9 +74,12 @@ project/
 │   ├── 1_Global_Markets.py
 │   ├── 2_Money_Supply.py
 │   ├── 3_Macro_Risk.py
-│   └── 4_Leading_Indicators.py
+│   ├── 3_Macro_Risk.py
+│   ├── 4_Leading_Indicators.py
+│   └── 5_Trading_Journal.py
 │
 ├── requirements.txt
+
 └── README.md
 ```
 
