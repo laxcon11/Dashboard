@@ -1,13 +1,11 @@
 import streamlit as st
 st.sidebar.success("Select a dashboard above")
 
-st.set_page_config(
-    page_title="Trading Dashboard Suite",
-    page_icon="📊",
-    layout="wide"
-)
+from utils import setup_page
 
-st.title("📊 Multi-Market Trading Dashboard Suite")
+setup_page("Dashboard Launcher")
+
+st.title("🚀 Dashboard Launcher")
 
 st.markdown("""
 Welcome to your integrated trading dashboard.
@@ -26,12 +24,12 @@ Start here to understand overall market sentiment:
 
 ---
 
-### 2️⃣ Money Supply & Liquidity
+### 2️⃣ Money Supply & Liquidity (Money Market)
 Check monetary conditions:
 - Fed balance sheet
 - Reverse repo operations  
 - Money supply (M2)
-- Interest rates
+- Interest rates & SOFR Spreads
 
 **Use case**: Understand if liquidity supports rallies
 
@@ -63,13 +61,25 @@ Forward-looking market signals:
 
 ### 5️⃣ NSE Dashboard ⭐
 Your trading dashboard:
-- Indian stock watchlist from `config.py`
+- Full NIFTY 200 Watchlist
 - Gap scanner
 - Breakout detection
 - Swing rankings
 - Technical analysis
 
 **Use case**: Find and analyze swing trade setups
+
+---
+
+### 6️⃣ Trading Journal 📔
+Comprehensive trade tracking system:
+- Log new trades (Entry, SL, Target)
+- Track open and closed positions
+- Performance statistics (PnL, Win Rate)
+- Trade history and lessons learned
+
+**Use case**: Refine your strategy and track performance over time
+
 
 ---
 
@@ -90,10 +100,13 @@ Pages:
 - 2_Money_Supply.py
 - 3_Macro_Risk.py
 - 4_Leading_Indicators.py
+- 5_Trading_Journal.py
+
 
 Shared modules:
 - config.py → settings
 - data_fetch.py → APIs and caching
+- watchlist_manager.py → Dynamic watchlists
 
 **To add stocks:**
 1. Open `config.py`
@@ -136,7 +149,8 @@ with col3:
     st.info("📚 **Pro Tip**\n\nUse Swing Rankings to find best setups")
 
 st.markdown("---")
-st.caption("Trading Dashboard Suite | Feb 2026 Build")
+st.caption("Dashboard Launcher | Feb 2026 Build")
+
 
 
 

@@ -15,8 +15,10 @@ from data_fetch import (
 
 
 from config import MACRO_THRESHOLDS, FRED_API_KEY, MACRO_WEIGHTS, MACRO_SYMBOLS
+from utils import setup_page, format_change
+import analytics
 
-st.set_page_config(layout="wide")
+setup_page("Dashboard Launcher")
 st.title("🌍 India Macro Risk Dashboard")
 
 st.caption(
@@ -38,36 +40,7 @@ else:
 
 
 
-# ================= INDICATORS =================
-
-MACRO_SYMBOLS = {
-    "^DJI": "Dow Jones",
-    "^IXIC": "Nasdaq",
-    "^NSEI": "NIFTY 50",
-    "^NSEBANK": "Bank NIFTY",
-    "DX-Y.NYB": "Dollar Index",
-    "USDINR=X": "USD/INR",  # FIXED: Changed from INRUSD=X to USDINR=X
-    "^TNX": "US 10Y Yield",
-    "GC=F": "Gold",
-    "CL=F": "Crude Oil",
-    "BTC-USD": "Bitcoin"
-}
-
-# Weighting improves realism
-WEIGHTS = {
-    "^DJI": 2,
-    "^IXIC": 2,
-    "^NSEI": 2,
-    "^NSEBANK": 1,
-    "DX-Y.NYB": 2,
-    "^TNX": 2,
-    "CL=F": 1,
-    "GC=F": 1,
-    "BTC-USD": 1,
-    "USDINR=X": 1
-
-}
-
+# Indicators and Weights are imported from config.py
 T = {
     "equity": MACRO_THRESHOLDS.get("equity", 0.5),
     "dxy": MACRO_THRESHOLDS.get("dxy", 0.5),
@@ -223,7 +196,7 @@ for i, (symbol, name) in enumerate(all_items):
         score = score_indicator(symbol, df)
 
     if score is not None:
-        weight = WEIGHTS.get(symbol, 1)
+        weight = MACRO_WEIGHTS.get(symbol, 1)
         scores.append(score * weight)
     else:
         failed_symbols.append(name)
@@ -241,46 +214,7 @@ for i, (symbol, name) in enumerate(all_items):
         else:
             st.metric(name, "No Data")
 
-# ================= LIQUIDITY SCORE =================
-
-def calculate_liquidity_score(liquidity_data):
-    """
-    Liquidity score logic:
-    Positive score = liquidity improving
-    Negative score = liquidity tightening
-    """
-
-    score = 0
-
-    try:
-        # Fed Balance Sheet rising = positive
-        fed = liquidity_data.get("Fed Balance Sheet")
-        if fed is not None and len(fed) > 1:
-            if fed["value"].iloc[-1] > fed["value"].iloc[-2]:
-                score += 2
-            else:
-                score -= 2
-
-        # Reverse Repo falling = positive
-        rrp = liquidity_data.get("Reverse Repo")
-        if rrp is not None and len(rrp) > 1:
-            if rrp["value"].iloc[-1] < rrp["value"].iloc[-2]:
-                score += 1
-            else:
-                score -= 1
-
-        # TGA falling = positive
-        tga = liquidity_data.get("Treasury General Account")
-        if tga is not None and len(tga) > 1:
-            if tga["value"].iloc[-1] < tga["value"].iloc[-2]:
-                score += 1
-            else:
-                score -= 1
-
-    except Exception:
-        pass
-
-    return score
+# Liquidity logic has been moved to analytics.py
 
 # ================= TOTAL SCORE =================
 
@@ -291,12 +225,16 @@ if not scores:
 macro_score = sum(scores)
 
 # Liquidity score
-liquidity_score = calculate_liquidity_score(liquidity_series)
+liquidity_score = analytics.calculate_liquidity_score(liquidity_series)
 
 # ================= FINAL COMBINED SCORE =================
 
 final_score = macro_score + liquidity_score
 regime, regime_color = classify_regime(final_score, len(scores))
+
+# Prepare data for stance
+sofr_spread = 0 # 3_Macro_Risk doesn't fetch SOFR/IORB yet
+regime_stance, stance_color, decision_msg = analytics.get_liquidity_stance(liquidity_series, sofr_spread=sofr_spread)
 
 col1, col2, col3 = st.columns(3)
 
@@ -305,19 +243,24 @@ with col1:
 
 with col2:
     st.metric("Liquidity Score", liquidity_score)
+    st.caption(f"Status: **{regime_stance}**")
 
 with col3:
     st.metric("Final Risk Score", final_score)
 
 
-# ================= REGIME DISPLAY =================
+# ==================== REGIME DISPLAY ====================
 
-if regime_color == "success":
-    st.success(regime)
-elif regime_color == "error":
-    st.error(regime)
+if stance_color == "success":
+    st.success(f"### {regime_stance}")
+elif stance_color == "error":
+    st.error(f"### {regime_stance}")
+elif stance_color == "warning":
+    st.warning(f"### {regime_stance}")
 else:
-    st.warning(regime)
+    st.info(f"### {regime_stance}")
+
+st.info(f"**Decision POV**: {decision_msg}")
 
 
 # ================= RISK GAUGE =================
@@ -381,7 +324,7 @@ for i in range(7):
             score = score_indicator(symbol, temp_df)
 
             if score is not None:
-                weight = WEIGHTS.get(symbol, 1)
+                weight = MACRO_WEIGHTS.get(symbol, 1)
                 day_score += score * weight
                 valid_count += 1
 

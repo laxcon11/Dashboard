@@ -20,9 +20,9 @@ from config import (
 )
 
 from data_fetch import batch_download
-from utils import display_price_metric, create_price_table
+from utils import display_price_metric, create_price_table, setup_page
 
-st.set_page_config(page_title="Global Markets", layout="wide")
+setup_page("Dashboard Launcher")
 
 st.title("🌍 Global Macro Dashboard")
 st.caption("Markets snapshot helps identify global risk sentiment before trading.")
