@@ -36,6 +36,7 @@ ENV/
 
 # Streamlit
 .streamlit/
+streamlit.log
 
 # Project Specific
 logs/

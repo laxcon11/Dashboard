@@ -1,12 +1,9 @@
-"""
-Centralized Analysis Logic for Trading Dashboard Suite
-Contains pure calculation functions for technical analysis and signals.
-"""
-
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 from indicators import calculate_rsi, calculate_ema, calculate_atr
-from config import BREAKOUT_WINDOW
+from config import BREAKOUT_WINDOW, FRED_API_KEY
+
 
 def detect_gap(df):
     """Detect gap up/down"""
@@ -403,3 +400,44 @@ def calculate_yield_trend_signal(market_data):
         return float(latest), score, signal
     except:
         return 0, 0, "Error"
+
+# ==================== CONTEXT CAPTURE ====================
+
+def get_current_context(market_data_1mo=None, liquidity_series=None):
+    """
+    Captures the current market state for the trading journal.
+    Returns: {regime, liquidity_stance, exposure_guidance, sector_leader}
+    """
+    context = {
+        "regime": "Unknown",
+        "liquidity": "Unknown",
+        "stance": "Neutral",
+        "guidance": "Normal Positioning"
+    }
+
+    if not market_data_1mo or not liquidity_series:
+        return context
+
+    try:
+        # 1. Macro Score & Regime (Simplified version of 3_Macro_Risk logic)
+        # In a real scenario, we'd import the scoring from 3_Macro_Risk
+        # but to keep it clean, we'll assume the caller passes the results or we recalculate.
+        
+        # 2. Liquidity Stance
+        stance, color, decision_msg = get_liquidity_stance(liquidity_series)
+        context["liquidity"] = stance
+        context["stance"] = decision_msg
+        
+        # 3. Simple Risk Score based on Liquidity (as an example)
+        l_score = calculate_liquidity_score(liquidity_series)
+        if l_score >= 2:
+            context["guidance"] = "Aggressive Longs Allowed"
+        elif l_score <= -2:
+            context["guidance"] = "Defensive Mode – Reduce Risk"
+        else:
+            context["guidance"] = "Normal Positioning"
+            
+    except Exception as e:
+        print(f"Error in context capture: {e}")
+
+    return context
