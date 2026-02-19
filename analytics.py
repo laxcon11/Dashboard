@@ -1,8 +1,11 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import logging
 from indicators import calculate_rsi, calculate_ema, calculate_atr
-from config import BREAKOUT_WINDOW, FRED_API_KEY
+from config import BREAKOUT_WINDOW
+
+
+logger = logging.getLogger(__name__)
 
 
 def detect_gap(df):
@@ -18,8 +21,8 @@ def detect_gap(df):
             gap = current_open - prev_close
             gap_pct = (gap / prev_close) * 100
             return gap, gap_pct
-    except:
-        pass
+    except Exception as exc:
+        logger.debug("detect_gap failed: %s", exc)
 
     return 0, 0
 
@@ -37,7 +40,8 @@ def calculate_volume_ratio(df) -> float:
             return 0
 
         return latest_vol / avg_vol
-    except:
+    except Exception as exc:
+        logger.debug("calculate_volume_ratio failed: %s", exc)
         return 0
 
 
@@ -54,7 +58,8 @@ def calculate_vwap(df):
         vwap = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
 
         return vwap
-    except:
+    except Exception as exc:
+        logger.debug("calculate_vwap failed: %s", exc)
         return None
 
 
@@ -70,7 +75,8 @@ def detect_breakout(df, window: int = BREAKOUT_WINDOW) -> bool:
         recent_high = recent.max()
         current = df['Close'].iloc[-1]
         return current > recent_high
-    except:
+    except Exception as exc:
+        logger.debug("detect_breakout failed: %s", exc)
         return False
 
 
@@ -91,7 +97,8 @@ def detect_nr7(df) -> bool:
         min_range = recent['Range'].min()
         
         return current_range == min_range
-    except:
+    except Exception as exc:
+        logger.debug("detect_nr7 failed: %s", exc)
         return False
 
 
@@ -108,7 +115,8 @@ def calculate_relative_strength(symbol_df, index_df, period: int = 20) -> float:
         index_return = ((index_df['Close'].iloc[-1] / index_df['Close'].iloc[-period]) - 1) * 100
 
         return stock_return - index_return
-    except:
+    except Exception as exc:
+        logger.debug("calculate_relative_strength failed: %s", exc)
         return 0
 
 
@@ -128,14 +136,16 @@ def calculate_momentum_score(stock_data, index_data) -> int:
             score += 3
         elif current > ema20:
             score += 1
-    except: pass
+    except Exception as exc:
+        logger.debug("calculate_momentum_score trend segment failed: %s", exc)
     
     # 2. RSI Strength (0-2)
     try:
         rsi = calculate_rsi(stock_data).iloc[-1]
         if rsi > 60: score += 2
         elif rsi > 55: score += 1
-    except: pass
+    except Exception as exc:
+        logger.debug("calculate_momentum_score rsi segment failed: %s", exc)
     
     # 3. Relative Strength (0-2)
     rs = calculate_relative_strength(stock_data, index_data)
@@ -165,7 +175,8 @@ def calculate_pullback_score(stock_data, index_data) -> int:
         if 0 < dist_pct <= 2: score += 4  # Perfect pullback
         elif 0 < dist_pct <= 4: score += 2 # Decent pullback
         elif -2 <= dist_pct <= 0: score += 3 # Slight undercut
-    except: pass
+    except Exception as exc:
+        logger.debug("calculate_pullback_score ema segment failed: %s", exc)
     
     # 2. RSI Reset (0-3)
     try:
@@ -173,7 +184,8 @@ def calculate_pullback_score(stock_data, index_data) -> int:
         if 40 <= rsi <= 55: score += 3 # Perfect reset zone
         elif 35 <= rsi < 40: score += 1
         elif 55 < rsi <= 60: score += 1
-    except: pass
+    except Exception as exc:
+        logger.debug("calculate_pullback_score rsi segment failed: %s", exc)
     
     # 3. Volatility Compression (0-3)
     try:
@@ -181,7 +193,8 @@ def calculate_pullback_score(stock_data, index_data) -> int:
             score += 3
         elif (stock_data['High'].iloc[-1] - stock_data['Low'].iloc[-1]) < calculate_atr(stock_data).iloc[-1] * 0.7:
              score += 1
-    except: pass
+    except Exception as exc:
+        logger.debug("calculate_pullback_score volatility segment failed: %s", exc)
 
     return min(score, 10)
 
@@ -222,8 +235,8 @@ def calculate_liquidity_score(liquidity_data, lookback_days: int = 1) -> int:
                 score += 1
             else:
                 score -= 1
-    except:
-        pass
+    except Exception as exc:
+        logger.debug("calculate_liquidity_score failed: %s", exc)
 
     return score
 
@@ -274,7 +287,8 @@ def calculate_support_resistance(df, period: int = 20):
         resistance = recent['High'].max()
         support = recent['Low'].min()
         return support, resistance
-    except:
+    except Exception as exc:
+        logger.debug("calculate_support_resistance failed: %s", exc)
         return None, None
 
 
@@ -309,7 +323,8 @@ def calculate_copper_gold_signal(data):
         signal = "Copper/Gold Positive" if score == 1 else "Copper/Gold Defensive"
 
         return float(latest_ratio), score, signal
-    except:
+    except Exception as exc:
+        logger.debug("calculate_copper_gold_signal failed: %s", exc)
         return 0, 0, "Error"
 
 
@@ -347,7 +362,8 @@ def calculate_credit_spread_signal(data):
         signal = "Credit Risk On" if score == 1 else "Credit Risk Off"
 
         return float(latest_ratio), score, signal
-    except:
+    except Exception as exc:
+        logger.debug("calculate_credit_spread_signal failed: %s", exc)
         return 0, 0, "Error"
 
 
@@ -370,7 +386,8 @@ def calculate_dollar_trend_signal(market_data):
         signal = "Dollar Rising" if score == -1 else "Dollar Stable"
 
         return float(latest), score, signal
-    except:
+    except Exception as exc:
+        logger.debug("calculate_dollar_trend_signal failed: %s", exc)
         return 0, 0, "Error"
 
 
@@ -398,7 +415,8 @@ def calculate_yield_trend_signal(market_data):
         signal = "Yields Rising" if score == -1 else "Yields Stable"
 
         return float(latest), score, signal
-    except:
+    except Exception as exc:
+        logger.debug("calculate_yield_trend_signal failed: %s", exc)
         return 0, 0, "Error"
 
 # ==================== CONTEXT CAPTURE ====================
@@ -437,7 +455,7 @@ def get_current_context(market_data_1mo=None, liquidity_series=None):
         else:
             context["guidance"] = "Normal Positioning"
             
-    except Exception as e:
-        print(f"Error in context capture: {e}")
+    except Exception as exc:
+        logger.debug("get_current_context failed: %s", exc)
 
     return context

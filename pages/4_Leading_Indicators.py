@@ -409,7 +409,7 @@ with g1:
         }
     ))
     fig_daily.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig_daily, use_container_width=True)
+    st.plotly_chart(fig_daily, width='stretch')
     st.caption(f"Using {len(daily_values)} factors")
 
 with g2:
@@ -433,7 +433,7 @@ with g2:
         }
     ))
     fig_directional.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig_directional, use_container_width=True)
+    st.plotly_chart(fig_directional, width='stretch')
     st.caption(f"Using {len(directional_values)} factors")
 
 st.markdown("### Factor Breakdown")
@@ -497,7 +497,7 @@ if liquidity_data:
                     margin=dict(l=0, r=0, t=20, b=0),
                     showlegend=False
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
     if not liquidity_shown:
         st.info("💡 No liquidity data available. Add FRED_API_KEY to enable.")
@@ -550,7 +550,7 @@ with col1:
             hovermode='x unified'
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 with col2:
     # HYG/LQD Credit Spread
@@ -591,7 +591,7 @@ with col2:
             hovermode='x unified'
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 st.markdown("---")
 
@@ -622,7 +622,7 @@ with st.expander("📊 View All Market Indicators", expanded=False):
                     showlegend=False
                 )
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
             with col2:
                 latest = df["Close"].iloc[-1]

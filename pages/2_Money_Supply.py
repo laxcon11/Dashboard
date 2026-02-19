@@ -9,7 +9,6 @@ Includes:
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
 
 from config import FRED_SERIES, FRED_API_KEY, LIQUIDITY_THRESHOLDS
 from data_fetch import fetch_fred_series

@@ -14,7 +14,13 @@ def load_watchlists():
     if os.path.exists(WATCHLIST_FILE):
         try:
             with open(WATCHLIST_FILE, 'r') as f:
-                return json.load(f)
+                watchlists = json.load(f)
+
+            # Keep local JSON aligned with presets when new categories are added.
+            # Existing custom/user-edited lists are preserved.
+            merged = PRESET_WATCHLISTS.copy()
+            merged.update(watchlists)
+            return merged
         except Exception as e:
             logger.error(f"Error loading watchlists: {e}")
             return PRESET_WATCHLISTS.copy()

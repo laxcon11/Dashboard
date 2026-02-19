@@ -7,89 +7,52 @@ st.sidebar.success("Select a dashboard above")
 st.title("🚀 Dashboard Launcher")
 
 st.markdown("""
-Welcome to your integrated trading dashboard.
+Integrated macro-to-execution workflow for disciplined swing trading.
 
-## 🎯 Quick Start Guide
+## 🎯 Workflow (Top-Down)
 
 ### 1️⃣ Global Markets
-Start here to understand overall market sentiment:
-- Global indices (S&P 500, NASDAQ, etc.)
-- Currency markets
-- Commodities (Oil, Gold)
-- Bond yields
-- Crypto
+- Global indices, FX, commodities, rates, and crypto snapshot
+- First read on risk-on / risk-off
 
-**Use case**: Identify global risk-on vs risk-off environment
-
----
-
-### 2️⃣ Money Supply & Liquidity (Money Market)
-Check monetary conditions:
-- Fed balance sheet
-- Reverse repo operations  
-- Money supply (M2)
-- Interest rates & SOFR Spreads
-
-**Use case**: Understand if liquidity supports rallies
-
----
+### 2️⃣ Money Supply & Liquidity
+- Fed balance sheet, RRP, M2, rates, and liquidity context
+- Validates whether liquidity supports trend continuation
 
 ### 3️⃣ Macro Risk Dashboard
-A fast snapshot of daily market risk:
-- Equity momentum
-- Dollar and yields
-- Commodities
-- Liquidity score
-- Risk regime classification
-
-**Use case**: Daily directional bias
-
----
+- Composite macro + liquidity regime assessment
+- Regime tags for directional bias (Risk On / Neutral / Risk Off)
 
 ### 4️⃣ Leading Indicators Dashboard
-Forward-looking market signals:
-- Yield curve
-- Copper/Gold ratio
-- Credit spreads
-- Dollar trend
-- Market impulse gauge
-
-**Use case**: Detect turning points early
-
----
+- Forward-looking triggers (yield curve, copper/gold, credit, USD)
+- Daily and directional impulse context
 
 ### 5️⃣ NSE Dashboard ⭐
-Your trading dashboard:
-- Full NIFTY 200 Watchlist
-- Gap scanner
-- Breakout detection
-- Swing rankings
-- Technical analysis
-
-**Use case**: Find and analyze swing trade setups
-
----
+- Core universe: 230 tracked stocks (base universe + F&O delta)
+- Stock selection modes:
+  - Preset watchlists
+  - Category view: Sector-wise (first pass) or Thematic
+  - Custom selection
+- Swing engine + rankings + one-click journal handoff
 
 ### 6️⃣ Trading Journal 📔
-Comprehensive trade tracking system:
-- Log new trades (Entry, SL, Target)
-- Track open and closed positions
-- Performance statistics (PnL, Win Rate)
-- Trade history and lessons learned
+- Log setups/trades, track lifecycle, and review performance
 
-**Use case**: Refine your strategy and track performance over time
-
+### 7️⃣ Regime Settings ⚙️
+- Edit factor weights and directional controls
+- Prevent single-factor dominance and tune model behavior
 
 ---
 
 ## 🔧 Configuration
 
-All settings in **`config.py`**:
-- `NSE_WATCHLIST` - NSE trading universe
-- `GLOBAL_INDICES` - Markets to track
-- `MACRO_SYMBOLS` - Macro dashboard indicators
-- `LEADING_SYMBOLS` - Leading indicators
-- `FRED_API_KEY` - For liquidity data
+Core files:
+- `NSE_Config.py` - Universe, sector/thematic categories, preset watchlists
+- `config.py` - Global markets and macro symbol settings
+- `regime_model.py` - Regime scoring logic
+- `watchlist_manager.py` - Persistent watchlists
+- `data_fetch.py` - Data access and fallback paths
+- `FRED_API_KEY` in `config.py` - Required for liquidity series
 
 ## 🗂 Dashboard Structure
 
@@ -100,30 +63,22 @@ Pages:
 - 3_Macro_Risk.py
 - 4_Leading_Indicators.py
 - 5_Trading_Journal.py
-
-
-Shared modules:
-- config.py → settings
-- data_fetch.py → APIs and caching
-- watchlist_manager.py → Dynamic watchlists
-
-**To add stocks:**
-1. Open `config.py`
-2. Add to `NSE_WATCHLIST` list (format: `'SYMBOL.NS'`)
-3. Refresh dashboard
+- 6_Regime_Settings.py
 
 ---
 
 ## 📊 Data Sources
-- **Yahoo Finance**: Stock/index prices (15-20 min delay)
-- **FRED**: US economic data (requires free API key)
+- **Yahoo Finance**: Stock/index prices (typically delayed)
+- **FRED**: US economic/liquidity data (free API key)
+- **Fallback behavior**: Some indicators use proxy/fallback mappings when primary series is unavailable
 
 ---
 
 ## ⚠️ Important Notes
 - Markets: Mon-Fri 9:15 AM - 3:30 PM IST
-- Data delay: 15-20 minutes
-- FRED API: Get free key at [https://fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html)
+- Data can be delayed depending on source availability
+- FRED API key: [https://fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html)
+- Regime output is a decision aid, not a prediction guarantee
 
 ---
 
@@ -134,22 +89,19 @@ Shared modules:
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.info("💡 **Tip of the Day**\n\nCheck global markets before trading NSE stocks")
+    st.info("💡 **Tip of the Day**\n\nStart with macro regime before scanning setups")
 
 with col2:
     # Check if FRED key is set
     from config import FRED_API_KEY
+
     if FRED_API_KEY:
         st.success("✅ FRED API: Connected")
     else:
         st.warning("⚠️ FRED API: Not configured")
 
 with col3:
-    st.info("📚 **Pro Tip**\n\nUse Swing Rankings to find best setups")
+    st.info("📚 **Pro Tip**\n\nUse Sector-wise categories first, then thematic overlays")
 
 st.markdown("---")
 st.caption("Dashboard Launcher | Feb 2026 Build")
-
-
-
-

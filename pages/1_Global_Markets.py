@@ -68,7 +68,7 @@ st.caption("Guide: Nasdaq ↑ + DXY ↓ = Risk ON | DXY ↑ + Yields ↑ = Risk 
 st.subheader("🌎 Global Indices")
 st.dataframe(
     create_price_table(GLOBAL_INDICES, data, ["Index", "Price", "Change %"]),
-    use_container_width=True,
+    width='stretch',
     hide_index=True
 )
 
@@ -77,7 +77,7 @@ st.dataframe(
 st.subheader("💱 Currency Markets")
 st.dataframe(
     create_price_table(CURRENCIES, data, ["Pair", "Price", "Change %"]),
-    use_container_width=True,
+    width='stretch',
     hide_index=True
 )
 
@@ -106,14 +106,14 @@ for primary_symbol, name in COMMODITIES.items():
         "Change %": format_change(change_pct)
     })
 
-st.dataframe(pd.DataFrame(commodity_rows), use_container_width=True, hide_index=True)
+st.dataframe(pd.DataFrame(commodity_rows), width='stretch', hide_index=True)
 
 # ==================== CRYPTO ====================
 
 st.subheader("₿ Crypto Markets")
 st.dataframe(
     create_price_table(CRYPTO, data, ["Asset", "Price", "Change %"]),
-    use_container_width=True,
+    width='stretch',
     hide_index=True
 )
 
@@ -122,7 +122,7 @@ st.dataframe(
 st.subheader("📉 Bond Markets")
 st.dataframe(
     create_price_table(BOND_MARKETS, data, ["Instrument", "Value", "Change"]),
-    use_container_width=True,
+    width='stretch',
     hide_index=True
 )
 

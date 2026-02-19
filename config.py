@@ -228,6 +228,28 @@ EXPORT_PATH = './exports/'
 NOTES_PATH = './notes/'
 LOG_PATH = './logs/'
 
+# Local NSE history parquet (parquet-first fetch for NSE symbols)
+LOCAL_NSE_HISTORY_ENABLED = os.getenv("LOCAL_NSE_HISTORY_ENABLED", "1") == "1"
+LOCAL_NSE_HISTORY_PATH = os.getenv("LOCAL_NSE_HISTORY_PATH", "./data/nse_230_history.parquet")
+LOCAL_NSE_HISTORY_WRITEBACK = os.getenv("LOCAL_NSE_HISTORY_WRITEBACK", "1") == "1"
+
+# Local Bhavcopy fallback settings (used when Yahoo data is unavailable)
+BHAVCOPY_FALLBACK_ENABLED = os.getenv("BHAVCOPY_FALLBACK_ENABLED", "1") == "1"
+BHAVCOPY_DIR = os.getenv("BHAVCOPY_DIR", "")
+BHAVCOPY_LOCAL_DIR = os.getenv("BHAVCOPY_LOCAL_DIR", "./data/bhavcopy")
+BHAVCOPY_AUTO_DOWNLOAD = os.getenv("BHAVCOPY_AUTO_DOWNLOAD", "1") == "1"
+BHAVCOPY_LOOKBACK_DAYS = int(os.getenv("BHAVCOPY_LOOKBACK_DAYS", "10"))
+BHAVCOPY_SCAN_DIRS = [
+    p for p in [
+        BHAVCOPY_LOCAL_DIR,
+        BHAVCOPY_DIR,
+        "./data",
+        os.path.expanduser("~/Desktop/Bhavcopy"),
+        os.path.expanduser("~/Downloads"),
+    ] if p
+]
+BHAVCOPY_MAX_FILES_PER_DIR = int(os.getenv("BHAVCOPY_MAX_FILES_PER_DIR", "200"))
+
 
 # ==================== VALIDATION ====================
 

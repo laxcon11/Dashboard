@@ -365,7 +365,7 @@ p3.metric("Risk Off", f"{p_risk_off:.0%}")
 st.subheader("📋 Factor Breakdown")
 factor_df = pd.DataFrame(macro_result["rows"] + liquidity_result["rows"])
 if not factor_df.empty:
-    st.dataframe(factor_df, use_container_width=True, hide_index=True)
+    st.dataframe(factor_df, width='stretch', hide_index=True)
 
 st.subheader("📉 Regime Trend (Last 7 Sessions)")
 trend_scores = []
@@ -411,7 +411,7 @@ trend_fig.add_trace(go.Scatter(
     name="Regime Score",
 ))
 trend_fig.update_layout(height=300, yaxis_title="Score (-1 to +1)")
-st.plotly_chart(trend_fig, use_container_width=True)
+st.plotly_chart(trend_fig, width='stretch')
 
 st.subheader("📈 Enabled Macro Charts")
 macro_chart_items = []
@@ -430,7 +430,7 @@ for idx in range(0, len(macro_chart_items), 2):
                 chart_df = prepare_timeseries_for_chart(df1)
                 fig1.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label1))
                 fig1.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
-                st.plotly_chart(fig1, use_container_width=True)
+                st.plotly_chart(fig1, width='stretch')
 
     if idx + 1 < len(macro_chart_items):
         label2, symbol2 = macro_chart_items[idx + 1]
@@ -442,7 +442,7 @@ for idx in range(0, len(macro_chart_items), 2):
                     chart_df = prepare_timeseries_for_chart(df2)
                     fig2.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label2))
                     fig2.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
-                    st.plotly_chart(fig2, use_container_width=True)
+                    st.plotly_chart(fig2, width='stretch')
 
 st.subheader("💧 Liquidity Drivers")
 for factor in enabled_liquidity.values():

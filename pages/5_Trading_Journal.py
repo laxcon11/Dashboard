@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-import os
 from NSE_Config import NIFTY_200
 from data_fetch import batch_download, extract_price_data
 from utils import setup_page
@@ -215,7 +214,7 @@ elif page_mode == "View History":
                 lambda x: 'color: #00FF00' if isinstance(x, (int, float)) and x > 0 else ('color: #FF0000' if isinstance(x, (int, float)) and x < 0 else ''),
                 subset=["Unrealized P&L"] if "Unrealized P&L" in display_df.columns else []
             ),
-            use_container_width=True, 
+            width='stretch', 
             hide_index=True
         )
         

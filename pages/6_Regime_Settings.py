@@ -62,15 +62,15 @@ render_factor_controls("liquidity_factors", "Liquidity Factors")
 st.markdown("---")
 btn1, btn2, btn3 = st.columns(3)
 with btn1:
-    if st.button("💾 Save Settings", use_container_width=True):
+    if st.button("💾 Save Settings", width='stretch'):
         save_regime_settings(settings)
         st.success("Settings saved.")
 with btn2:
-    if st.button("↩️ Reset to Defaults", use_container_width=True):
+    if st.button("↩️ Reset to Defaults", width='stretch'):
         settings = reset_regime_settings()
         st.success("Reset to defaults. Refresh page to view default values.")
 with btn3:
-    if st.button("🔄 Reload Saved", use_container_width=True):
+    if st.button("🔄 Reload Saved", width='stretch'):
         st.rerun()
 
 st.caption("`On` = include factor, `Inv` = invert direction (higher value becomes bearish).")

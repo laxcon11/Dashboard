@@ -33,7 +33,8 @@ from config import (
 # Import NSE-specific config
 from NSE_Config import (
     NSE_SECTOR_INDICES,
-    STOCK_CATEGORIES,
+    SECTOR_CATEGORIES,
+    THEMATIC_CATEGORIES,
     PRESET_WATCHLISTS,
     NIFTY_200
 )
@@ -92,7 +93,7 @@ selected_stocks = []
 if selection_method == "Preset Watchlists":
     # Dynamic Watchlist Loading
     watchlists = wm.load_watchlists()
-    watchlist_names = list(watchlists.keys())
+    watchlist_names = [name for name in watchlists.keys() if name != "NIFTY 200"]
     
     col1, col2 = st.sidebar.columns([3, 1])
     with col1:
@@ -129,19 +130,27 @@ if selection_method == "Preset Watchlists":
                     st.rerun()
 
 elif selection_method == "By Category":
+    category_view = st.sidebar.radio(
+        "Category View",
+        ["Sector-wise", "Thematic"],
+        horizontal=True,
+        help="Use sector-wise buckets for first-pass scanning."
+    )
+    category_map = SECTOR_CATEGORIES if category_view == "Sector-wise" else THEMATIC_CATEGORIES
     category = st.sidebar.selectbox(
         "Choose Category",
-        list(STOCK_CATEGORIES.keys()),
+        list(category_map.keys()),
         help="Select by sector/theme"
     )
-    category_stocks = STOCK_CATEGORIES[category]
+    category_stocks = category_map[category]
 
-    max_select = min(20, len(category_stocks))
+    per_category_limit = 30 if category == "🔥 Most Traded F&O (30)" else 20
+    max_select = min(per_category_limit, len(category_stocks))
     selected_stocks = st.sidebar.multiselect(
         f"Select stocks (max {max_select})",
         category_stocks,
         default=category_stocks[:max_select],
-        max_selections=20
+        max_selections=per_category_limit
     )
 
 else:
@@ -158,6 +167,15 @@ mode = st.sidebar.radio(
     "Mode",
     ["Morning Review", "End of Day", "Full Analysis", "Swing Rankings"],
     help="Different analysis modes"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.header("🎯 Swing Engine")
+swing_strictness = st.sidebar.selectbox(
+    "Strictness",
+    ["Balanced", "Conservative", "Aggressive"],
+    index=0,
+    help="Conservative = fewer/higher-conviction picks. Aggressive = more candidates."
 )
 
 st.sidebar.markdown("---")
@@ -252,7 +270,7 @@ if mode != "Swing Rankings":
 
         fig.update_xaxes(tickangle=-45)
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 # ==================== MODE-SPECIFIC DISPLAYS ====================
 
@@ -324,7 +342,7 @@ if mode == "Morning Review":
         # Display with color
         st.dataframe(
             gap_up_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
 
@@ -342,7 +360,7 @@ if mode == "Morning Review":
 
         st.dataframe(
             gap_down_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
 
@@ -378,7 +396,7 @@ if mode == "Morning Review":
         nr7_df['Change %'] = nr7_df['Change %'].apply(lambda x: format_change(x) if x else 'N/A')
         nr7_df['Vol Ratio'] = nr7_df['Vol Ratio'].apply(lambda x: f"{x:.2f}x")
         
-        st.dataframe(nr7_df, use_container_width=True, hide_index=True)
+        st.dataframe(nr7_df, width='stretch', hide_index=True)
         st.success(f"🔥 Found {len(nr7_stocks)} stocks coiling for a move!")
     else:
         st.info("No NR7 setups detected today.")
@@ -440,7 +458,7 @@ elif mode == "End of Day":
             df_above = pd.DataFrame(above_vwap_list)
             df_above['Close'] = df_above['Close'].apply(lambda x: f"₹{x:.2f}")
             df_above['VWAP'] = df_above['VWAP'].apply(lambda x: f"₹{x:.2f}")
-            st.dataframe(df_above, use_container_width=True, hide_index=True)
+            st.dataframe(df_above, width='stretch', hide_index=True)
         else:
             st.info("No stocks above VWAP")
 
@@ -450,7 +468,7 @@ elif mode == "End of Day":
             df_below = pd.DataFrame(below_vwap_list)
             df_below['Close'] = df_below['Close'].apply(lambda x: f"₹{x:.2f}")
             df_below['VWAP'] = df_below['VWAP'].apply(lambda x: f"₹{x:.2f}")
-            st.dataframe(df_below, use_container_width=True, hide_index=True)
+            st.dataframe(df_below, width='stretch', hide_index=True)
         else:
             st.info("No stocks below VWAP")
 
@@ -487,7 +505,7 @@ elif mode == "End of Day":
                 {"Category": "Declines 🔴", "Count": declines, "Percent": f"{(declines/total)*100:.1f}%"},
                 {"Category": "Unchanged ⚪", "Count": unchanged, "Percent": f"{(unchanged/total)*100:.1f}%"}
             ]
-            st.dataframe(pd.DataFrame(ad_data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(ad_data), width='stretch', hide_index=True)
             
             # Summary stats below table
             st.markdown("#### Summary")
@@ -510,7 +528,7 @@ elif mode == "End of Day":
                 hole=0.4
             )])
             fig.update_layout(height=300, margin=dict(t=0, b=0, l=0, r=0))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
     st.markdown("---")
 
@@ -531,8 +549,8 @@ elif mode == "End of Day":
                             'RSI': rsi,
                             'Status': 'Overbought' if rsi >= RSI_OVERBOUGHT else 'Oversold'
                         })
-            except:
-                pass
+            except Exception as exc:
+                logger.debug(f"RSI extreme calculation failed for {symbol}: {exc}")
 
     if extreme_rsi:
         rsi_df = pd.DataFrame(extreme_rsi)
@@ -564,7 +582,7 @@ elif mode == "End of Day":
             height=300
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         st.caption(f"📊 {len(extreme_rsi)} stocks at RSI extremes")
     else:
@@ -601,7 +619,8 @@ elif mode == "Full Analysis":
                 rsi = calculate_rsi(df, RSI_PERIOD).iloc[-1]
                 rsi_status = "Overbought" if rsi >= RSI_OVERBOUGHT else ("Oversold" if rsi <= RSI_OVERSOLD else "Neutral")
                 st.metric("RSI (14)", f"{rsi:.2f}", rsi_status)
-            except:
+            except Exception as exc:
+                logger.debug(f"RSI metric failed for {symbol}: {exc}")
                 st.metric("RSI (14)", "N/A")
 
         with col4:
@@ -609,7 +628,8 @@ elif mode == "Full Analysis":
                 atr = calculate_atr(df, ATR_PERIOD).iloc[-1]
                 stop_loss = price - (atr * ATR_MULTIPLIER) if price and atr else None
                 st.metric("ATR Stop Loss", format_price(stop_loss) if stop_loss else "N/A")
-            except:
+            except Exception as exc:
+                logger.debug(f"ATR metric failed for {symbol}: {exc}")
                 st.metric("ATR Stop Loss", "N/A")
 
         with col5:
@@ -707,8 +727,8 @@ elif mode == "Full Analysis":
                     name='EMA 50',
                     line=dict(color='red', width=2)
                 ))
-            except:
-                pass
+            except Exception as exc:
+                logger.debug(f"EMA overlay failed for {symbol}: {exc}")
 
         # Add VWAP line
         if vwap is not None:
@@ -739,7 +759,7 @@ elif mode == "Full Analysis":
             xaxis_rangeslider_visible=False
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # Volume Chart
         st.markdown("**📊 Volume Analysis**")
@@ -766,7 +786,7 @@ elif mode == "Full Analysis":
         ))
 
         vol_fig.update_layout(height=200, showlegend=True)
-        st.plotly_chart(vol_fig, use_container_width=True)
+        st.plotly_chart(vol_fig, width='stretch')
 
         # Additional Stats
         st.markdown("**📈 Additional Statistics**")
@@ -792,155 +812,278 @@ elif mode == "Full Analysis":
 
 elif mode == "Swing Rankings":
     st.subheader("🎯 Swing Trade Rankings")
-    st.caption(f"Multi-factor analysis of {len(selected_stocks)} selected stocks")
+    st.caption(f"Regime-gated setup engine on {len(selected_stocks)} selected stocks")
+
+    strictness_cfg = {
+        "Conservative": {
+            "tier_a_plus": 8.8,
+            "tier_a": 8.0,
+            "tier_b": 7.2,
+            "min_vol_ratio": 1.0,
+            "min_rs": -1.0,
+            "risk_on_breadth": 1.2,
+            "risk_off_breadth": 0.85,
+            "risk_off_min_score": 9.4,
+            "top_n": 2,
+            "watchlist_n": 4,
+        },
+        "Balanced": {
+            "tier_a_plus": 8.5,
+            "tier_a": 7.5,
+            "tier_b": 6.5,
+            "min_vol_ratio": 0.8,
+            "min_rs": -3.0,
+            "risk_on_breadth": 1.1,
+            "risk_off_breadth": 0.9,
+            "risk_off_min_score": 9.0,
+            "top_n": 3,
+            "watchlist_n": 5,
+        },
+        "Aggressive": {
+            "tier_a_plus": 8.2,
+            "tier_a": 7.0,
+            "tier_b": 6.0,
+            "min_vol_ratio": 0.6,
+            "min_rs": -5.0,
+            "risk_on_breadth": 1.0,
+            "risk_off_breadth": 0.95,
+            "risk_off_min_score": 8.6,
+            "top_n": 4,
+            "watchlist_n": 8,
+        },
+    }
+    cfg = strictness_cfg.get(swing_strictness, strictness_cfg["Balanced"])
+
+    def clamp_score(value):
+        return max(0.0, min(10.0, value))
+
+    def setup_tier(score):
+        if score >= cfg["tier_a_plus"]:
+            return "A+"
+        if score >= cfg["tier_a"]:
+            return "A"
+        if score >= cfg["tier_b"]:
+            return "B"
+        return "C"
 
     nifty_df = index_data.get('^NSEI')
+    bank_df = index_data.get('^NSEBANK')
 
-    rankings_momentum = []
-    rankings_pullback = []
+    advances, declines = 0, 0
+    for symbol in selected_stocks:
+        df = watchlist_data.get(symbol)
+        _, _, chg = get_live_price_safe(symbol, df)
+        if chg is not None:
+            if chg > 0.1:
+                advances += 1
+            elif chg < -0.1:
+                declines += 1
 
-    with st.spinner("Calculating strategy scores..."):
+    breadth_ratio = (advances / declines) if declines > 0 else (float(advances) if advances > 0 else 0.0)
+
+    def trend_signal(df):
+        if df is None or len(df) < 50:
+            return 0
+        close = df['Close'].dropna()
+        if len(close) < 50:
+            return 0
+        ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+        current = close.iloc[-1]
+        if current > ema20 > ema50:
+            return 1
+        if current < ema20 < ema50:
+            return -1
+        return 0
+
+    regime_score = trend_signal(nifty_df) + trend_signal(bank_df)
+    if regime_score >= 1 and breadth_ratio >= cfg["risk_on_breadth"]:
+        regime_label = "🟢 Risk On"
+        regime_bias = "Long setups preferred"
+        regime_adj = 0.7
+    elif regime_score <= -1 and breadth_ratio <= cfg["risk_off_breadth"]:
+        regime_label = "🔴 Risk Off"
+        regime_bias = "Defensive mode, avoid aggressive longs"
+        regime_adj = -1.0
+    else:
+        regime_label = "🟡 Neutral"
+        regime_bias = "Selective setups only"
+        regime_adj = 0.0
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Regime Filter", regime_label)
+    r2.metric("A/D Breadth", f"{advances}:{declines}", f"{breadth_ratio:.2f}")
+    r3.info(f"{regime_bias} | {swing_strictness}")
+
+    raw_rows = []
+    with st.spinner("Scoring candidates with regime and setup filters..."):
         for symbol in selected_stocks:
             df = watchlist_data.get(symbol)
-            if df is not None and len(df) >= 20:
-                try:
-                    price, change, change_pct = get_live_price_safe(symbol, df)
-                    vol_ratio = analytics.calculate_volume_ratio(df)
-                    rs = analytics.calculate_relative_strength(df, nifty_df)
-                    
-                    # Calculate VWAP based on selected anchor
-                    df_vwap = df.tail(vwap_days)
-                    vwap = analytics.calculate_vwap(df_vwap)
-                    vwap_value = vwap.iloc[-1] if vwap is not None else None
-                    vwap_position = "Above" if (price and vwap_value and price > vwap_value) else "Below"
-                    
-                    # 1. Momentum Score
-                    mom_score = analytics.calculate_momentum_score(df, nifty_df)
-                    rankings_momentum.append({
-                        'Symbol': symbol.replace('.NS', ''),
-                        'Score': mom_score,
-                        'Price': price,
-                        'Change %': change_pct,
-                        'Vol Ratio': vol_ratio,
-                        'RSI': calculate_rsi(df).iloc[-1] if len(df) > 14 else 0,
-                        'Trend': 'Bullish' if calculate_ema(df, 20).iloc[-1] > calculate_ema(df, 50).iloc[-1] else 'Bearish'
-                    })
-                    
-                    # 2. Pullback Score
-                    pb_score = analytics.calculate_pullback_score(df, nifty_df)
-                    rankings_pullback.append({
-                        'Symbol': symbol.replace('.NS', ''),
-                        'Score': pb_score,
-                        'Price': price,
-                        'dist EMA20': f"{((price - calculate_ema(df, 20).iloc[-1])/calculate_ema(df, 20).iloc[-1]*100):.1f}%",
-                        'RSI': calculate_rsi(df).iloc[-1] if len(df) > 14 else 0,
-                        'Auto-Setup': 'NR7' if analytics.detect_nr7(df) else '-'
-                    })
+            if df is None or len(df) < 60:
+                continue
 
-                except Exception as e:
-                    logger.error(f"Error calculating score for {symbol}: {e}")
+            try:
+                price, change, change_pct = get_live_price_safe(symbol, df)
+                if price is None:
+                    continue
 
-    # Combine and find Top 3 Overall
-    all_setups = []
-    
-    # Process Momentum for Top 3
-    for r in rankings_momentum:
-        r['Setup Type'] = 'Momentum 🚀'
-        all_setups.append(r)
-        
-    # Process Pullback for Top 3
-    for r in rankings_pullback:
-        r['Setup Type'] = 'Pullback 🛒'
-        all_setups.append(r)
-        
-    # Sort by Score descending
-    all_setups.sort(key=lambda x: x['Score'], reverse=True)
-    top_3 = all_setups[:3]
+                vol_ratio = analytics.calculate_volume_ratio(df)
+                rs = analytics.calculate_relative_strength(df, nifty_df)
+                rsi = calculate_rsi(df).iloc[-1] if len(df) > 14 else np.nan
+                ema20 = calculate_ema(df, 20).iloc[-1]
+                ema50 = calculate_ema(df, 50).iloc[-1]
+                trend_bull = bool(price > ema20 > ema50)
+                breakout = analytics.detect_breakout(df)
+                nr7 = analytics.detect_nr7(df)
+                dist_ema20 = ((price - ema20) / ema20 * 100) if ema20 else 0
 
-    if top_3:
-        st.markdown("### 🏆 Top 3 Swing Picks Today")
-        top_cols = st.columns(3)
-        
-        for i, setup in enumerate(top_3):
+                # Stage A: must-have quality filters
+                if vol_ratio < cfg["min_vol_ratio"]:
+                    continue
+                if rs < cfg["min_rs"]:
+                    continue
+
+                raw_rows.append({
+                    "Symbol": symbol.replace('.NS', ''),
+                    "Price": price,
+                    "Change %": change_pct,
+                    "RS": rs,
+                    "Vol Ratio": vol_ratio,
+                    "RSI": rsi,
+                    "dist_ema20": dist_ema20,
+                    "Trend": "Bullish" if trend_bull else "Bearish",
+                    "Breakout": breakout,
+                    "NR7": nr7,
+                    "Mom Base": analytics.calculate_momentum_score(df, nifty_df),
+                    "PB Base": analytics.calculate_pullback_score(df, nifty_df),
+                })
+            except Exception as e:
+                logger.error(f"Error scoring {symbol}: {e}")
+
+    if not raw_rows:
+        st.warning("No stocks passed base quality filters. Relax filters or expand watchlist.")
+        st.stop()
+
+    score_df = pd.DataFrame(raw_rows)
+    score_df["RS Pct"] = score_df["RS"].rank(pct=True).fillna(0.5)
+    score_df["Vol Pct"] = score_df["Vol Ratio"].rank(pct=True).fillna(0.5)
+
+    score_df["Momentum Score"] = score_df.apply(
+        lambda r: clamp_score(
+            (0.60 * r["Mom Base"]) +
+            (3.0 * r["RS Pct"]) +
+            (1.5 * r["Vol Pct"]) +
+            (1.0 if r["Breakout"] else 0.0) +
+            (1.0 if r["Trend"] == "Bullish" else -1.0) -
+            max(0.0, r["dist_ema20"] - 6.0) * 0.25 +
+            regime_adj
+        ),
+        axis=1
+    )
+
+    score_df["Pullback Score"] = score_df.apply(
+        lambda r: clamp_score(
+            (0.70 * r["PB Base"]) +
+            (1.0 if 0 <= r["dist_ema20"] <= 4 else 0.0) +
+            (1.0 if 40 <= r["RSI"] <= 55 else 0.0) +
+            (1.5 * r["RS Pct"]) +
+            (0.5 if r["NR7"] else 0.0) +
+            (0.5 if r["Trend"] == "Bullish" else -0.5) +
+            (regime_adj * 0.8)
+        ),
+        axis=1
+    )
+
+    score_df["Volatility Score"] = score_df.apply(
+        lambda r: clamp_score(
+            (3.0 if r["NR7"] else 0.0) +
+            (2.0 if abs(r["dist_ema20"]) <= 2 else 0.0) +
+            (2.0 * r["Vol Pct"]) +
+            (1.0 if r["Breakout"] else 0.0) +
+            (1.0 * r["RS Pct"]) +
+            (regime_adj * 0.5)
+        ),
+        axis=1
+    )
+
+    def build_archetype(df, score_col, setup_name):
+        temp = df.copy()
+        temp["Score"] = temp[score_col].round(2)
+        temp["Setup Type"] = setup_name
+        temp["Tier"] = temp["Score"].apply(setup_tier)
+        return temp.sort_values("Score", ascending=False)
+
+    momentum_df = build_archetype(score_df, "Momentum Score", "Momentum 🚀")
+    pullback_df = build_archetype(score_df, "Pullback Score", "Pullback 🛒")
+    volatility_df = build_archetype(score_df, "Volatility Score", "Volatility Expansion 🌀")
+
+    combined = pd.concat([momentum_df, pullback_df, volatility_df], ignore_index=True)
+    actionable = combined[
+        (combined["Tier"].isin(["A+", "A"])) &
+        ((regime_label != "🔴 Risk Off") | (combined["Score"] >= cfg["risk_off_min_score"]))
+    ].sort_values("Score", ascending=False).drop_duplicates(subset=["Symbol"]).head(cfg["top_n"])
+
+    watchlist_candidates = combined[
+        combined["Tier"].isin(["B"])
+    ].sort_values("Score", ascending=False).drop_duplicates(subset=["Symbol"]).head(cfg["watchlist_n"])
+
+    if not actionable.empty:
+        st.markdown("### 🏆 Top Actionable Picks (A+/A)")
+        top_cols = st.columns(len(actionable))
+        for i, (_, row) in enumerate(actionable.iterrows()):
             with top_cols[i]:
-                # Color code score
-                score = setup['Score']
-                color = "green" if score >= 8 else "orange"
-                
                 with st.container(border=True):
-                    st.markdown(f"#### {i+1}. {setup['Symbol']}")
-                    st.markdown(f"**Score: :{color}[{score}/10]**")
-                    st.caption(f"Strategy: {setup['Setup Type']}")
-                    
-                    st.divider()
-                    
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.metric("Price", format_price(setup['Price']))
-                    with c2:
-                         st.metric("RSI", f"{setup['RSI']:.1f}" if isinstance(setup['RSI'], (int, float)) else setup['RSI'])
-                    
-                    if setup['Setup Type'] == 'Momentum 🚀':
-                        st.caption(f"Trend: {setup.get('Trend', 'N/A')}")
-                    else:
-                        st.caption(f"EMA20: {setup.get('dist EMA20', 'N/A')}")
-                    
-                    # Log Setup Button
-                    sym = setup['Symbol']
+                    st.markdown(f"#### {i+1}. {row['Symbol']}")
+                    st.caption(f"{row['Setup Type']} • Tier {row['Tier']}")
+                    st.metric("Score", f"{row['Score']:.2f}/10")
+                    st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
+                    st.caption(f"RSI: {row['RSI']:.1f} | Vol: {row['Vol Ratio']:.2f}x")
+
+                    sym = row['Symbol']
                     prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
-                    if st.button("Log Setup", key=f"log_setup_{i}_{sym}", use_container_width=True):
+                    if st.button("Log Setup", key=f"log_setup_new_{i}_{sym}", width='stretch'):
                         st.session_state["journal_prefill"] = {
                             "symbol": prefill_symbol,
                             "strategy": "Swing Ranking",
                             "side": "LONG",
                         }
                         st.switch_page("pages/5_Trading_Journal.py")
+    else:
+        st.info("No A+/A setups today under current filters and regime gate.")
+
+    if not watchlist_candidates.empty:
+        st.markdown("### 👀 Watchlist Candidates (B Tier)")
+        wl = watchlist_candidates[["Symbol", "Setup Type", "Score", "Price", "Change %", "RS", "Vol Ratio", "RSI"]].copy()
+        wl["Price"] = wl["Price"].apply(format_price)
+        wl["Change %"] = wl["Change %"].apply(format_change)
+        wl["Vol Ratio"] = wl["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+        wl["RSI"] = wl["RSI"].apply(lambda x: f"{x:.1f}")
+        st.dataframe(wl, width='stretch', hide_index=True)
 
     st.markdown("---")
+    st.markdown("### 🚀 Momentum Candidates")
+    mview = momentum_df[["Symbol", "Tier", "Score", "Price", "Change %", "Vol Ratio", "RSI", "Trend"]].head(12).copy()
+    mview["Price"] = mview["Price"].apply(format_price)
+    mview["Change %"] = mview["Change %"].apply(format_change)
+    mview["Vol Ratio"] = mview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+    mview["RSI"] = mview["RSI"].apply(lambda x: f"{x:.1f}")
+    st.dataframe(mview, width='stretch', hide_index=True)
 
-    # Custom styling function for scores
-    def style_score(v):
-        try:
-            val = float(v)
-            if val >= 10:
-                return 'background-color: #008000; color: white; font-weight: bold'  # Solid Green
-            elif val >= 7:
-                return 'background-color: #90EE90; color: black'  # Light Green
-            else:
-                return ''
-        except:
-            return ''
+    st.markdown("### 🛒 Pullback Candidates")
+    pview = pullback_df[["Symbol", "Tier", "Score", "Price", "RSI", "dist_ema20", "Trend", "NR7"]].head(12).copy()
+    pview["Price"] = pview["Price"].apply(format_price)
+    pview["RSI"] = pview["RSI"].apply(lambda x: f"{x:.1f}")
+    pview["dist_ema20"] = pview["dist_ema20"].apply(lambda x: f"{x:.1f}%")
+    pview["NR7"] = pview["NR7"].apply(lambda x: "Yes" if x else "-")
+    st.dataframe(pview, width='stretch', hide_index=True)
 
-    # Display Momentum Rankings
-    st.markdown("### 🚀 Momentum / Breakout Candidates")
-    if rankings_momentum:
-        mom_df = pd.DataFrame(rankings_momentum).sort_values(by='Score', ascending=False)
-        mom_style = mom_df.copy() # Keep numeric for styling
-        
-        # Format for display
-        mom_df['Price'] = mom_df['Price'].apply(lambda x: format_price(x) if x else 'N/A')
-        mom_df['Change %'] = mom_df['Change %'].apply(lambda x: format_change(x) if x else 'N/A')
-        mom_df['Vol Ratio'] = mom_df['Vol Ratio'].apply(lambda x: f"{x:.2f}x")
-        mom_df['RSI'] = mom_df['RSI'].apply(lambda x: f"{x:.1f}")
-        
-        # Apply strict score styling
-        st.dataframe(mom_df.style.map(style_score, subset=['Score']), use_container_width=True, hide_index=True)
-    
-    st.markdown("---")
-    
-    # Display Pullback Rankings
-    st.markdown("### 🛒 Pullback / Value Candidates")
-    if rankings_pullback:
-        pb_df = pd.DataFrame(rankings_pullback).sort_values(by='Score', ascending=False)
-        
-        pb_df['Price'] = pb_df['Price'].apply(lambda x: format_price(x) if x else 'N/A')
-        pb_df['RSI'] = pb_df['RSI'].apply(lambda x: f"{x:.1f}")
-        
-        st.dataframe(pb_df.style.map(style_score, subset=['Score']), use_container_width=True, hide_index=True)
-
-
-    if not rankings_momentum and not rankings_pullback:
-        st.info("Insufficient data to calculate swing rankings")
+    st.markdown("### 🌀 Volatility Expansion Candidates")
+    vview = volatility_df[["Symbol", "Tier", "Score", "Price", "Vol Ratio", "NR7", "Breakout"]].head(12).copy()
+    vview["Price"] = vview["Price"].apply(format_price)
+    vview["Vol Ratio"] = vview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+    vview["NR7"] = vview["NR7"].apply(lambda x: "Yes" if x else "-")
+    vview["Breakout"] = vview["Breakout"].apply(lambda x: "Yes" if x else "-")
+    st.dataframe(vview, width='stretch', hide_index=True)
 
 # ==================== FOOTER ====================
 st.markdown("---")
