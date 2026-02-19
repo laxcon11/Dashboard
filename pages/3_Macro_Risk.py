@@ -1,253 +1,350 @@
-import streamlit as st
+import math
+
 import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
 
-from data_fetch import (
-    batch_download,
-    extract_price_data,
-    prepare_timeseries_for_chart,
-    fetch_india_vix,
-    get_ticker_price,
-    fetch_fred_series
-)
-
-
-from config import MACRO_THRESHOLDS, FRED_API_KEY, MACRO_WEIGHTS, MACRO_SYMBOLS
+from config import FRED_API_KEY
+from data_fetch import batch_download, fetch_fred_series, fetch_india_vix, prepare_timeseries_for_chart
+from regime_model import load_regime_settings
 from utils import setup_page
-import analytics
+
 
 setup_page("Dashboard Launcher")
 st.title("🌍 India Macro Risk Dashboard")
+st.caption("Configurable regime model combining Macro and Liquidity factors.")
 
-st.caption(
-    "Combines global markets, FX, yields, commodities, and volatility "
-    "to estimate daily Risk-On / Risk-Off conditions."
-)
-
-liquidity_series = {}   # <-- initialize first
-
-if not FRED_API_KEY:
-    st.warning("FRED API key not found. Liquidity indicators disabled.")
-else:
-    with st.spinner("Fetching liquidity data..."):
-        liquidity_series = {
-            "Fed Balance Sheet": fetch_fred_series("WALCL", FRED_API_KEY, days=30),
-            "Reverse Repo": fetch_fred_series("RRPONTSYD", FRED_API_KEY, days=30),
-            "Treasury General Account": fetch_fred_series("WTREGEN", FRED_API_KEY, days=30),
-        }
+settings = load_regime_settings()
+blend = settings["blend"]
+macro_factors = settings["macro_factors"]
+liquidity_factors = settings["liquidity_factors"]
 
 
-
-# Indicators and Weights are imported from config.py
-T = {
-    "equity": MACRO_THRESHOLDS.get("equity", 0.5),
-    "dxy": MACRO_THRESHOLDS.get("dxy", 0.5),
-    "yield": MACRO_THRESHOLDS.get("yield", 0.5),
-    "crude": MACRO_THRESHOLDS.get("crude", 0.5),
-    "gold": MACRO_THRESHOLDS.get("gold", 0.7),
-    "vix": MACRO_THRESHOLDS.get("vix", 2),
-}
+def clip(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
 
 
-# ================= SCORING LOGIC =================
+def normalize_weights(primary: float, secondary: float) -> tuple[float, float]:
+    total = primary + secondary
+    if total <= 0:
+        return 0.5, 0.5
+    return primary / total, secondary / total
 
-def score_indicator(symbol, df):
-    """Daily risk scoring logic"""
 
-    price, change, change_pct = extract_price_data(df)
+def build_ratio_series(left: pd.Series, right: pd.Series) -> pd.Series:
+    df = pd.concat([left.rename("left"), right.rename("right")], axis=1).ffill().dropna()
+    if df.empty:
+        return pd.Series(dtype=float)
+    ratio = (df["left"] / df["right"]).replace([float("inf"), -float("inf")], pd.NA).dropna()
+    return ratio
 
-    # Fallback if history failed
-    if change_pct is None:
-        price, change, change_pct = get_ticker_price(symbol)
 
-    if change_pct is None:
+def with_offset(series: pd.Series, offset: int) -> pd.Series:
+    if offset <= 0:
+        return series
+    if len(series) <= offset:
+        return pd.Series(dtype=float)
+    return series.iloc[:-offset]
+
+
+def compute_series_signal(series: pd.Series, inverse: bool, fast_window: int, slow_window: int, fast_w: float, slow_w: float):
+    s = series.dropna()
+    minimum_required = max(fast_window + 1, slow_window + 2)
+    if len(s) < minimum_required:
         return None
 
-    # Risk assets rising = bullish
-    if symbol in ["^DJI", "^IXIC", "^NSEI", "^NSEBANK", "BTC-USD"]:
-        if change_pct > T["equity"]:
-            return 1
-        elif change_pct < -T["equity"]:
-            return -1
-        else:
-            return 0
-
-    # Dollar / yields rising = risk-off
-
-    if symbol == "DX-Y.NYB":
-        return -1 if change_pct > T["dxy"] else (1 if change_pct < -T["dxy"] else 0)
-
-    # Yields
-    if symbol == "^TNX":
-        return -1 if change_pct > T["yield"] else (1 if change_pct < -T["yield"] else 0)
-
-    # USDINR
-    if symbol == "USDINR=X":  # FIXED: Updated from INRUSD=X
-        return -1 if change_pct > T["dxy"] else (1 if change_pct < -T["dxy"] else 0)
-
-    # Crude rising hurts India
-    if symbol == "CL=F":
-        if change_pct > T["crude"]:
-            return -1
-        elif change_pct < -T["crude"]:
-            return 1
-        else:
-            return 0
-
-    # Gold defensive
-    if symbol == "GC=F":
-        return -1 if change_pct > T["gold"] else 0
-
-    return 0
-
-
-# ================= REGIME CLASSIFICATION =================
-
-def classify_regime(score, indicator_count):
-    threshold = max(4, (indicator_count + 2) // 3)
-
-    if score >= threshold:
-        return "🟢 Risk On", "success"
-    elif score <= -threshold:
-        return "🔴 Risk Off", "error"
+    fast_change_pct = ((s.iloc[-1] / s.iloc[-(fast_window + 1)]) - 1) * 100
+    changes = (s.pct_change() * 100).dropna()
+    fast_vol = changes.tail(60).std()
+    if pd.isna(fast_vol) or fast_vol == 0:
+        fast_score = 0.0 if abs(fast_change_pct) < 1e-9 else (1.0 if fast_change_pct > 0 else -1.0)
     else:
-        return "🟡 Neutral", "warning"
+        fast_score = clip(fast_change_pct / (fast_vol * max(1.0, fast_window ** 0.5)), -2.0, 2.0)
+
+    slow_ma = s.rolling(slow_window).mean().iloc[-1]
+    if pd.isna(slow_ma) or slow_ma == 0:
+        return None
+
+    slow_dev_pct = ((s.iloc[-1] / slow_ma) - 1) * 100
+    dev_hist = ((s / s.rolling(slow_window).mean()) - 1).dropna() * 100
+    slow_vol = dev_hist.tail(120).std()
+    if pd.isna(slow_vol) or slow_vol == 0:
+        slow_score = 0.0 if abs(slow_dev_pct) < 1e-9 else (1.0 if slow_dev_pct > 0 else -1.0)
+    else:
+        slow_score = clip(slow_dev_pct / slow_vol, -2.0, 2.0)
+
+    if inverse:
+        fast_score *= -1
+        slow_score *= -1
+
+    combined = (fast_w * fast_score) + (slow_w * slow_score)
+    combined = clip(combined, -2.0, 2.0)
+
+    if combined > 0.2:
+        sentiment = "Bullish"
+    elif combined < -0.2:
+        sentiment = "Bearish"
+    else:
+        sentiment = "Neutral"
+
+    return {
+        "fast": round(float(fast_score), 3),
+        "slow": round(float(slow_score), 3),
+        "combined": round(float(combined), 3),
+        "sentiment": sentiment,
+        "points": int(len(s)),
+    }
 
 
+fast_weight = float(blend.get("fast_weight", 0.4))
+slow_weight = float(blend.get("slow_weight", 0.6))
+fast_window = int(blend.get("fast_window", 1))
+slow_window = int(blend.get("slow_window", 10))
+max_factor_weight = float(blend.get("max_factor_weight", 0.2))
+neutral_band = float(blend.get("neutral_band", 0.35))
+risk_on_threshold = float(blend.get("risk_on_threshold", 0.6))
+risk_off_threshold = float(blend.get("risk_off_threshold", 0.6))
 
-# ================= PLOT FUNCTION =================
+fast_slow_total = fast_weight + slow_weight
+if fast_slow_total <= 0:
+    fast_weight, slow_weight = 0.4, 0.6
+else:
+    fast_weight, slow_weight = fast_weight / fast_slow_total, slow_weight / fast_slow_total
 
-def plot_smooth_chart(df, title):
-    df_prepared = prepare_timeseries_for_chart(df)
+enabled_macro = {k: v for k, v in macro_factors.items() if v.get("enabled", True)}
+enabled_liquidity = {k: v for k, v in liquidity_factors.items() if v.get("enabled", True)}
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df_prepared.index,
-        y=df_prepared["Close"],
-        mode="lines",
-        name=title
-    ))
+required_symbols = set()
+for factor in enabled_macro.values():
+    if "symbol" in factor:
+        required_symbols.add(factor["symbol"])
+    if "ratio" in factor:
+        required_symbols.update(factor["ratio"])
 
-    fig.update_layout(
-        height=300,
-        margin=dict(l=10, r=10, t=30, b=10),
-        title=title,
-        hovermode="x unified"
-    )
-
-    return fig
-
-
-# ================= FETCH DATA =================
-
-symbols = list(MACRO_SYMBOLS.keys())
-
-with st.spinner("Fetching macro data..."):
-    data_1mo = batch_download(symbols, period="1mo")
-
-# ================= INDIA VIX =================
+with st.spinner("Fetching market data..."):
+    market_data = batch_download(sorted(required_symbols), period="6mo")
 
 vix_price, vix_change = fetch_india_vix()
 
-# ================= SNAPSHOT =================
+fred_raw = {}
+if FRED_API_KEY:
+    required_fred = set()
+    for factor in enabled_liquidity.values():
+        if "fred" in factor:
+            required_fred.add(factor["fred"])
+        if "fred_spread" in factor:
+            required_fred.update(factor["fred_spread"])
 
-st.subheader("📊 Macro Snapshot")
-
-cols = st.columns(4)
-
-scores = []
-rows = []
-failed_symbols = []
-
-all_items = list(MACRO_SYMBOLS.items()) + [("INDIAVIX", "India VIX")]
-
-for i, (symbol, name) in enumerate(all_items):
-
-    if symbol == "INDIAVIX":
-        price = vix_price
-        change_pct = vix_change
-        if change_pct is None or price is None:
-            score = None
-
-        elif change_pct > T["vix"]:
-            score = -1
-        elif change_pct < -T["vix"]:
-            score = 1
-        else:
-            score = 0
+    with st.spinner("Fetching liquidity data..."):
+        for sid in sorted(required_fred):
+            fred_raw[sid] = fetch_fred_series(sid, FRED_API_KEY, days=365)
+else:
+    st.warning("FRED API key not found. Liquidity factors may be unavailable.")
 
 
+market_series_cache = {}
+for symbol, df in market_data.items():
+    if df is not None and not df.empty and "Close" in df.columns:
+        close = df["Close"].dropna()
+        if not close.empty:
+            market_series_cache[symbol] = close
+
+fred_series_cache = {}
+for sid, df in fred_raw.items():
+    if df is not None and not df.empty and {"date", "value"}.issubset(df.columns):
+        series = df.set_index("date")["value"].dropna()
+        if not series.empty:
+            fred_series_cache[sid] = series
 
 
+def resolve_macro_series(factor: dict, offset: int = 0) -> pd.Series:
+    if factor.get("symbol") == "INDIAVIX":
+        if vix_price is None:
+            return pd.Series(dtype=float)
+        # No proper historical series from NSE endpoint here; keep disabled by default.
+        return pd.Series([vix_price], index=[pd.Timestamp.today()])
 
-    else:
-        # FIXED: Prioritize LIVE price (current market) over historical
-        # This ensures Indicator Breakdown shows TODAY's actual changes
-        df = data_1mo.get(symbol)
-        price, change, change_pct = extract_price_data(df)
+    if "symbol" in factor:
+        series = market_series_cache.get(factor["symbol"], pd.Series(dtype=float))
+        return with_offset(series, offset)
 
-        if price is None:
-            price, change, change_pct = get_ticker_price(symbol)
+    if "ratio" in factor:
+        left = market_series_cache.get(factor["ratio"][0], pd.Series(dtype=float))
+        right = market_series_cache.get(factor["ratio"][1], pd.Series(dtype=float))
+        ratio = build_ratio_series(left, right)
+        return with_offset(ratio, offset)
 
-        # Score calculation still uses historical data for consistency
-        df = data_1mo.get(symbol)
-        score = score_indicator(symbol, df)
+    return pd.Series(dtype=float)
 
-    if score is not None:
-        weight = MACRO_WEIGHTS.get(symbol, 1)
-        scores.append(score * weight)
-    else:
-        failed_symbols.append(name)
 
-    rows.append({
-        "Indicator": name,
-        "1-Day Change %": round(change_pct, 2) if change_pct is not None else "N/A",
-        "Score": score if score is not None else "N/A"
-    })
+def resolve_liquidity_series(factor: dict, offset: int = 0) -> pd.Series:
+    if "fred" in factor:
+        series = fred_series_cache.get(factor["fred"], pd.Series(dtype=float))
+        return with_offset(series, offset)
 
-    with cols[i % 4]:
-        if price is not None:
-            delta_str = f"{change_pct:+.2f}%" if change_pct is not None else None
-            st.metric(name, f"{price:.2f}", delta_str)
-        else:
-            st.metric(name, "No Data")
+    if "fred_spread" in factor:
+        left = fred_series_cache.get(factor["fred_spread"][0], pd.Series(dtype=float))
+        right = fred_series_cache.get(factor["fred_spread"][1], pd.Series(dtype=float))
+        spread_df = pd.concat([left.rename("left"), right.rename("right")], axis=1).ffill().dropna()
+        if spread_df.empty:
+            return pd.Series(dtype=float)
+        spread = spread_df["left"] - spread_df["right"]
+        return with_offset(spread, offset)
 
-# Liquidity logic has been moved to analytics.py
+    return pd.Series(dtype=float)
 
-# ================= TOTAL SCORE =================
 
-if not scores:
-    st.error("No valid indicators available.")
+def score_domain(factors: dict, resolver, domain_name: str, offset: int = 0):
+    enabled_count = 0
+    valid_count = 0
+    rows = []
+    valid_entries = []
+
+    for factor_id, factor in factors.items():
+        if not factor.get("enabled", True):
+            continue
+
+        enabled_count += 1
+        series = resolver(factor, offset=offset)
+        signal = compute_series_signal(
+            series=series,
+            inverse=bool(factor.get("inverse", False)),
+            fast_window=fast_window,
+            slow_window=slow_window,
+            fast_w=fast_weight,
+            slow_w=slow_weight,
+        )
+
+        base_weight = float(factor.get("weight", 0.0))
+        capped_weight = min(max(base_weight, 0.0), max_factor_weight)
+
+        if signal is None or capped_weight <= 0:
+            rows.append({
+                "Domain": domain_name,
+                "Factor": factor.get("label", factor_id),
+                "Base W": round(base_weight, 3),
+                "Capped W": round(capped_weight, 3),
+                "Eff W": 0.0,
+                "Fast": "N/A",
+                "Slow": "N/A",
+                "Combined": "N/A",
+                "Sentiment": "N/A",
+                "Points": int(len(series.dropna())),
+            })
+            continue
+
+        valid_count += 1
+        valid_entries.append({
+            "factor": factor.get("label", factor_id),
+            "base_weight": base_weight,
+            "capped_weight": capped_weight,
+            "signal": signal,
+            "points": signal["points"],
+        })
+
+    total_capped_weight = sum(item["capped_weight"] for item in valid_entries)
+    weighted_sum = 0.0
+
+    for item in valid_entries:
+        eff_weight = (item["capped_weight"] / total_capped_weight) if total_capped_weight > 0 else 0.0
+        weighted_sum += item["signal"]["combined"] * eff_weight
+        rows.append({
+            "Domain": domain_name,
+            "Factor": item["factor"],
+            "Base W": round(item["base_weight"], 3),
+            "Capped W": round(item["capped_weight"], 3),
+            "Eff W": round(eff_weight, 3),
+            "Fast": item["signal"]["fast"],
+            "Slow": item["signal"]["slow"],
+            "Combined": item["signal"]["combined"],
+            "Sentiment": item["signal"]["sentiment"],
+            "Points": item["points"],
+        })
+
+    domain_raw = weighted_sum if total_capped_weight > 0 else 0.0
+    domain_norm = clip(domain_raw / 2.0, -1.0, 1.0)
+    quality = (valid_count / enabled_count) if enabled_count > 0 else 0.0
+
+    return {
+        "raw": domain_raw,
+        "norm": domain_norm,
+        "quality": quality,
+        "enabled": enabled_count,
+        "valid": valid_count,
+        "rows": rows,
+        "has_signal": total_capped_weight > 0,
+    }
+
+
+macro_result = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=0)
+liquidity_result = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=0)
+
+macro_weight, liquidity_weight = normalize_weights(
+    float(blend.get("macro_weight", 0.6)),
+    float(blend.get("liquidity_weight", 0.4)),
+)
+
+has_macro = macro_result["has_signal"]
+has_liquidity = liquidity_result["has_signal"]
+
+if not has_macro and not has_liquidity:
+    st.error("No valid factor signals. Check data availability or enable valid factors in Regime Settings.")
     st.stop()
 
-macro_score = sum(scores)
+if has_macro and has_liquidity:
+    final_score = (macro_result["norm"] * macro_weight) + (liquidity_result["norm"] * liquidity_weight)
+    agreement = 1.0 - min(abs(macro_result["norm"] - liquidity_result["norm"]) / 2.0, 1.0)
+    data_quality = (macro_result["quality"] + liquidity_result["quality"]) / 2.0
+elif has_macro:
+    final_score = macro_result["norm"]
+    agreement = 1.0
+    data_quality = macro_result["quality"]
+else:
+    final_score = liquidity_result["norm"]
+    agreement = 1.0
+    data_quality = liquidity_result["quality"]
 
-# Liquidity score
-liquidity_score = analytics.calculate_liquidity_score(liquidity_series)
+k = 3.0
+risk_on_raw = math.exp(k * (final_score - neutral_band))
+risk_off_raw = math.exp(k * (-final_score - neutral_band))
+neutral_raw = math.exp(k * (neutral_band - abs(final_score)))
 
-# ================= FINAL COMBINED SCORE =================
+prob_total = risk_on_raw + risk_off_raw + neutral_raw
+p_risk_on = risk_on_raw / prob_total
+p_risk_off = risk_off_raw / prob_total
+p_neutral = neutral_raw / prob_total
 
-final_score = macro_score + liquidity_score
-regime, regime_color = classify_regime(final_score, len(scores))
+if p_risk_on >= risk_on_threshold and p_risk_on > p_risk_off and p_risk_on > p_neutral:
+    regime = "🟢 Risk On"
+    regime_color = "success"
+elif p_risk_off >= risk_off_threshold and p_risk_off > p_risk_on and p_risk_off > p_neutral:
+    regime = "🔴 Risk Off"
+    regime_color = "error"
+else:
+    regime = "🟡 Neutral"
+    regime_color = "warning"
 
-# Prepare data for stance
-sofr_spread = 0 # 3_Macro_Risk doesn't fetch SOFR/IORB yet
-regime_stance, _, decision_msg = analytics.get_liquidity_stance(liquidity_series, sofr_spread=sofr_spread)
+max_prob = max(p_risk_on, p_risk_off, p_neutral)
+confidence = clip(max_prob * agreement * data_quality, 0.0, 1.0)
 
+if regime == "🟢 Risk On" and confidence >= 0.65:
+    bias = "Long Bias Allowed"
+elif regime == "🔴 Risk Off" and confidence >= 0.65:
+    bias = "Short Bias Allowed"
+else:
+    bias = "Selective / Reduced Risk"
+
+st.subheader("📊 Regime Overview")
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.metric("Macro Score", macro_score)
-
+    st.metric("Macro Score", f"{macro_result['norm']:+.2f}")
+    st.caption(f"Valid factors: {macro_result['valid']}/{macro_result['enabled']}")
 with col2:
-    st.metric("Liquidity Score", liquidity_score)
-    st.caption(f"Status: **{regime_stance}**")
-
+    st.metric("Liquidity Score", f"{liquidity_result['norm']:+.2f}")
+    st.caption(f"Valid factors: {liquidity_result['valid']}/{liquidity_result['enabled']}")
 with col3:
-    st.metric("Final Risk Score", final_score)
-
-
-# ==================== REGIME DISPLAY ====================
+    st.metric("Final Regime Score", f"{final_score:+.2f}")
+    st.caption(f"Confidence: {confidence:.0%}")
 
 if regime_color == "success":
     st.success(f"### {regime}")
@@ -256,194 +353,105 @@ elif regime_color == "error":
 else:
     st.warning(f"### {regime}")
 
-st.caption(f"Liquidity Overlay: **{regime_stance}**")
-st.info(f"**Decision POV**: {decision_msg}")
+st.info(f"Actionable Bias: **{bias}**")
+st.caption(f"Agreement: {agreement:.0%} | Data quality: {data_quality:.0%}")
 
+st.subheader("🎯 Regime Probabilities")
+p1, p2, p3 = st.columns(3)
+p1.metric("Risk On", f"{p_risk_on:.0%}")
+p2.metric("Neutral", f"{p_neutral:.0%}")
+p3.metric("Risk Off", f"{p_risk_off:.0%}")
 
-# ================= RISK GAUGE =================
+st.subheader("📋 Factor Breakdown")
+factor_df = pd.DataFrame(macro_result["rows"] + liquidity_result["rows"])
+if not factor_df.empty:
+    st.dataframe(factor_df, use_container_width=True, hide_index=True)
 
-st.subheader("Risk Gauge")
-
-
-max_expected_score = max(10, len(scores) * 2)
-scaled = (final_score + max_expected_score) / (2 * max_expected_score)
-scaled = min(max(scaled, 0), 1)
-
-st.progress(scaled)
-
-
-# ================= TRADING STANCE (Useful Insight) =================
-
-if final_score >= 4:
-    stance = "Aggressive Longs Allowed"
-elif final_score <= -4:
-    stance = "Defensive Mode – Reduce Risk"
-else:
-    stance = "Normal Positioning"
-
-st.info(f"Trading Stance: {stance}")
-
-
-# ================= DESCRIPTION =================
-
-st.caption(
-    "Macro score = market sentiment. Liquidity score = monetary conditions. "
-    "Final score = combined risk regime."
-)
-
-
-
-# ================= TABLE =================
-
-st.subheader("📋 Indicator Breakdown")
-st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-if failed_symbols:
-    st.caption("Data unavailable: " + ", ".join(failed_symbols))
-
-
-# ================= RISK TREND (7 DAYS) =================
-
-st.subheader("📉 Macro Risk Trend (Last 7 Days)")
-
+st.subheader("📉 Regime Trend (Last 7 Sessions)")
 trend_scores = []
 trend_regimes = []
 
-def get_historical_liquidity_score(series_dict, lookback_idx: int) -> int:
-    """Compute liquidity score aligned with the same historical day in trend loop."""
-    if not series_dict:
-        return 0
+for offset in range(6, -1, -1):
+    macro_day = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=offset)
+    liquidity_day = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=offset)
 
-    historical = {}
-    for name, df in series_dict.items():
-        if df is None or df.empty:
-            historical[name] = None
-            continue
-        if lookback_idx > 0 and len(df) > lookback_idx:
-            historical[name] = df.iloc[:-lookback_idx].copy()
-        else:
-            historical[name] = df.copy()
+    if macro_day["has_signal"] and liquidity_day["has_signal"]:
+        score_day = (macro_day["norm"] * macro_weight) + (liquidity_day["norm"] * liquidity_weight)
+    elif macro_day["has_signal"]:
+        score_day = macro_day["norm"]
+    elif liquidity_day["has_signal"]:
+        score_day = liquidity_day["norm"]
+    else:
+        score_day = 0.0
 
-    return analytics.calculate_liquidity_score(historical)
-
-for i in range(7):
-    day_score = 0
-    valid_count = 0
-
-    for symbol in MACRO_SYMBOLS.keys():
-        df = data_1mo.get(symbol)
-
-        if df is not None and len(df) > i + 1:
-            temp_df = df.iloc[:-i] if i > 0 else df
-            score = score_indicator(symbol, temp_df)
-
-            if score is not None:
-                weight = MACRO_WEIGHTS.get(symbol, 1)
-                day_score += score * weight
-                valid_count += 1
-
-    day_score += get_historical_liquidity_score(liquidity_series, i)
-    trend_scores.append(day_score)
-
-    regime_name, _ = classify_regime(day_score, valid_count)
-    trend_regimes.append(regime_name)
-
-trend_scores = list(reversed(trend_scores))
-trend_regimes = list(reversed(trend_regimes))
-
-if trend_scores:
-    days_index = pd.date_range(
-        end=pd.Timestamp.today(),
-        periods=len(trend_scores)
-    ).date
-else:
-    days_index = []
+    trend_scores.append(score_day)
+    if score_day > neutral_band:
+        trend_regimes.append("🟢 Risk On")
+    elif score_day < -neutral_band:
+        trend_regimes.append("🔴 Risk Off")
+    else:
+        trend_regimes.append("🟡 Neutral")
 
 trend_df = pd.DataFrame({
-    "Day": days_index,
+    "Day": pd.date_range(end=pd.Timestamp.today(), periods=7).date,
     "Score": trend_scores,
-    "Regime": trend_regimes
+    "Regime": trend_regimes,
 })
 
-
-
-fig = go.Figure()
-
-color_map = {
-    "🟢 Risk On": "green",
-    "🟡 Neutral": "orange",
-    "🔴 Risk Off": "red"
-}
-
-fig.add_trace(go.Scatter(
+trend_fig = go.Figure()
+trend_fig.add_trace(go.Scatter(
     x=trend_df["Day"],
     y=trend_df["Score"],
     mode="lines+markers",
     marker=dict(
-        color=[color_map.get(r, "gray") for r in trend_df["Regime"]],
-        size=10
+        color=["green" if r == "🟢 Risk On" else ("red" if r == "🔴 Risk Off" else "orange") for r in trend_df["Regime"]],
+        size=10,
     ),
     line=dict(width=2),
-    name="Risk Score"
+    name="Regime Score",
 ))
+trend_fig.update_layout(height=300, yaxis_title="Score (-1 to +1)")
+st.plotly_chart(trend_fig, use_container_width=True)
 
-fig.update_layout(height=300)
-st.plotly_chart(fig, use_container_width=True)
+st.subheader("📈 Enabled Macro Charts")
+macro_chart_items = []
+for factor in enabled_macro.values():
+    if "symbol" in factor and factor["symbol"] in market_data:
+        macro_chart_items.append((factor["label"], factor["symbol"]))
 
-# ================= TREND CHARTS =================
-
-st.subheader("📈 Trend Charts (1 Month)")
-
-chart_items = list(MACRO_SYMBOLS.items())
-
-for idx in range(0, len(chart_items), 2):
-    col1, col2 = st.columns(2)
-
-    symbol1, name1 = chart_items[idx]
-    df1 = data_1mo.get(symbol1)
-
-    with col1:
-        if df1 is not None and len(df1) > 0:
-            with st.expander(name1):
-                fig1 = plot_smooth_chart(df1, name1)
+for idx in range(0, len(macro_chart_items), 2):
+    c1, c2 = st.columns(2)
+    label1, symbol1 = macro_chart_items[idx]
+    with c1:
+        df1 = market_data.get(symbol1)
+        if df1 is not None and not df1.empty:
+            with st.expander(label1):
+                fig1 = go.Figure()
+                chart_df = prepare_timeseries_for_chart(df1)
+                fig1.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label1))
+                fig1.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
                 st.plotly_chart(fig1, use_container_width=True)
 
-    if idx + 1 < len(chart_items):
-        symbol2, name2 = chart_items[idx + 1]
-        df2 = data_1mo.get(symbol2)
-
-        with col2:
-            if df2 is not None and len(df2) > 0:
-                with st.expander(name2):
-                    fig2 = plot_smooth_chart(df2, name2)
+    if idx + 1 < len(macro_chart_items):
+        label2, symbol2 = macro_chart_items[idx + 1]
+        with c2:
+            df2 = market_data.get(symbol2)
+            if df2 is not None and not df2.empty:
+                with st.expander(label2):
+                    fig2 = go.Figure()
+                    chart_df = prepare_timeseries_for_chart(df2)
+                    fig2.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label2))
+                    fig2.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
                     st.plotly_chart(fig2, use_container_width=True)
 
-# ================= LIQUIDITY DRIVERS =================
-
 st.subheader("💧 Liquidity Drivers")
-
-for name, df in liquidity_series.items():
-    if df is not None and not df.empty:
-
-        with st.expander(name):
-            if "date" in df.columns and "value" in df.columns:
-                st.line_chart(df.set_index("date")["value"])
-
-st.caption(
-"Fed balance ↑ = liquidity positive | Reverse Repo ↓ = positive | TGA ↓ = positive"
-)
-
-# ================= REGIME CHANGE ALERT =================
-
-if len(trend_regimes) >= 2:
-    if trend_regimes[-1] != trend_regimes[-2]:
-        st.warning(
-            f"⚠️ Regime Shift Detected: {trend_regimes[-2]} → {trend_regimes[-1]}"
-        )
-
-# ================= FOOTER =================
+for factor in enabled_liquidity.values():
+    label = factor.get("label", "Liquidity")
+    series = resolve_liquidity_series(factor, offset=0)
+    if series.empty:
+        continue
+    with st.expander(label):
+        st.line_chart(series)
 
 st.markdown("---")
-st.caption("Data Sources: Yahoo Finance + NSE India + FRED")
-st.caption(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
-
+st.caption("Configure factor weights and enabled factors from the Regime Settings page.")
