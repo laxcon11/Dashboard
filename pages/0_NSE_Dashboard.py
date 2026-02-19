@@ -39,7 +39,7 @@ from NSE_Config import (
     NIFTY_200
 )
 
-from data_fetch import batch_download, extract_price_data
+from data_fetch import batch_download, extract_price_data, get_last_batch_telemetry
 from indicators import calculate_rsi, calculate_ema, calculate_atr
 
 # Import analytics for centralized logic
@@ -208,6 +208,20 @@ with st.spinner(f"📊 Fetching data for {len(selected_stocks)} stocks..."):
     sector_data = batch_download(sector_symbols, period="1mo")
 
     watchlist_data = batch_download(selected_stocks, period="3mo")
+
+# ==================== DATA SOURCE & FRESHNESS ====================
+telemetry_df = get_last_batch_telemetry()
+if telemetry_df is not None and not telemetry_df.empty:
+    wl_telemetry = telemetry_df[telemetry_df["symbol"].isin(selected_stocks)].copy()
+    if not wl_telemetry.empty:
+        wl_telemetry = wl_telemetry.sort_values(["severity", "age_bdays"], ascending=[True, False])
+        with st.sidebar.expander("🛡️ Data Freshness", expanded=False):
+            stale_n = int(wl_telemetry["is_stale"].sum())
+            st.caption(f"{len(wl_telemetry)} symbols tracked • stale: {stale_n}")
+            show = wl_telemetry[["symbol", "source", "last_date", "age_bdays", "severity"]].rename(
+                columns={"symbol": "Symbol", "source": "Source", "last_date": "Last Date", "age_bdays": "Age (Bdays)", "severity": "Status"}
+            )
+            st.dataframe(show, width='stretch', hide_index=True)
 
 # ==================== MARKET OVERVIEW ====================
 st.subheader("🏛️ Market Overview")

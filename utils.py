@@ -9,6 +9,8 @@ import streamlit as st
 import logging
 from typing import Optional, Tuple, Dict, Any
 
+from config import PRICE_FETCH_MODE
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,25 +192,37 @@ def create_multi_line_chart(
 
 # ==================== PRICE FETCHING ====================
 
-def get_live_price_safe(symbol: str, fallback_df: Optional[pd.DataFrame] = None) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def get_live_price_safe(
+    symbol: str,
+    fallback_df: Optional[pd.DataFrame] = None,
+    mode: Optional[str] = None
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     Safely get live price with historical fallback
 
     Args:
         symbol: Yahoo Finance symbol
         fallback_df: Historical DataFrame to use if live fails
+        mode: "close_only" or "live_first" (defaults to PRICE_FETCH_MODE)
 
     Returns:
         (price, change, change_pct) tuple
     """
     from data_fetch import get_ticker_price, extract_price_data
 
-    # Try live first
-    price, change, change_pct = get_ticker_price(symbol)
+    fetch_mode = (mode or PRICE_FETCH_MODE or "close_only").strip().lower()
+    if fetch_mode not in {"close_only", "live_first"}:
+        fetch_mode = "close_only"
 
-    # Fallback to historical
+    if fetch_mode == "close_only":
+        if fallback_df is not None:
+            return extract_price_data(fallback_df)
+        return None, None, None
+
+    # live_first mode
+    price, change, change_pct = get_ticker_price(symbol)
     if price is None and fallback_df is not None:
-        price, change, change_pct = extract_price_data(fallback_df)
+        return extract_price_data(fallback_df)
 
     return price, change, change_pct
 
@@ -218,7 +232,8 @@ def display_price_metric(
     symbol: str,
     name: str,
     df: Optional[pd.DataFrame] = None,
-    symbol_type: str = 'equity'
+    symbol_type: str = 'equity',
+    mode: Optional[str] = None
 ):
     """
     Display price metric with live data and fallback
@@ -229,8 +244,9 @@ def display_price_metric(
         name: Display name
         df: Historical data fallback
         symbol_type: Asset type for formatting
+        mode: "close_only" or "live_first" (defaults to PRICE_FETCH_MODE)
     """
-    price, change, change_pct = get_live_price_safe(symbol, df)
+    price, change, change_pct = get_live_price_safe(symbol, df, mode=mode)
 
     if price is not None:
         formatted_price = format_price(price, symbol_type)
@@ -292,7 +308,8 @@ def classify_signal(
 def create_price_table(
     symbols_dict: Dict[str, str],
     data: Dict[str, pd.DataFrame],
-    columns: Optional[list] = None
+    columns: Optional[list] = None,
+    mode: Optional[str] = None
 ) -> pd.DataFrame:
     """
     Create standardized price table
@@ -301,6 +318,7 @@ def create_price_table(
         symbols_dict: {symbol: name} dictionary
         data: {symbol: DataFrame} dictionary
         columns: Custom column names
+        mode: "close_only" or "live_first" (defaults to PRICE_FETCH_MODE)
 
     Returns:
         DataFrame ready for display
@@ -311,7 +329,7 @@ def create_price_table(
     rows = []
     for symbol, name in symbols_dict.items():
         df = data.get(symbol)
-        price, change, change_pct = get_live_price_safe(symbol, df)
+        price, change, change_pct = get_live_price_safe(symbol, df, mode=mode)
 
         rows.append({
             columns[0]: name,

@@ -221,6 +221,17 @@ DEFAULT_SHORT_PERIOD = "1mo"
 
 CACHE_TTL = 300  # 5 minutes
 
+# Price source consistency mode across pages:
+# - close_only: always use latest cached/batch Close values (recommended for cross-page consistency)
+# - live_first: try live ticker quote first, fallback to Close
+PRICE_FETCH_MODE = os.getenv("PRICE_FETCH_MODE", "close_only").strip().lower()
+if PRICE_FETCH_MODE not in {"close_only", "live_first"}:
+    PRICE_FETCH_MODE = "close_only"
+
+# Data health thresholds
+DATA_STALENESS_WARN_DAYS = int(os.getenv("DATA_STALENESS_WARN_DAYS", "2"))
+DATA_STALENESS_ERROR_DAYS = int(os.getenv("DATA_STALENESS_ERROR_DAYS", "5"))
+
 
 # ==================== PATH SETTINGS ====================
 

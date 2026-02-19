@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Tuple
 from config import (
     CACHE_TTL,
+    DATA_STALENESS_WARN_DAYS,
+    DATA_STALENESS_ERROR_DAYS,
     LOCAL_NSE_HISTORY_ENABLED,
     LOCAL_NSE_HISTORY_PATH,
     LOCAL_NSE_HISTORY_WRITEBACK,
@@ -41,6 +43,12 @@ logging.basicConfig(
 
 # Shared session for FRED requests
 session = requests.Session()
+
+# Batch telemetry (updated each batch_download call)
+_LAST_BATCH_SOURCE_MAP: Dict[str, str] = {}
+_LAST_BATCH_DATE_MAP: Dict[str, Optional[pd.Timestamp]] = {}
+_LAST_BATCH_AGE_MAP: Dict[str, Optional[int]] = {}
+_LAST_BATCH_STALE_MAP: Dict[str, bool] = {}
 
 
 # ==================== SYMBOL VALIDATION ====================
@@ -367,6 +375,48 @@ def _latest_business_day() -> pd.Timestamp:
     return today - pd.offsets.BDay(1)
 
 
+def _business_day_age(last_date: Optional[pd.Timestamp], ref_date: Optional[pd.Timestamp] = None) -> Optional[int]:
+    """Business-day gap between last_date and ref_date."""
+    if last_date is None or pd.isna(last_date):
+        return None
+    if ref_date is None:
+        ref_date = _latest_business_day()
+    if last_date > ref_date:
+        return 0
+    bdays = pd.bdate_range(last_date.normalize(), ref_date.normalize())
+    return max(0, len(bdays) - 1)
+
+
+def get_last_batch_telemetry() -> pd.DataFrame:
+    """
+    Return telemetry from the most recent batch_download call.
+    Columns: symbol, source, last_date, age_bdays, is_stale, severity
+    """
+    rows = []
+    for symbol in sorted(_LAST_BATCH_SOURCE_MAP.keys()):
+        age = _LAST_BATCH_AGE_MAP.get(symbol)
+        is_stale = bool(_LAST_BATCH_STALE_MAP.get(symbol, False))
+        if age is None:
+            severity = "unknown"
+        elif age >= DATA_STALENESS_ERROR_DAYS:
+            severity = "error"
+        elif age >= DATA_STALENESS_WARN_DAYS:
+            severity = "warn"
+        else:
+            severity = "ok"
+        rows.append(
+            {
+                "symbol": symbol,
+                "source": _LAST_BATCH_SOURCE_MAP.get(symbol, "UNKNOWN"),
+                "last_date": _LAST_BATCH_DATE_MAP.get(symbol),
+                "age_bdays": age,
+                "is_stale": is_stale,
+                "severity": severity,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_local_nse_history() -> pd.DataFrame:
     """Load local NSE OHLCV history parquet if available."""
@@ -396,6 +446,12 @@ def load_local_nse_history() -> pd.DataFrame:
             }
         )
         out = out.dropna(subset=["date", "symbol", "close"])
+        # Keep parquet aligned with tracked NSE universe only.
+        try:
+            from NSE_Config import NIFTY_200
+            out = out[out["symbol"].isin(set(NIFTY_200))]
+        except Exception:
+            pass
         return out
     except Exception as exc:
         logger.warning("Failed to load local NSE history parquet: %s", exc)
@@ -487,6 +543,11 @@ def persist_local_nse_updates(updates: Dict[str, pd.DataFrame]) -> None:
     try:
         existing = load_local_nse_history()
         merged = pd.concat([existing, incoming], ignore_index=True)
+        try:
+            from NSE_Config import NIFTY_200
+            merged = merged[merged["symbol"].isin(set(NIFTY_200))]
+        except Exception:
+            pass
         merged = merged.sort_values(["symbol", "date"]).drop_duplicates(subset=["symbol", "date"], keep="last")
         merged.to_parquet(path, index=False)
         load_local_nse_history.clear()
@@ -524,6 +585,7 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
 
     try:
         result: Dict[str, pd.DataFrame] = {}
+        source_map: Dict[str, str] = {}
         latest_bd = _latest_business_day()
 
         # 1) Load local parquet first for NSE symbols.
@@ -532,6 +594,7 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
             local_df = get_local_history_for_symbol(symbol, period=period)
             if not local_df.empty:
                 result[symbol] = local_df
+                source_map[symbol] = "LOCAL"
                 max_date = local_df.index.max().normalize()
                 if max_date < latest_bd:
                     symbols_for_api.append(symbol)
@@ -603,8 +666,10 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
                 merged = pd.concat([result[symbol], upd_norm], axis=0)
                 merged = merged[~merged.index.duplicated(keep="last")].sort_index()
                 result[symbol] = merged
+                source_map[symbol] = "LOCAL+API"
             else:
                 result[symbol] = upd_norm
+                source_map[symbol] = "API"
 
         # 4) Persist incremental API rows back to local parquet for NSE symbols.
         persist_local_nse_updates(api_updates)
@@ -619,7 +684,28 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
                     continue
                 close, prev_close = row
                 result[symbol] = _build_fallback_price_df(close, prev_close)
+                source_map[symbol] = "BHAVCOPY"
                 logger.warning("%s: Using Bhavcopy fallback.", symbol)
+
+        # Mark symbols that ended up local-only and stale (API failed / not refreshed)
+        for symbol, df in result.items():
+            if source_map.get(symbol) == "LOCAL":
+                if not df.empty and df.index.max().normalize() < latest_bd:
+                    source_map[symbol] = "LOCAL(STALE)"
+
+        # Publish telemetry for downstream diagnostics/UI.
+        global _LAST_BATCH_SOURCE_MAP, _LAST_BATCH_DATE_MAP, _LAST_BATCH_AGE_MAP, _LAST_BATCH_STALE_MAP
+        _LAST_BATCH_SOURCE_MAP = {}
+        _LAST_BATCH_DATE_MAP = {}
+        _LAST_BATCH_AGE_MAP = {}
+        _LAST_BATCH_STALE_MAP = {}
+        for symbol, df in result.items():
+            max_date = None if df is None or df.empty else pd.to_datetime(df.index.max()).normalize()
+            age = _business_day_age(max_date, latest_bd)
+            _LAST_BATCH_SOURCE_MAP[symbol] = source_map.get(symbol, "UNKNOWN")
+            _LAST_BATCH_DATE_MAP[symbol] = max_date
+            _LAST_BATCH_AGE_MAP[symbol] = age
+            _LAST_BATCH_STALE_MAP[symbol] = (age is None) or (age >= DATA_STALENESS_WARN_DAYS)
 
         logger.info("Successfully loaded %d/%d symbols", len(result), len(valid_symbols))
         return result

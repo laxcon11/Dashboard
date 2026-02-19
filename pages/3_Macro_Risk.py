@@ -314,6 +314,19 @@ p_risk_on = risk_on_raw / prob_total
 p_risk_off = risk_off_raw / prob_total
 p_neutral = neutral_raw / prob_total
 
+
+def rounded_percentages_sum_to_100(values):
+    """Round probabilities to whole percentages while forcing exact sum=100."""
+    raw = [max(0.0, float(v)) * 100.0 for v in values]
+    floors = [int(math.floor(v)) for v in raw]
+    remainder = 100 - sum(floors)
+    # Largest remainder method
+    frac_order = sorted(range(len(raw)), key=lambda i: (raw[i] - floors[i]), reverse=True)
+    out = floors[:]
+    for i in frac_order[: max(0, remainder)]:
+        out[i] += 1
+    return out
+
 if p_risk_on >= risk_on_threshold and p_risk_on > p_risk_off and p_risk_on > p_neutral:
     regime = "🟢 Risk On"
     regime_color = "success"
@@ -358,9 +371,12 @@ st.caption(f"Agreement: {agreement:.0%} | Data quality: {data_quality:.0%}")
 
 st.subheader("🎯 Regime Probabilities")
 p1, p2, p3 = st.columns(3)
-p1.metric("Risk On", f"{p_risk_on:.0%}")
-p2.metric("Neutral", f"{p_neutral:.0%}")
-p3.metric("Risk Off", f"{p_risk_off:.0%}")
+disp_risk_on, disp_neutral, disp_risk_off = rounded_percentages_sum_to_100(
+    [p_risk_on, p_neutral, p_risk_off]
+)
+p1.metric("Risk On", f"{disp_risk_on}%")
+p2.metric("Neutral", f"{disp_neutral}%")
+p3.metric("Risk Off", f"{disp_risk_off}%")
 
 st.subheader("📋 Factor Breakdown")
 factor_df = pd.DataFrame(macro_result["rows"] + liquidity_result["rows"])

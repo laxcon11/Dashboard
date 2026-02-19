@@ -11,7 +11,7 @@ import streamlit as st
 import pandas as pd
 
 from config import FRED_SERIES, FRED_API_KEY, LIQUIDITY_THRESHOLDS
-from data_fetch import fetch_fred_series
+from data_fetch import fetch_fred_series, batch_download
 
 from utils import setup_page
 
@@ -162,6 +162,33 @@ with st.spinner("Analyzing liquidity data..."):
                     alerts.append(f"💧 **{name} {impact} Liquidity**: {abs_change_bn:+.1f}B shift this week.")
                     stress_score += (-1 if is_drain else 1)
 
+# Use a single source of truth for US 10Y across all pages: Yahoo ^TNX
+with st.spinner("Syncing US 10Y yield source..."):
+    tnx_data = batch_download(["^TNX"], period="6mo")
+tnx_df = tnx_data.get("^TNX")
+if tnx_df is not None and not tnx_df.empty and "Close" in tnx_df.columns:
+    tnx_close = tnx_df["Close"].dropna()
+    if len(tnx_close) >= 2:
+        tnx_series = pd.DataFrame(
+            {"date": pd.to_datetime(tnx_close.index), "value": pd.to_numeric(tnx_close.values, errors="coerce")}
+        ).dropna(subset=["value"])
+        if len(tnx_series) >= 2:
+            latest = tnx_series["value"].iloc[-1]
+            prev = tnx_series["value"].iloc[-2]
+            weekly_prev = tnx_series["value"].iloc[-6] if len(tnx_series) >= 6 else tnx_series["value"].iloc[0]
+            change_abs = latest - prev
+            change_pct = (change_abs / prev) * 100 if prev != 0 else 0
+            weekly_change_pct = ((latest - weekly_prev) / weekly_prev) * 100 if weekly_prev != 0 else 0
+            series_data["DGS10"] = {
+                "name": "US 10Y Treasury Yield",
+                "df": tnx_series,
+                "latest": latest,
+                "change_pct": change_pct,
+                "weekly_change_pct": weekly_change_pct,
+                "date": tnx_series["date"].iloc[-1].date(),
+                "id": "DGS10",
+            }
+
 import analytics
 
 # ==================== SOFR - IORB SPREAD ====================
@@ -269,4 +296,4 @@ else:
     st.info("No trend data available")
 
 st.markdown("---")
-st.caption("Data source: Federal Reserve Economic Data (FRED). Values: WALCL/TGA in $M, RRP in $B, SOFR/Rates in %. | Net Liquidity View.")
+st.caption("Data source: FRED for liquidity series; US 10Y synchronized to Yahoo ^TNX (same as other dashboards). Values: WALCL/TGA in $M, RRP in $B, SOFR/Rates in %. | Net Liquidity View.")

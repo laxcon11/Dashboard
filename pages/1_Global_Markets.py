@@ -27,6 +27,7 @@ setup_page("Dashboard Launcher")
 
 st.title("🌍 Global Macro Dashboard")
 st.caption("Markets snapshot helps identify global risk sentiment before trading.")
+PAGE_PRICE_MODE = "live_first"
 
 # ==================== DOWNLOAD DATA ====================
 
@@ -59,7 +60,7 @@ st.subheader("📊 Global Risk Snapshot")
 cols = st.columns(len(GLOBAL_RISK_SNAPSHOT))
 
 for col, (symbol, name) in zip(cols, GLOBAL_RISK_SNAPSHOT.items()):
-    display_price_metric(col, symbol, name, data.get(symbol))
+    display_price_metric(col, symbol, name, data.get(symbol), mode=PAGE_PRICE_MODE)
 
 st.caption("Guide: Nasdaq ↑ + DXY ↓ = Risk ON | DXY ↑ + Yields ↑ = Risk OFF")
 
@@ -67,7 +68,7 @@ st.caption("Guide: Nasdaq ↑ + DXY ↓ = Risk ON | DXY ↑ + Yields ↑ = Risk 
 
 st.subheader("🌎 Global Indices")
 st.dataframe(
-    create_price_table(GLOBAL_INDICES, data, ["Index", "Price", "Change %"]),
+    create_price_table(GLOBAL_INDICES, data, ["Index", "Price", "Change %"], mode=PAGE_PRICE_MODE),
     width='stretch',
     hide_index=True
 )
@@ -76,7 +77,7 @@ st.dataframe(
 
 st.subheader("💱 Currency Markets")
 st.dataframe(
-    create_price_table(CURRENCIES, data, ["Pair", "Price", "Change %"]),
+    create_price_table(CURRENCIES, data, ["Pair", "Price", "Change %"], mode=PAGE_PRICE_MODE),
     width='stretch',
     hide_index=True
 )
@@ -97,7 +98,7 @@ for primary_symbol, name in COMMODITIES.items():
             selected_df = df
             break
 
-    price, _, change_pct = get_live_price_safe(selected_symbol or primary_symbol, selected_df)
+    price, _, change_pct = get_live_price_safe(selected_symbol or primary_symbol, selected_df, mode=PAGE_PRICE_MODE)
 
     display_name = name if selected_symbol in (None, primary_symbol) else f"{name} (Proxy)"
     commodity_rows.append({
@@ -112,7 +113,7 @@ st.dataframe(pd.DataFrame(commodity_rows), width='stretch', hide_index=True)
 
 st.subheader("₿ Crypto Markets")
 st.dataframe(
-    create_price_table(CRYPTO, data, ["Asset", "Price", "Change %"]),
+    create_price_table(CRYPTO, data, ["Asset", "Price", "Change %"], mode=PAGE_PRICE_MODE),
     width='stretch',
     hide_index=True
 )
@@ -121,7 +122,7 @@ st.dataframe(
 
 st.subheader("📉 Bond Markets")
 st.dataframe(
-    create_price_table(BOND_MARKETS, data, ["Instrument", "Value", "Change"]),
+    create_price_table(BOND_MARKETS, data, ["Instrument", "Value", "Change"], mode=PAGE_PRICE_MODE),
     width='stretch',
     hide_index=True
 )
