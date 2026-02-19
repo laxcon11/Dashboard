@@ -15,10 +15,20 @@ if errorlevel 1 (
 echo ✅ Python found
 echo.
 
+REM Create and activate virtual environment
+echo 🐍 Setting up virtual environment...
+if not exist ".venv" (
+    python -m venv .venv
+)
+call .venv\Scripts\activate
+echo ✅ Virtual environment active: .venv
+echo.
+
 REM Install dependencies
 echo 📦 Installing required packages...
 echo.
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 
 if errorlevel 1 (
     echo.
@@ -43,9 +53,9 @@ echo ✅ Setup Complete!
 echo ==========================================
 echo.
 echo To run the dashboard:
-echo   streamlit run nse_dashboard.py
+echo   .venv\Scripts\activate ^&^& streamlit run app.py
 echo.
 echo Press any key to launch the dashboard now...
 pause >nul
 
-streamlit run nse_dashboard.py
+streamlit run app.py
