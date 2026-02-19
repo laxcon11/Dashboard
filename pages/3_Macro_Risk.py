@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-import os
-
 from data_fetch import (
     batch_download,
     extract_price_data,
@@ -15,7 +13,7 @@ from data_fetch import (
 
 
 from config import MACRO_THRESHOLDS, FRED_API_KEY, MACRO_WEIGHTS, MACRO_SYMBOLS
-from utils import setup_page, format_change
+from utils import setup_page
 import analytics
 
 setup_page("Dashboard Launcher")
@@ -234,7 +232,7 @@ regime, regime_color = classify_regime(final_score, len(scores))
 
 # Prepare data for stance
 sofr_spread = 0 # 3_Macro_Risk doesn't fetch SOFR/IORB yet
-regime_stance, stance_color, decision_msg = analytics.get_liquidity_stance(liquidity_series, sofr_spread=sofr_spread)
+regime_stance, _, decision_msg = analytics.get_liquidity_stance(liquidity_series, sofr_spread=sofr_spread)
 
 col1, col2, col3 = st.columns(3)
 
@@ -251,15 +249,14 @@ with col3:
 
 # ==================== REGIME DISPLAY ====================
 
-if stance_color == "success":
-    st.success(f"### {regime_stance}")
-elif stance_color == "error":
-    st.error(f"### {regime_stance}")
-elif stance_color == "warning":
-    st.warning(f"### {regime_stance}")
+if regime_color == "success":
+    st.success(f"### {regime}")
+elif regime_color == "error":
+    st.error(f"### {regime}")
 else:
-    st.info(f"### {regime_stance}")
+    st.warning(f"### {regime}")
 
+st.caption(f"Liquidity Overlay: **{regime_stance}**")
 st.info(f"**Decision POV**: {decision_msg}")
 
 
@@ -312,6 +309,23 @@ st.subheader("📉 Macro Risk Trend (Last 7 Days)")
 trend_scores = []
 trend_regimes = []
 
+def get_historical_liquidity_score(series_dict, lookback_idx: int) -> int:
+    """Compute liquidity score aligned with the same historical day in trend loop."""
+    if not series_dict:
+        return 0
+
+    historical = {}
+    for name, df in series_dict.items():
+        if df is None or df.empty:
+            historical[name] = None
+            continue
+        if lookback_idx > 0 and len(df) > lookback_idx:
+            historical[name] = df.iloc[:-lookback_idx].copy()
+        else:
+            historical[name] = df.copy()
+
+    return analytics.calculate_liquidity_score(historical)
+
 for i in range(7):
     day_score = 0
     valid_count = 0
@@ -328,7 +342,7 @@ for i in range(7):
                 day_score += score * weight
                 valid_count += 1
 
-    day_score += liquidity_score
+    day_score += get_historical_liquidity_score(liquidity_series, i)
     trend_scores.append(day_score)
 
     regime_name, _ = classify_regime(day_score, valid_count)
@@ -432,6 +446,4 @@ if len(trend_regimes) >= 2:
 st.markdown("---")
 st.caption("Data Sources: Yahoo Finance + NSE India + FRED")
 st.caption(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
-
-
 

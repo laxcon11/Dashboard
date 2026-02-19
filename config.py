@@ -75,6 +75,11 @@ COMMODITIES = {
     "ZNC=F": "Zinc"
 }
 
+# Fallback/proxy symbols when primary Yahoo commodity ticker is unavailable
+COMMODITY_FALLBACKS = {
+    "ZNC=F": ["DBB"],  # Invesco DB Base Metals ETF proxy
+}
+
 # Cryptocurrencies
 CRYPTO = {
     "BTC-USD": "Bitcoin",

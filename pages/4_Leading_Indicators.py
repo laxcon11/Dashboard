@@ -104,6 +104,12 @@ SIGNAL_EXPLANATIONS = {
     "Equities Weak": "🔴 Markets below trend → Weak momentum"
 }
 
+INVALID_SIGNAL_STATES = {"No Data", "Insufficient Data", "Error", "No Close Data"}
+
+
+def is_valid_signal(signal_text: str) -> bool:
+    return bool(signal_text) and signal_text not in INVALID_SIGNAL_STATES
+
 # ==================== CONFIG ====================
 # Market symbols are mostly consistent with config.py
 MARKET_SYMBOLS = CONFIG_MARKET_SYMBOLS
@@ -256,76 +262,141 @@ with col2:
 st.markdown("---")
 
 # ==================== MARKET IMPULSE GAUGE ====================
-st.markdown('<div class="section-header">🎯 Market Impulse Gauge</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-header">🎯 Market Impulse Gauges</div>', unsafe_allow_html=True)
 
-impulse_score = 0
-factors = 0
-factor_details = []
+
+def score_to_sentiment(score):
+    if score is None:
+        return "N/A"
+    if score > 0:
+        return "Bullish"
+    if score < 0:
+        return "Bearish"
+    return "Neutral"
+
+
+def daily_change_score(series: pd.Series, inverse: bool = False):
+    s = series.dropna()
+    if len(s) < 2:
+        return None
+    diff = s.iloc[-1] - s.iloc[-2]
+    if diff == 0:
+        score = 0
+    else:
+        score = 1 if diff > 0 else -1
+    return -score if inverse else score
+
+
+def ratio_series(df_a: pd.DataFrame, df_b: pd.DataFrame):
+    if (
+        df_a is None or df_b is None
+        or "Close" not in df_a.columns or "Close" not in df_b.columns
+    ):
+        return None
+    ratio_df = pd.concat(
+        [df_a["Close"].rename("a"), df_b["Close"].rename("b")],
+        axis=1
+    ).ffill().dropna()
+    if ratio_df.empty:
+        return None
+    ratio = ratio_df["a"] / ratio_df["b"]
+    ratio = ratio.replace([float("inf"), -float("inf")], pd.NA).dropna()
+    return ratio if len(ratio) >= 2 else None
+
+
+def add_factor_score(store: dict, name: str, daily=None, directional=None):
+    if name not in store:
+        store[name] = {"daily": None, "directional": None}
+    if daily is not None:
+        store[name]["daily"] = daily
+    if directional is not None:
+        store[name]["directional"] = directional
+
+
+factor_scores = {}
 
 # Yield Curve
 if yield_10y is not None and yield_3m is not None:
-    score = 1 if (yield_10y - yield_3m) > 0 else -1
-    impulse_score += score
-    factors += 1
-    factor_details.append(f"Yield Curve: {'✅' if score == 1 else '❌'}")
+    curve_directional = 1 if (yield_10y - yield_3m) > 0 else -1
+    y10_df = market_data.get("^TNX")
+    y3m_df = market_data.get("^IRX")
+    if y10_df is not None and y3m_df is not None:
+        spread_df = pd.concat(
+            [y10_df["Close"].rename("y10"), y3m_df["Close"].rename("y3m")],
+            axis=1
+        ).ffill().dropna()
+        curve_daily = daily_change_score(spread_df["y10"] - spread_df["y3m"])
+    else:
+        curve_daily = None
+    add_factor_score(factor_scores, "Yield Curve", daily=curve_daily, directional=curve_directional)
 
 # Dollar
-if dxy_score is not None:
-    impulse_score += dxy_score
-    factors += 1
-    factor_details.append(f"Dollar: {'✅' if dxy_score == 1 else '❌'}")
+if is_valid_signal(dxy_signal):
+    dxy_df = market_data.get("DX-Y.NYB")
+    dxy_daily = None
+    if dxy_df is not None and "Close" in dxy_df.columns:
+        dxy_daily = daily_change_score(dxy_df["Close"], inverse=True)
+    add_factor_score(factor_scores, "Dollar", daily=dxy_daily, directional=dxy_score)
 
 # Equities
 nifty = market_data.get("^NSEI")
-if nifty is not None:
+if nifty is not None and "Close" in nifty.columns:
     close_series = nifty["Close"].dropna()
+    equity_daily = daily_change_score(close_series)
     if len(close_series) > 20:
         ma20 = close_series.rolling(20).mean().iloc[-1]
-        score = 1 if close_series.iloc[-1] > ma20 else -1
-        impulse_score += score
-        factors += 1
-        factor_details.append(f"Equities: {'✅' if score == 1 else '❌'}")
+        equity_directional = 1 if close_series.iloc[-1] > ma20 else -1
+    else:
+        equity_directional = None
+    add_factor_score(factor_scores, "Equities", daily=equity_daily, directional=equity_directional)
 
 # Liquidity
 fed = liquidity_data.get("Fed Balance Sheet")
-if fed is not None and len(fed) > 1:
-    score = 1 if fed["value"].iloc[-1] > fed["value"].iloc[-2] else -1
-    impulse_score += score
-    factors += 1
-    factor_details.append(f"Liquidity: {'✅' if score == 1 else '❌'}")
+if fed is not None and "value" in fed.columns:
+    fed_series = fed["value"].dropna()
+    liquidity_daily = daily_change_score(fed_series)
+    liquidity_directional = liquidity_daily if len(fed_series) >= 2 else None
+    add_factor_score(factor_scores, "Liquidity", daily=liquidity_daily, directional=liquidity_directional)
 
 # Copper/Gold
-if cg_score is not None:
-    impulse_score += cg_score
-    factors += 1
-    factor_details.append(f"Copper/Gold: {'✅' if cg_score == 1 else '❌'}")
+if is_valid_signal(cg_signal):
+    cg_ratio_series = ratio_series(data.get("HG=F"), data.get("GC=F"))
+    cg_daily = daily_change_score(cg_ratio_series) if cg_ratio_series is not None else None
+    add_factor_score(factor_scores, "Copper/Gold", daily=cg_daily, directional=cg_score)
 
 # Credit
-if credit_score is not None:
-    impulse_score += credit_score
-    factors += 1
-    factor_details.append(f"Credit: {'✅' if credit_score == 1 else '❌'}")
+if is_valid_signal(credit_signal):
+    credit_ratio_series = ratio_series(data.get("HYG"), data.get("LQD"))
+    credit_daily = daily_change_score(credit_ratio_series) if credit_ratio_series is not None else None
+    add_factor_score(factor_scores, "Credit", daily=credit_daily, directional=credit_score)
 
-# Yields - FIXED: Now included
-if yield_score is not None:
-    impulse_score += yield_score
-    factors += 1
-    factor_details.append(f"Yields: {'✅' if yield_score == 1 else '❌'}")
+# Yields (10Y direction: up is bearish)
+if is_valid_signal(yield_signal):
+    y10_df = market_data.get("^TNX")
+    yield_daily = None
+    if y10_df is not None and "Close" in y10_df.columns:
+        yield_daily = daily_change_score(y10_df["Close"], inverse=True)
+    add_factor_score(factor_scores, "Yields", daily=yield_daily, directional=yield_score)
 
-normalized = impulse_score / factors if factors >= 3 else 0
+daily_values = [v["daily"] for v in factor_scores.values() if v["daily"] is not None]
+directional_values = [v["directional"] for v in factor_scores.values() if v["directional"] is not None]
 
-col1, col2 = st.columns([2, 1])
+daily_normalized = sum(daily_values) / len(daily_values) if len(daily_values) >= 3 else 0
+directional_normalized = (
+    sum(directional_values) / len(directional_values) if len(directional_values) >= 3 else 0
+)
 
-with col1:
-    # Gauge chart
-    fig = go.Figure(go.Indicator(
+g1, g2 = st.columns(2)
+
+with g1:
+    fig_daily = go.Figure(go.Indicator(
         mode="gauge+number+delta",
-        value=normalized,
-        title={'text': "Market Impulse Score", 'font': {'size': 24}},
+        value=daily_normalized,
+        title={'text': "Daily Change Impulse", 'font': {'size': 22}},
         delta={'reference': 0},
         gauge={
             'axis': {'range': [-1, 1], 'tickwidth': 1, 'tickcolor': "darkgray"},
-            'bar': {'color': "darkblue"},
+            'bar': {'color': "#1565c0"},
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
@@ -334,33 +405,66 @@ with col1:
                 {'range': [-0.3, 0.3], 'color': '#fff9c4'},
                 {'range': [0.3, 1], 'color': '#c8e6c9'}
             ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 0
-            }
+            'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': 0}
         }
     ))
+    fig_daily.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
+    st.plotly_chart(fig_daily, use_container_width=True)
+    st.caption(f"Using {len(daily_values)} factors")
 
-    fig.update_layout(
-        height=300,
-        margin=dict(l=20, r=20, t=50, b=20)
+with g2:
+    fig_directional = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=directional_normalized,
+        title={'text': "Directional Trend Impulse", 'font': {'size': 22}},
+        delta={'reference': 0},
+        gauge={
+            'axis': {'range': [-1, 1], 'tickwidth': 1, 'tickcolor': "darkgray"},
+            'bar': {'color': "#2e7d32"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [-1, -0.3], 'color': '#ffcdd2'},
+                {'range': [-0.3, 0.3], 'color': '#fff9c4'},
+                {'range': [0.3, 1], 'color': '#c8e6c9'}
+            ],
+            'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': 0}
+        }
+    ))
+    fig_directional.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
+    st.plotly_chart(fig_directional, use_container_width=True)
+    st.caption(f"Using {len(directional_values)} factors")
+
+st.markdown("### Factor Breakdown")
+for name, values in factor_scores.items():
+    daily_sent = score_to_sentiment(values["daily"])
+    directional_sent = score_to_sentiment(values["directional"])
+
+    daily_color = "#2e7d32" if daily_sent == "Bullish" else ("#c62828" if daily_sent == "Bearish" else "#f9a825")
+    directional_color = "#2e7d32" if directional_sent == "Bullish" else ("#c62828" if directional_sent == "Bearish" else "#f9a825")
+
+    st.markdown(
+        f"• {name} | Daily: <span style='color:{daily_color};font-weight:600'>{daily_sent}</span> | "
+        f"Directional: <span style='color:{directional_color};font-weight:600'>{directional_sent}</span>",
+        unsafe_allow_html=True
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+st.caption("Daily reacts to latest move. Directional reflects broader trend context.")
 
-with col2:
-    st.markdown("### Factor Breakdown")
-    st.markdown(f"**Analyzing {factors} factors:**")
-    for detail in factor_details:
-        st.markdown(f"• {detail}")
+if daily_normalized > 0.3:
+    st.success("Daily Environment: Risk ON")
+elif daily_normalized < -0.3:
+    st.error("Daily Environment: Risk OFF")
+else:
+    st.warning("Daily Environment: Neutral")
 
-    if normalized > 0.3:
-        st.success("🟢 **Risk ON** Environment")
-    elif normalized < -0.3:
-        st.error("🔴 **Risk OFF** Environment")
-    else:
-        st.warning("🟡 **Neutral** Environment")
+if directional_normalized > 0.3:
+    st.success("Directional Environment: Risk ON")
+elif directional_normalized < -0.3:
+    st.error("Directional Environment: Risk OFF")
+else:
+    st.warning("Directional Environment: Neutral")
 
 st.markdown("---")
 
@@ -537,13 +641,13 @@ st.markdown('<div class="section-header">📝 Signal Summary</div>', unsafe_allo
 all_signals = []
 if curve_signal:
     all_signals.append(curve_signal)
-if dxy_signal != "No Data":
+if is_valid_signal(dxy_signal):
     all_signals.append(dxy_signal)
-if yield_signal != "No Data":
+if is_valid_signal(yield_signal):
     all_signals.append(yield_signal)
-if cg_signal not in ["No Data", "Insufficient Data"]:
+if is_valid_signal(cg_signal):
     all_signals.append(cg_signal)
-if credit_signal not in ["No Data", "Insufficient Data"]:
+if is_valid_signal(credit_signal):
     all_signals.append(credit_signal)
 
 if nifty is not None and len(nifty) > 20:

@@ -15,12 +15,13 @@ from config import (
     GLOBAL_INDICES,
     CURRENCIES,
     COMMODITIES,
+    COMMODITY_FALLBACKS,
     CRYPTO,
     BOND_MARKETS
 )
 
 from data_fetch import batch_download
-from utils import display_price_metric, create_price_table, setup_page
+from utils import display_price_metric, create_price_table, setup_page, get_live_price_safe, format_price, format_change
 
 setup_page("Dashboard Launcher")
 
@@ -29,11 +30,12 @@ st.caption("Markets snapshot helps identify global risk sentiment before trading
 
 # ==================== DOWNLOAD DATA ====================
 
-all_symbols = list(set(
+all_symbols = sorted(set(
     list(GLOBAL_RISK_SNAPSHOT.keys()) +
     list(GLOBAL_INDICES.keys()) +
     list(CURRENCIES.keys()) +
     list(COMMODITIES.keys()) +
+    [s for fallback_list in COMMODITY_FALLBACKS.values() for s in fallback_list] +
     list(CRYPTO.keys()) +
     list(BOND_MARKETS.keys())
 ))
@@ -82,11 +84,29 @@ st.dataframe(
 # ==================== COMMODITIES ====================
 
 st.subheader("🛢 Commodities")
-st.dataframe(
-    create_price_table(COMMODITIES, data, ["Commodity", "Price", "Change %"]),
-    use_container_width=True,
-    hide_index=True
-)
+commodity_rows = []
+for primary_symbol, name in COMMODITIES.items():
+    candidate_symbols = [primary_symbol] + COMMODITY_FALLBACKS.get(primary_symbol, [])
+
+    selected_symbol = None
+    selected_df = None
+    for symbol in candidate_symbols:
+        df = data.get(symbol)
+        if df is not None and not df.empty and "Close" in df.columns and not df["Close"].dropna().empty:
+            selected_symbol = symbol
+            selected_df = df
+            break
+
+    price, _, change_pct = get_live_price_safe(selected_symbol or primary_symbol, selected_df)
+
+    display_name = name if selected_symbol in (None, primary_symbol) else f"{name} (Proxy)"
+    commodity_rows.append({
+        "Commodity": display_name,
+        "Price": format_price(price),
+        "Change %": format_change(change_pct)
+    })
+
+st.dataframe(pd.DataFrame(commodity_rows), use_container_width=True, hide_index=True)
 
 # ==================== CRYPTO ====================
 

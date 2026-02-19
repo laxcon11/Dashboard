@@ -884,6 +884,17 @@ elif mode == "Swing Rankings":
                         st.caption(f"Trend: {setup.get('Trend', 'N/A')}")
                     else:
                         st.caption(f"EMA20: {setup.get('dist EMA20', 'N/A')}")
+                    
+                    # Log Setup Button
+                    sym = setup['Symbol']
+                    prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
+                    if st.button("Log Setup", key=f"log_setup_{i}_{sym}", use_container_width=True):
+                        st.session_state["journal_prefill"] = {
+                            "symbol": prefill_symbol,
+                            "strategy": "Swing Ranking",
+                            "side": "LONG",
+                        }
+                        st.switch_page("pages/5_Trading_Journal.py")
 
     st.markdown("---")
 

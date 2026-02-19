@@ -1,9 +1,8 @@
 import streamlit as st
-st.sidebar.success("Select a dashboard above")
-
 from utils import setup_page
 
 setup_page("Dashboard Launcher")
+st.sidebar.success("Select a dashboard above")
 
 st.title("🚀 Dashboard Launcher")
 
@@ -150,7 +149,6 @@ with col3:
 
 st.markdown("---")
 st.caption("Dashboard Launcher | Feb 2026 Build")
-
 
 
 

@@ -6,11 +6,27 @@ import os
 from NSE_Config import NIFTY_200
 from data_fetch import batch_download, extract_price_data
 from utils import setup_page
+import analytics
+
 
 setup_page("Dashboard Launcher")
 
 st.title("🚀 Trading Journal")
 st.caption("Track your trades, analyze your performance, and refine your strategy.")
+
+# --- PRE-FILL HANDLING ---
+journal_prefill = st.session_state.pop("journal_prefill", None)
+query_params = st.query_params
+
+if isinstance(journal_prefill, dict):
+    pre_symbol = str(journal_prefill.get("symbol", ""))
+    pre_strategy = str(journal_prefill.get("strategy", "Swing Ranking"))
+    pre_side = str(journal_prefill.get("side", "LONG"))
+else:
+    pre_symbol = query_params.get("symbol", "")
+    pre_strategy = query_params.get("strategy", "Swing Rank")
+    pre_side = query_params.get("side", "LONG")
+
 
 # ==================== FILE HANDLING ====================
 NOTES_DIR = Path("notes")
@@ -28,7 +44,8 @@ def load_journal():
         # Create empty dataframe with columns
         return pd.DataFrame(columns=[
             "Date", "Symbol", "Side", "Entry Price", "Exit Price", 
-            "Quantity", "Strategy", "Status", "Notes"
+            "Quantity", "Strategy", "Status", "Notes",
+            "Regime", "Liquidity", "Stance", "Trade Intent", "Mistake Tags", "Chart Link", "Exit Reason"
         ])
 
 def save_entry(entry):
@@ -52,32 +69,63 @@ if page_mode == "Log New Trade":
         with col1:
             date = st.date_input("Date", datetime.now())
             
-            # Combine NIFTY 200 with Custom option
-            symbol_options = ["Other / Custom Instrument"] + sorted(list(NIFTY_200))
-            selected_sym = st.selectbox("Symbol", options=symbol_options, help="Select from NIFTY 200 or pick 'Other' to type manually")
+            # Use NIFTY 200 list for the selectbox
+            symbol_options = sorted(list(NIFTY_200))
             
-            # Show text input only if 'Other' is selected
-            custom_symbol = ""
-            if selected_sym == "Other / Custom Instrument":
-                custom_symbol = st.text_input("Enter Manual Symbol (e.g., BTCUSD, ^NSEI)").upper()
-                
-            side = st.selectbox("Side", ["LONG", "SHORT"])
-            strategy = st.selectbox("Strategy", [
-                "Gap Up/Down", "Swing Ranking", "EMA Crossover", "Breakout", "Oversold Reversal", "Other"
-            ])
+            # Pre-select symbol if provided in query params
+            default_index = 0
+            if pre_symbol and not pre_symbol.endswith(".NS"):
+                with_suffix = f"{pre_symbol}.NS"
+                if with_suffix in symbol_options:
+                    pre_symbol = with_suffix
+            if pre_symbol in symbol_options:
+                default_index = symbol_options.index(pre_symbol)
+            
+            # Custom Instrument Toggle
+            is_custom = st.checkbox("Custom Instrument", value=(pre_symbol and pre_symbol not in symbol_options), help="Check this to manually enter a symbol not in NIFTY 200")
+            
+            if is_custom:
+                selected_sym = None
+                custom_symbol = st.text_input("Enter Symbol (e.g., BTCUSD, ^NSEI)", value=pre_symbol).upper()
+            else:
+                selected_sym = st.selectbox("Symbol", options=symbol_options, index=default_index, help="Search and select from NIFTY 200 stocks")
+                custom_symbol = ""
+            
+            side_options = ["LONG", "SHORT"]
+            side = st.selectbox("Side", side_options, index=side_options.index(pre_side) if pre_side in side_options else 0)
+            
+            strategy_options = ["Gap Up/Down", "Swing Ranking", "EMA Crossover", "Breakout", "Oversold Reversal", "Other"]
+            strategy = st.selectbox("Strategy", 
+                strategy_options,
+                index=strategy_options.index(pre_strategy) if pre_strategy in strategy_options else 0
+            )
         
         with col2:
             entry_price = st.number_input("Entry Price", min_value=0.0, format="%.2f")
             quantity = st.number_input("Quantity", min_value=1, step=1)
             stop_loss = st.number_input("Stop Loss (Optional)", min_value=0.0, format="%.2f")
             target = st.number_input("Target (Optional)", min_value=0.0, format="%.2f")
-            notes = st.text_area("Notes / Rationale")
+            # Auto-Capture Market Context
+            context = analytics.get_current_context() # Future: pass actual data if available
+            
+            # --- NEW FIELDS ---
+            col1, col2 = st.columns(2)
+            with col1:
+                intent = st.selectbox("Trade Intent", 
+                    ["Swing Breakout", "Pullback", "Mean Reversion", "Position", "Experimental", "Intraday"])
+            with col2:
+                chart_link = st.text_input("Chart / Screenshot Link", placeholder="TradingView or Imgur link")
+            
+            mistakes = st.multiselect("Mistake Tags (Leave empty if none)", 
+                ["Early Entry", "Ignored Regime", "Oversized Position", "Chased Price", "No Stop Loss", "Emotional Entry"])
+            
+            notes = st.text_area("Notes", placeholder="Why this trade? What's the catalyst?")
             
         submitted = st.form_submit_button("💾 Save Trade")
         
         if submitted:
             # Determine final symbol
-            final_symbol = custom_symbol if selected_sym == "Other / Custom Instrument" else selected_sym
+            final_symbol = custom_symbol if is_custom else selected_sym
             
             if final_symbol and entry_price > 0:
                 entry = {
@@ -85,11 +133,18 @@ if page_mode == "Log New Trade":
                     "Symbol": final_symbol,
                     "Side": side,
                     "Entry Price": entry_price,
-                    "Exit Price": 0.0,  # Open trade
+                    "Exit Price": 0.0,
                     "Quantity": quantity,
                     "Strategy": strategy,
                     "Status": "OPEN",
-                    "Notes": notes
+                    "Notes": notes,
+                    "Regime": context.get("regime", "Unknown"),
+                    "Liquidity": context.get("liquidity", "Unknown"),
+                    "Stance": context.get("stance", "Neutral"),
+                    "Trade Intent": intent,
+                    "Mistake Tags": ", ".join(mistakes) if mistakes else "",
+                    "Chart Link": chart_link,
+                    "Exit Reason": ""
                 }
                 save_entry(entry)
                 st.success(f"✅ Trade logged for {final_symbol}")
@@ -150,9 +205,10 @@ elif page_mode == "View History":
             # Move LTP and P&L after Entry Price
             entry_idx = cols.index("Entry Price")
             for col in ["LTP", "Unrealized P&L"]:
-                cols.remove(col)
-                cols.insert(entry_idx + 1, col)
-                entry_idx += 1
+                if col in cols: # Ensure column exists before trying to remove/insert
+                    cols.remove(col)
+                    cols.insert(entry_idx + 1, col)
+                    entry_idx += 1
         
         st.dataframe(
             display_df[cols].style.applymap(
@@ -168,27 +224,28 @@ elif page_mode == "View History":
         open_trades = df[df["Status"] == "OPEN"]
         
         if not open_trades.empty:
-            trade_to_close = st.selectbox(
-                "Select Trade to Close", 
-                options=open_trades.index,
-                format_func=lambda x: f"{df.loc[x, 'Date']} - {df.loc[x, 'Symbol']} ({df.loc[x, 'Side']})"
-            )
-            
-            with st.form("close_trade_form"):
-                exit_price = st.number_input("Exit Price", min_value=0.0, format="%.2f")
-                close_notes = st.text_area("Closing Notes (Lessons)")
-                
-                close_submitted = st.form_submit_button("✅ Close Trade")
-                
-                if close_submitted:
-                    df.loc[trade_to_close, "Exit Price"] = exit_price
-                    df.loc[trade_to_close, "Status"] = "CLOSED"
-                    if close_notes:
-                        df.loc[trade_to_close, "Notes"] += f" | Exit: {close_notes}"
+            # Display open trades for selection
+            for idx, row in open_trades.iterrows():
+                st.write(f"**Trade ID:** {idx} | **Symbol:** {row['Symbol']} | **Side:** {row['Side']} | **Entry:** {row['Entry Price']}")
+                with st.form(f"close_trade_form_{idx}"):
+                    exit_price = st.number_input(f"Exit Price for {row['Symbol']}", value=float(row['Entry Price']), key=f"exit_{idx}")
+                    exit_reason = st.selectbox("Exit Reason", 
+                        ["Target Hit", "Stop Loss", "Regime Change", "Weak Sector", "Discretionary", "Time Exit"],
+                        key=f"reason_{idx}")
+                    close_notes = st.text_area("Closing Notes (Lessons)", key=f"notes_{idx}")
                     
-                    df.to_csv(JOURNAL_FILE, index=False)
-                    st.success("🎉 Trade Closed!")
-                    st.rerun()
+                    if st.form_submit_button(f"Confirm Close {row['Symbol']}", key=f"conf_{idx}"):
+                        df.at[idx, 'Exit Price'] = exit_price
+                        df.at[idx, 'Status'] = 'CLOSED'
+                        df.at[idx, 'Exit Reason'] = exit_reason
+                        if close_notes:
+                            existing_notes = df.at[idx, 'Notes']
+                            existing_notes = "" if pd.isna(existing_notes) else str(existing_notes)
+                            sep = " | " if existing_notes else ""
+                            df.at[idx, 'Notes'] = f"{existing_notes}{sep}Exit: {close_notes}"
+                        df.to_csv(JOURNAL_FILE, index=False)
+                        st.success(f"Closed {row['Symbol']} at {exit_price}")
+                        st.rerun()
         else:
             st.info("No open trades to close.")
             
