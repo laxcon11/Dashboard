@@ -98,12 +98,21 @@ def compute_series_signal(series: pd.Series, inverse: bool, fast_window: int, sl
 
 fast_weight = float(blend.get("fast_weight", 0.4))
 slow_weight = float(blend.get("slow_weight", 0.6))
+impulse_influence = clip(float(blend.get("impulse_influence", 0.25)), 0.0, 0.6)
 fast_window = int(blend.get("fast_window", 1))
 slow_window = int(blend.get("slow_window", 10))
 max_factor_weight = float(blend.get("max_factor_weight", 0.2))
 neutral_band = float(blend.get("neutral_band", 0.35))
 risk_on_threshold = float(blend.get("risk_on_threshold", 0.6))
 risk_off_threshold = float(blend.get("risk_off_threshold", 0.6))
+group_caps_cfg = blend.get("group_caps", {})
+group_caps = {
+    "Macro": clip(float(group_caps_cfg.get("Macro", 0.30)), 0.01, 1.0),
+    "Liquidity": clip(float(group_caps_cfg.get("Liquidity", 0.35)), 0.01, 1.0),
+    "Risk Appetite": clip(float(group_caps_cfg.get("Risk Appetite", 0.20)), 0.01, 1.0),
+    "Rates/Currency": clip(float(group_caps_cfg.get("Rates/Currency", 0.20)), 0.01, 1.0),
+    "Commodities": clip(float(group_caps_cfg.get("Commodities", 0.20)), 0.01, 1.0),
+}
 
 fast_slow_total = fast_weight + slow_weight
 if fast_slow_total <= 0:
@@ -194,6 +203,26 @@ def resolve_liquidity_series(factor: dict, offset: int = 0) -> pd.Series:
     return pd.Series(dtype=float)
 
 
+def default_group(domain_name: str, factor_id: str) -> str:
+    if domain_name == "Liquidity":
+        return "Liquidity"
+
+    macro_group_map = {
+        "nifty50": "Macro",
+        "nasdaq": "Macro",
+        "bank_nifty": "Macro",
+        "bitcoin": "Risk Appetite",
+        "credit_spread": "Risk Appetite",
+        "dxy": "Rates/Currency",
+        "usdinr": "Rates/Currency",
+        "us10y": "Rates/Currency",
+        "crude": "Commodities",
+        "gold": "Commodities",
+        "copper_gold": "Commodities",
+    }
+    return macro_group_map.get(factor_id, "Macro")
+
+
 def score_domain(factors: dict, resolver, domain_name: str, offset: int = 0):
     enabled_count = 0
     valid_count = 0
@@ -217,17 +246,23 @@ def score_domain(factors: dict, resolver, domain_name: str, offset: int = 0):
 
         base_weight = float(factor.get("weight", 0.0))
         capped_weight = min(max(base_weight, 0.0), max_factor_weight)
+        group = factor.get("group", default_group(domain_name, factor_id))
 
         if signal is None or capped_weight <= 0:
             rows.append({
                 "Domain": domain_name,
+                "Group": group,
                 "Factor": factor.get("label", factor_id),
                 "Base W": round(base_weight, 3),
                 "Capped W": round(capped_weight, 3),
+                "Adj W": 0.0,
                 "Eff W": 0.0,
                 "Fast": "N/A",
                 "Slow": "N/A",
                 "Combined": "N/A",
+                "Impulse C": 0.0,
+                "Directional C": 0.0,
+                "Contribution": 0.0,
                 "Sentiment": "N/A",
                 "Points": int(len(series.dropna())),
             })
@@ -235,44 +270,92 @@ def score_domain(factors: dict, resolver, domain_name: str, offset: int = 0):
 
         valid_count += 1
         valid_entries.append({
+            "id": factor_id,
             "factor": factor.get("label", factor_id),
+            "group": group,
             "base_weight": base_weight,
             "capped_weight": capped_weight,
             "signal": signal,
             "points": signal["points"],
         })
 
-    total_capped_weight = sum(item["capped_weight"] for item in valid_entries)
-    weighted_sum = 0.0
+    if not valid_entries:
+        return {
+            "raw": 0.0,
+            "norm": 0.0,
+            "impulse_raw": 0.0,
+            "impulse_norm": 0.0,
+            "directional_raw": 0.0,
+            "directional_norm": 0.0,
+            "quality": 0.0,
+            "enabled": enabled_count,
+            "valid": 0,
+            "rows": rows,
+            "has_signal": False,
+        }
+
+    group_totals = {}
+    for item in valid_entries:
+        g = item["group"]
+        group_totals[g] = group_totals.get(g, 0.0) + item["capped_weight"]
 
     for item in valid_entries:
-        eff_weight = (item["capped_weight"] / total_capped_weight) if total_capped_weight > 0 else 0.0
-        weighted_sum += item["signal"]["combined"] * eff_weight
+        g = item["group"]
+        cap = float(group_caps.get(g, 1.0))
+        g_total = float(group_totals.get(g, 0.0))
+        if g_total > cap > 0:
+            item["adj_weight"] = item["capped_weight"] * (cap / g_total)
+        else:
+            item["adj_weight"] = item["capped_weight"]
+
+    total_adj_weight = sum(item["adj_weight"] for item in valid_entries)
+    blended_raw = 0.0
+    impulse_raw = 0.0
+    directional_raw = 0.0
+    for item in valid_entries:
+        eff_weight = (item["adj_weight"] / total_adj_weight) if total_adj_weight > 0 else 0.0
+        impulse_contrib = item["signal"]["fast"] * eff_weight
+        directional_contrib = item["signal"]["slow"] * eff_weight
+        blended_contrib = item["signal"]["combined"] * eff_weight
+        impulse_raw += impulse_contrib
+        directional_raw += directional_contrib
+        blended_raw += blended_contrib
         rows.append({
             "Domain": domain_name,
+            "Group": item["group"],
             "Factor": item["factor"],
             "Base W": round(item["base_weight"], 3),
             "Capped W": round(item["capped_weight"], 3),
+            "Adj W": round(item["adj_weight"], 3),
             "Eff W": round(eff_weight, 3),
             "Fast": item["signal"]["fast"],
             "Slow": item["signal"]["slow"],
             "Combined": item["signal"]["combined"],
+            "Impulse C": round(impulse_contrib, 3),
+            "Directional C": round(directional_contrib, 3),
+            "Contribution": round(blended_contrib, 3),
             "Sentiment": item["signal"]["sentiment"],
             "Points": item["points"],
         })
 
-    domain_raw = weighted_sum if total_capped_weight > 0 else 0.0
+    domain_raw = blended_raw if total_adj_weight > 0 else 0.0
     domain_norm = clip(domain_raw / 2.0, -1.0, 1.0)
+    impulse_norm = clip(impulse_raw / 2.0, -1.0, 1.0)
+    directional_norm = clip(directional_raw / 2.0, -1.0, 1.0)
     quality = (valid_count / enabled_count) if enabled_count > 0 else 0.0
 
     return {
         "raw": domain_raw,
         "norm": domain_norm,
+        "impulse_raw": impulse_raw,
+        "impulse_norm": impulse_norm,
+        "directional_raw": directional_raw,
+        "directional_norm": directional_norm,
         "quality": quality,
         "enabled": enabled_count,
         "valid": valid_count,
         "rows": rows,
-        "has_signal": total_capped_weight > 0,
+        "has_signal": total_adj_weight > 0,
     }
 
 
@@ -292,17 +375,22 @@ if not has_macro and not has_liquidity:
     st.stop()
 
 if has_macro and has_liquidity:
-    final_score = (macro_result["norm"] * macro_weight) + (liquidity_result["norm"] * liquidity_weight)
-    agreement = 1.0 - min(abs(macro_result["norm"] - liquidity_result["norm"]) / 2.0, 1.0)
+    final_impulse = (macro_result["impulse_norm"] * macro_weight) + (liquidity_result["impulse_norm"] * liquidity_weight)
+    final_directional = (macro_result["directional_norm"] * macro_weight) + (liquidity_result["directional_norm"] * liquidity_weight)
+    agreement = 1.0 - min(abs(macro_result["directional_norm"] - liquidity_result["directional_norm"]) / 2.0, 1.0)
     data_quality = (macro_result["quality"] + liquidity_result["quality"]) / 2.0
 elif has_macro:
-    final_score = macro_result["norm"]
+    final_impulse = macro_result["impulse_norm"]
+    final_directional = macro_result["directional_norm"]
     agreement = 1.0
     data_quality = macro_result["quality"]
 else:
-    final_score = liquidity_result["norm"]
+    final_impulse = liquidity_result["impulse_norm"]
+    final_directional = liquidity_result["directional_norm"]
     agreement = 1.0
     data_quality = liquidity_result["quality"]
+
+final_score = clip((final_directional * (1.0 - impulse_influence)) + (final_impulse * impulse_influence), -1.0, 1.0)
 
 k = 3.0
 risk_on_raw = math.exp(k * (final_score - neutral_band))
@@ -338,7 +426,7 @@ else:
     regime_color = "warning"
 
 max_prob = max(p_risk_on, p_risk_off, p_neutral)
-confidence = clip(max_prob * agreement * data_quality, 0.0, 1.0)
+confidence = clip(max_prob * agreement * data_quality * (0.6 + 0.4 * abs(final_directional)), 0.0, 1.0)
 
 if regime == "🟢 Risk On" and confidence >= 0.65:
     bias = "Long Bias Allowed"
@@ -350,14 +438,14 @@ else:
 st.subheader("📊 Regime Overview")
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric("Macro Score", f"{macro_result['norm']:+.2f}")
-    st.caption(f"Valid factors: {macro_result['valid']}/{macro_result['enabled']}")
+    st.metric("Macro Directional", f"{macro_result['directional_norm']:+.2f}")
+    st.caption(f"Impulse: {macro_result['impulse_norm']:+.2f} | Valid: {macro_result['valid']}/{macro_result['enabled']}")
 with col2:
-    st.metric("Liquidity Score", f"{liquidity_result['norm']:+.2f}")
-    st.caption(f"Valid factors: {liquidity_result['valid']}/{liquidity_result['enabled']}")
+    st.metric("Liquidity Directional", f"{liquidity_result['directional_norm']:+.2f}")
+    st.caption(f"Impulse: {liquidity_result['impulse_norm']:+.2f} | Valid: {liquidity_result['valid']}/{liquidity_result['enabled']}")
 with col3:
-    st.metric("Final Regime Score", f"{final_score:+.2f}")
-    st.caption(f"Confidence: {confidence:.0%}")
+    st.metric("Final Directional", f"{final_directional:+.2f}")
+    st.caption(f"Final Impulse: {final_impulse:+.2f} | Confidence: {confidence:.0%}")
 
 if regime_color == "success":
     st.success(f"### {regime}")
@@ -367,7 +455,10 @@ else:
     st.warning(f"### {regime}")
 
 st.info(f"Actionable Bias: **{bias}**")
-st.caption(f"Agreement: {agreement:.0%} | Data quality: {data_quality:.0%}")
+st.caption(
+    f"Agreement: {agreement:.0%} | Data quality: {data_quality:.0%} | "
+    f"Final blend: {(1.0 - impulse_influence):.0%} directional + {impulse_influence:.0%} impulse"
+)
 
 st.subheader("🎯 Regime Probabilities")
 p1, p2, p3 = st.columns(3)
@@ -378,10 +469,116 @@ p1.metric("Risk On", f"{disp_risk_on}%")
 p2.metric("Neutral", f"{disp_neutral}%")
 p3.metric("Risk Off", f"{disp_risk_off}%")
 
-st.subheader("📋 Factor Breakdown")
 factor_df = pd.DataFrame(macro_result["rows"] + liquidity_result["rows"])
+
 if not factor_df.empty:
-    st.dataframe(factor_df, width='stretch', hide_index=True)
+    rollup_df = factor_df.copy()
+    for col in ["Base W", "Capped W", "Adj W", "Eff W", "Impulse C", "Directional C", "Contribution"]:
+        rollup_df[col] = pd.to_numeric(rollup_df[col], errors="coerce").fillna(0.0)
+
+    group_rollup = (
+        rollup_df.groupby(["Domain", "Group"], dropna=False)
+        .agg({
+            "Base W": "sum",
+            "Capped W": "sum",
+            "Adj W": "sum",
+            "Eff W": "sum",
+            "Impulse C": "sum",
+            "Directional C": "sum",
+            "Contribution": "sum",
+            "Factor": "count",
+        })
+        .reset_index()
+        .rename(columns={"Factor": "Factors"})
+    )
+
+    macro_groups = group_rollup[group_rollup["Domain"] == "Macro"].copy()
+    liquidity_groups = group_rollup[group_rollup["Domain"] == "Liquidity"].copy()
+    for df in [macro_groups, liquidity_groups]:
+        if not df.empty:
+            df["Impulse (Norm)"] = (df["Impulse C"] / 2.0).round(3)
+            df["Directional (Norm)"] = (df["Directional C"] / 2.0).round(3)
+            df["Blend (Norm)"] = (df["Contribution"] / 2.0).round(3)
+
+    if not macro_groups.empty:
+        macro_terms = [f"{row['Group']} {row['Directional (Norm)']:+.3f}" for _, row in macro_groups.iterrows()]
+        macro_formula_terms = " + ".join(macro_terms)
+    else:
+        macro_formula_terms = "No valid groups"
+
+    st.subheader("🧮 Score Formula")
+    st.caption(f"Macro Directional = {macro_formula_terms} = {macro_result['directional_norm']:+.3f}")
+    st.caption(
+        f"Final Directional = ({macro_weight:.2f} x {macro_result['directional_norm']:+.3f}) + "
+        f"({liquidity_weight:.2f} x {liquidity_result['directional_norm']:+.3f}) = {final_directional:+.3f}"
+    )
+    st.caption(
+        f"Final Score = ({1.0 - impulse_influence:.2f} x {final_directional:+.3f}) + "
+        f"({impulse_influence:.2f} x {final_impulse:+.3f}) = {final_score:+.3f}"
+    )
+
+    with st.expander("📦 Advanced Details (Expand)", expanded=False):
+        st.markdown("**Macro Group Rollup**")
+        if not macro_groups.empty:
+            st.dataframe(
+                macro_groups[["Group", "Factors", "Base W", "Capped W", "Adj W", "Eff W", "Impulse (Norm)", "Directional (Norm)", "Blend (Norm)"]],
+                width='stretch',
+                hide_index=True,
+            )
+        else:
+            st.info("No valid macro group contributions.")
+
+        st.markdown("**Liquidity Group Rollup**")
+        if not liquidity_groups.empty:
+            st.dataframe(
+                liquidity_groups[["Group", "Factors", "Base W", "Capped W", "Adj W", "Eff W", "Impulse (Norm)", "Directional (Norm)", "Blend (Norm)"]],
+                width='stretch',
+                hide_index=True,
+            )
+        else:
+            st.info("No valid liquidity group contributions.")
+
+        st.markdown("**Factor Breakdown**")
+        st.dataframe(factor_df, width='stretch', hide_index=True)
+
+        st.markdown("**Why This Regime?**")
+        explain_df = factor_df.copy()
+        for col in ["Eff W", "Impulse C", "Directional C", "Contribution"]:
+            explain_df[col] = pd.to_numeric(explain_df[col], errors="coerce").fillna(0.0)
+        explain_df["Abs Contribution"] = explain_df["Contribution"].abs()
+        explain_df = explain_df.sort_values("Abs Contribution", ascending=False)
+        top_df = explain_df.head(8)
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.dataframe(
+                top_df[["Domain", "Group", "Factor", "Eff W", "Impulse C", "Directional C", "Contribution", "Sentiment"]],
+                width='stretch',
+                hide_index=True,
+            )
+        with c2:
+            top_bull = top_df[top_df["Contribution"] > 0].head(3)["Factor"].tolist()
+            top_bear = top_df[top_df["Contribution"] < 0].head(3)["Factor"].tolist()
+            neutral_df = explain_df[explain_df["Sentiment"] == "Neutral"].copy()
+            neutral_list = neutral_df.head(3)["Factor"].tolist()
+            st.write("**Top Bullish Drivers**")
+            if top_bull:
+                for item in top_bull:
+                    st.write(f"- {item}")
+            else:
+                st.write("- None")
+            st.write("**Top Bearish Drivers**")
+            if top_bear:
+                for item in top_bear:
+                    st.write(f"- {item}")
+            else:
+                st.write("- None")
+            st.write("**Top Neutral Drivers**")
+            if neutral_list:
+                for item in neutral_list:
+                    st.write(f"- {item}")
+            else:
+                st.write("- None")
 
 st.subheader("📉 Regime Trend (Last 7 Sessions)")
 trend_scores = []
@@ -392,11 +589,13 @@ for offset in range(6, -1, -1):
     liquidity_day = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=offset)
 
     if macro_day["has_signal"] and liquidity_day["has_signal"]:
-        score_day = (macro_day["norm"] * macro_weight) + (liquidity_day["norm"] * liquidity_weight)
+        impulse_day = (macro_day["impulse_norm"] * macro_weight) + (liquidity_day["impulse_norm"] * liquidity_weight)
+        directional_day = (macro_day["directional_norm"] * macro_weight) + (liquidity_day["directional_norm"] * liquidity_weight)
+        score_day = (directional_day * (1.0 - impulse_influence)) + (impulse_day * impulse_influence)
     elif macro_day["has_signal"]:
-        score_day = macro_day["norm"]
+        score_day = (macro_day["directional_norm"] * (1.0 - impulse_influence)) + (macro_day["impulse_norm"] * impulse_influence)
     elif liquidity_day["has_signal"]:
-        score_day = liquidity_day["norm"]
+        score_day = (liquidity_day["directional_norm"] * (1.0 - impulse_influence)) + (liquidity_day["impulse_norm"] * impulse_influence)
     else:
         score_day = 0.0
 

@@ -12,6 +12,13 @@ settings = load_regime_settings()
 
 st.subheader("Model Blend")
 blend = settings["blend"]
+group_caps = blend.setdefault("group_caps", {
+    "Macro": 0.30,
+    "Liquidity": 0.35,
+    "Risk Appetite": 0.20,
+    "Rates/Currency": 0.20,
+    "Commodities": 0.20,
+})
 
 col1, col2 = st.columns(2)
 with col1:
@@ -23,6 +30,7 @@ with col1:
 with col2:
     blend["fast_weight"] = st.slider("Fast Signal Weight", 0.0, 1.0, float(blend["fast_weight"]), 0.01)
     blend["slow_weight"] = st.slider("Slow Signal Weight", 0.0, 1.0, float(blend["slow_weight"]), 0.01)
+    blend["impulse_influence"] = st.slider("Impulse Influence on Final", 0.0, 0.6, float(blend.get("impulse_influence", 0.25)), 0.01)
     blend["fast_window"] = st.slider("Fast Window (periods)", 1, 5, int(blend["fast_window"]), 1)
     blend["slow_window"] = st.slider("Slow Window (periods)", 5, 30, int(blend["slow_window"]), 1)
 
@@ -33,12 +41,24 @@ with col3:
 with col4:
     blend["risk_off_threshold"] = st.slider("Risk Off Probability Threshold", 0.40, 0.90, float(blend["risk_off_threshold"]), 0.01)
 
+st.subheader("Group Caps")
+gc1, gc2, gc3 = st.columns(3)
+with gc1:
+    group_caps["Macro"] = st.slider("Macro Cap", 0.05, 0.60, float(group_caps.get("Macro", 0.30)), 0.01)
+    group_caps["Risk Appetite"] = st.slider("Risk Appetite Cap", 0.05, 0.60, float(group_caps.get("Risk Appetite", 0.20)), 0.01)
+with gc2:
+    group_caps["Liquidity"] = st.slider("Liquidity Cap", 0.05, 0.60, float(group_caps.get("Liquidity", 0.35)), 0.01)
+    group_caps["Rates/Currency"] = st.slider("Rates/Currency Cap", 0.05, 0.60, float(group_caps.get("Rates/Currency", 0.20)), 0.01)
+with gc3:
+    group_caps["Commodities"] = st.slider("Commodities Cap", 0.05, 0.60, float(group_caps.get("Commodities", 0.20)), 0.01)
+
 
 def render_factor_controls(domain_key: str, title: str):
     st.markdown(f"### {title}")
     factors = settings[domain_key]
+    group_options = ["Macro", "Liquidity", "Risk Appetite", "Rates/Currency", "Commodities"]
     for factor_id, factor in factors.items():
-        c1, c2, c3, c4 = st.columns([3, 1, 1, 1.4])
+        c1, c2, c3, c4, c5 = st.columns([2.4, 1, 1, 1.3, 1.6])
         with c1:
             st.write(factor.get("label", factor_id))
         with c2:
@@ -53,6 +73,14 @@ def render_factor_controls(domain_key: str, title: str):
                 value=float(factor.get("weight", 0.1)),
                 step=0.01,
                 key=f"{domain_key}_{factor_id}_weight",
+            )
+        with c5:
+            current_group = factor.get("group", "Liquidity" if domain_key == "liquidity_factors" else "Macro")
+            factor["group"] = st.selectbox(
+                "Group",
+                options=group_options,
+                index=group_options.index(current_group) if current_group in group_options else 0,
+                key=f"{domain_key}_{factor_id}_group",
             )
 
 
@@ -73,4 +101,4 @@ with btn3:
     if st.button("🔄 Reload Saved", width='stretch'):
         st.rerun()
 
-st.caption("`On` = include factor, `Inv` = invert direction (higher value becomes bearish).")
+st.caption("`On` = include factor, `Inv` = inverse logic (higher value treated bearish), `Group` = cap bucket for anti-bias constraints.")

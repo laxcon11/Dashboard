@@ -929,11 +929,35 @@ elif mode == "Swing Rankings":
     r2.metric("A/D Breadth", f"{advances}:{declines}", f"{breadth_ratio:.2f}")
     r3.info(f"{regime_bias} | {swing_strictness}")
 
+    def clip01(v):
+        return max(0.0, min(1.0, v))
+
+    liq_score = 0
+    liq_score += 1 if breadth_ratio >= 1.05 else -1
+    liq_score += 1 if advances > declines else -1
+    liq_score += 1 if trend_signal(nifty_df) >= 0 else -1
+    liq_score += 1 if trend_signal(bank_df) >= 0 else -1
+    if liq_score >= 2:
+        liquidity_label = "🟢 Healthy"
+        liquidity_gate_pass = True
+    elif liq_score >= 0:
+        liquidity_label = "🟡 Neutral"
+        liquidity_gate_pass = True
+    else:
+        liquidity_label = "🔴 Tight"
+        liquidity_gate_pass = False
+
+    regime_gate_pass = regime_label != "🔴 Risk Off"
+    g1, g2, g3 = st.columns(3)
+    g1.metric("Liquidity Gate", liquidity_label, f"Score {liq_score:+d}")
+    g2.metric("Regime Gate", "Pass" if regime_gate_pass else "Blocked", regime_label)
+    g3.metric("Hard Gates", "Pass" if (regime_gate_pass and liquidity_gate_pass) else "Blocked")
+
     raw_rows = []
-    with st.spinner("Scoring candidates with regime and setup filters..."):
+    with st.spinner("Scoring candidates with setup-family and hard gates..."):
         for symbol in selected_stocks:
             df = watchlist_data.get(symbol)
-            if df is None or len(df) < 60:
+            if df is None or len(df) < 80:
                 continue
 
             try:
@@ -946,16 +970,59 @@ elif mode == "Swing Rankings":
                 rsi = calculate_rsi(df).iloc[-1] if len(df) > 14 else np.nan
                 ema20 = calculate_ema(df, 20).iloc[-1]
                 ema50 = calculate_ema(df, 50).iloc[-1]
+                atr14 = calculate_atr(df, ATR_PERIOD).iloc[-1] if len(df) > ATR_PERIOD else np.nan
+                atr_pct = ((atr14 / price) * 100.0) if (price and pd.notna(atr14) and atr14 > 0) else np.nan
                 trend_bull = bool(price > ema20 > ema50)
                 breakout = analytics.detect_breakout(df)
                 nr7 = analytics.detect_nr7(df)
                 dist_ema20 = ((price - ema20) / ema20 * 100) if ema20 else 0
+                inside_day = bool(
+                    len(df) >= 2 and
+                    (df["High"].iloc[-1] <= df["High"].iloc[-2]) and
+                    (df["Low"].iloc[-1] >= df["Low"].iloc[-2])
+                )
+                close = df["Close"].dropna()
+                if close.empty:
+                    continue
+                low10 = df["Low"].tail(10).min() if "Low" in df.columns else close.tail(10).min()
+                low20 = df["Low"].tail(20).min() if "Low" in df.columns else close.tail(20).min()
 
-                # Stage A: must-have quality filters
-                if vol_ratio < cfg["min_vol_ratio"]:
-                    continue
-                if rs < cfg["min_rs"]:
-                    continue
+                rs_stability = 0.5
+                if nifty_df is not None and "Close" in nifty_df.columns:
+                    merged = pd.concat(
+                        [close.rename("s"), nifty_df["Close"].dropna().rename("b")],
+                        axis=1
+                    ).dropna()
+                    if len(merged) >= 30:
+                        rel_ret = merged["s"].pct_change() - merged["b"].pct_change()
+                        rel_std = rel_ret.tail(20).std()
+                        if pd.notna(rel_std):
+                            rs_stability = clip01(1.0 - (rel_std * 35.0))
+
+                trend_align = 1.0 if trend_bull else 0.0
+                vol_quality = clip01(vol_ratio / 2.0)
+                rs_quality = clip01((rs + 10.0) / 20.0)
+                quality_score = (0.40 * vol_quality) + (0.30 * rs_quality) + (0.30 * rs_stability)
+                quality_gate_pass = bool(
+                    (vol_ratio >= cfg["min_vol_ratio"]) and
+                    (rs >= cfg["min_rs"]) and
+                    (quality_score >= 0.45)
+                )
+
+                # Strict setup families
+                momentum_pass = bool(trend_bull and breakout and (vol_ratio >= 1.0) and (rsi >= 52) and (rsi <= 78))
+                pullback_pass = bool(trend_bull and (-2.5 <= dist_ema20 <= 1.5) and (40 <= rsi <= 58) and (not breakout))
+                vol_contract_pass = bool(nr7 and inside_day and (abs(dist_ema20) <= 4.0) and (pd.isna(atr_pct) or atr_pct <= 4.0))
+
+                hard_gate_pass = bool(regime_gate_pass and liquidity_gate_pass and quality_gate_pass)
+                gate_reasons = []
+                if not regime_gate_pass:
+                    gate_reasons.append("Regime")
+                if not liquidity_gate_pass:
+                    gate_reasons.append("Liquidity")
+                if not quality_gate_pass:
+                    gate_reasons.append("Quality")
+                gate_reason = "OK" if not gate_reasons else ", ".join(gate_reasons)
 
                 raw_rows.append({
                     "Symbol": symbol.replace('.NS', ''),
@@ -968,81 +1035,148 @@ elif mode == "Swing Rankings":
                     "Trend": "Bullish" if trend_bull else "Bearish",
                     "Breakout": breakout,
                     "NR7": nr7,
+                    "Inside Day": inside_day,
+                    "ATR%": atr_pct,
+                    "Trend Align": trend_align,
+                    "Vol Quality": vol_quality,
+                    "RS Stability": rs_stability,
+                    "Quality Score": quality_score,
+                    "Quality Gate": quality_gate_pass,
+                    "Regime Gate": regime_gate_pass,
+                    "Liquidity Gate": liquidity_gate_pass,
+                    "Hard Gate": hard_gate_pass,
+                    "Gate Reason": gate_reason,
+                    "Momentum Pass": momentum_pass,
+                    "Pullback Pass": pullback_pass,
+                    "Volatility Pass": vol_contract_pass,
                     "Mom Base": analytics.calculate_momentum_score(df, nifty_df),
                     "PB Base": analytics.calculate_pullback_score(df, nifty_df),
+                    "Inv Momentum": max(low10, ema20 - (atr14 if pd.notna(atr14) else 0.0)),
+                    "Inv Pullback": low10,
+                    "Inv Volatility": df["Low"].iloc[-1] if "Low" in df.columns else low20,
                 })
             except Exception as e:
                 logger.error(f"Error scoring {symbol}: {e}")
 
     if not raw_rows:
-        st.warning("No stocks passed base quality filters. Relax filters or expand watchlist.")
+        st.warning("No stocks had enough data for setup-family scoring.")
         st.stop()
 
     score_df = pd.DataFrame(raw_rows)
     score_df["RS Pct"] = score_df["RS"].rank(pct=True).fillna(0.5)
     score_df["Vol Pct"] = score_df["Vol Ratio"].rank(pct=True).fillna(0.5)
 
-    score_df["Momentum Score"] = score_df.apply(
-        lambda r: clamp_score(
-            (0.60 * r["Mom Base"]) +
-            (3.0 * r["RS Pct"]) +
-            (1.5 * r["Vol Pct"]) +
-            (1.0 if r["Breakout"] else 0.0) +
-            (1.0 if r["Trend"] == "Bullish" else -1.0) -
-            max(0.0, r["dist_ema20"] - 6.0) * 0.25 +
-            regime_adj
-        ),
-        axis=1
-    )
+    # Decomposed scoring with tie-breaker quality terms
+    score_df["M_Breakout"] = score_df["Breakout"].apply(lambda x: 1.6 if x else -0.8)
+    score_df["M_Trend"] = score_df["Trend"].apply(lambda x: 1.2 if x == "Bullish" else -1.0)
+    score_df["M_RS"] = 2.3 * score_df["RS Pct"]
+    score_df["M_Vol"] = 1.6 * score_df["Vol Pct"]
+    score_df["M_Stability"] = 1.0 * score_df["RS Stability"]
+    score_df["Momentum Score"] = (
+        3.0 + (0.55 * score_df["Mom Base"]) + score_df["M_Breakout"] + score_df["M_Trend"] +
+        score_df["M_RS"] + score_df["M_Vol"] + score_df["M_Stability"] + regime_adj
+    ).apply(clamp_score)
 
-    score_df["Pullback Score"] = score_df.apply(
-        lambda r: clamp_score(
-            (0.70 * r["PB Base"]) +
-            (1.0 if 0 <= r["dist_ema20"] <= 4 else 0.0) +
-            (1.0 if 40 <= r["RSI"] <= 55 else 0.0) +
-            (1.5 * r["RS Pct"]) +
-            (0.5 if r["NR7"] else 0.0) +
-            (0.5 if r["Trend"] == "Bullish" else -0.5) +
-            (regime_adj * 0.8)
-        ),
-        axis=1
-    )
+    score_df["P_Distance"] = score_df["dist_ema20"].apply(lambda x: 1.4 if -2.5 <= x <= 1.5 else -0.6)
+    score_df["P_RSI"] = score_df["RSI"].apply(lambda x: 1.2 if 40 <= x <= 58 else -0.6)
+    score_df["P_Trend"] = score_df["Trend"].apply(lambda x: 1.0 if x == "Bullish" else -0.8)
+    score_df["P_RS"] = 1.8 * score_df["RS Pct"]
+    score_df["P_Stability"] = 1.1 * score_df["RS Stability"]
+    score_df["Pullback Score"] = (
+        2.8 + (0.60 * score_df["PB Base"]) + score_df["P_Distance"] + score_df["P_RSI"] +
+        score_df["P_Trend"] + score_df["P_RS"] + score_df["P_Stability"] + (regime_adj * 0.8)
+    ).apply(clamp_score)
 
-    score_df["Volatility Score"] = score_df.apply(
-        lambda r: clamp_score(
-            (3.0 if r["NR7"] else 0.0) +
-            (2.0 if abs(r["dist_ema20"]) <= 2 else 0.0) +
-            (2.0 * r["Vol Pct"]) +
-            (1.0 if r["Breakout"] else 0.0) +
-            (1.0 * r["RS Pct"]) +
-            (regime_adj * 0.5)
-        ),
-        axis=1
-    )
+    score_df["V_NR7"] = score_df["NR7"].apply(lambda x: 2.8 if x else 0.0)
+    score_df["V_Inside"] = score_df["Inside Day"].apply(lambda x: 1.2 if x else 0.0)
+    score_df["V_Distance"] = score_df["dist_ema20"].apply(lambda x: 1.3 if abs(x) <= 4 else -0.4)
+    score_df["V_Vol"] = 1.5 * score_df["Vol Pct"]
+    score_df["V_RS"] = 1.0 * score_df["RS Pct"]
+    score_df["Volatility Score"] = (
+        1.8 + score_df["V_NR7"] + score_df["V_Inside"] + score_df["V_Distance"] +
+        score_df["V_Vol"] + score_df["V_RS"] + (0.9 * score_df["RS Stability"]) + (regime_adj * 0.5)
+    ).apply(clamp_score)
 
-    def build_archetype(df, score_col, setup_name):
-        temp = df.copy()
+    def build_family(df, score_col, setup_name, pass_col, inv_col):
+        temp = df[df[pass_col]].copy()
+        if temp.empty:
+            return temp
         temp["Score"] = temp[score_col].round(2)
         temp["Setup Type"] = setup_name
         temp["Tier"] = temp["Score"].apply(setup_tier)
-        return temp.sort_values("Score", ascending=False)
+        temp["Invalidation"] = temp[inv_col]
+        temp["Invalidation %"] = ((temp["Price"] - temp["Invalidation"]) / temp["Price"] * 100).round(2)
+        temp["Gate Status"] = np.where(temp["Hard Gate"], "Pass", "Blocked")
+        return temp.sort_values(
+            ["Score", "Trend Align", "Vol Quality", "RS Stability", "RS"],
+            ascending=[False, False, False, False, False]
+        )
 
-    momentum_df = build_archetype(score_df, "Momentum Score", "Momentum 🚀")
-    pullback_df = build_archetype(score_df, "Pullback Score", "Pullback 🛒")
-    volatility_df = build_archetype(score_df, "Volatility Score", "Volatility Expansion 🌀")
+    momentum_df = build_family(score_df, "Momentum Score", "Momentum 🚀", "Momentum Pass", "Inv Momentum")
+    pullback_df = build_family(score_df, "Pullback Score", "Pullback 🛒", "Pullback Pass", "Inv Pullback")
+    volatility_df = build_family(score_df, "Volatility Score", "Volatility Contraction 🌀", "Volatility Pass", "Inv Volatility")
 
-    combined = pd.concat([momentum_df, pullback_df, volatility_df], ignore_index=True)
+    combined = pd.concat([momentum_df, pullback_df, volatility_df], ignore_index=True) if (
+        (not momentum_df.empty) or (not pullback_df.empty) or (not volatility_df.empty)
+    ) else pd.DataFrame()
+
+    if combined.empty:
+        st.warning("No setup-family candidates met strict definitions today.")
+        st.stop()
+
+    # Tier buckets (familiar A+/A/B/C view)
+    tier_best = combined.sort_values(
+        ["Score", "Trend Align", "Vol Quality", "RS Stability"],
+        ascending=[False, False, False, False]
+    ).drop_duplicates(subset=["Symbol"])
+    tier_counts = tier_best["Tier"].value_counts()
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("A+", int(tier_counts.get("A+", 0)))
+    t2.metric("A", int(tier_counts.get("A", 0)))
+    t3.metric("B", int(tier_counts.get("B", 0)))
+    t4.metric("C", int(tier_counts.get("C", 0)))
+
+    st.markdown(f"### ⭐ Top Ranked Picks (Best {cfg['top_n']})")
+    top_ranked = tier_best.head(cfg["top_n"]).copy()
+    if not top_ranked.empty:
+        top_rank_cols = st.columns(len(top_ranked))
+        for i, (_, row) in enumerate(top_ranked.iterrows()):
+            with top_rank_cols[i]:
+                with st.container(border=True):
+                    st.markdown(f"#### {i+1}. {row['Symbol']}")
+                    st.caption(f"{row['Setup Type']} • Tier {row['Tier']}")
+                    st.metric("Score", f"{row['Score']:.2f}/10")
+                    st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
+                    st.caption(f"Gate: {row['Gate Status']} ({row['Gate Reason']})")
+                    st.caption(f"Invalidation: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% risk)")
+                    sym = row['Symbol']
+                    prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
+                    if st.button("Log Setup", key=f"log_setup_toprank_{i}_{sym}", width='stretch'):
+                        st.session_state["journal_prefill"] = {
+                            "symbol": prefill_symbol,
+                            "strategy": "Top Ranked Pick",
+                            "side": "LONG",
+                        }
+                        st.switch_page("pages/5_Trading_Journal.py")
+
     actionable = combined[
         (combined["Tier"].isin(["A+", "A"])) &
-        ((regime_label != "🔴 Risk Off") | (combined["Score"] >= cfg["risk_off_min_score"]))
-    ].sort_values("Score", ascending=False).drop_duplicates(subset=["Symbol"]).head(cfg["top_n"])
+        (combined["Hard Gate"])
+    ].drop_duplicates(subset=["Symbol", "Setup Type"]).sort_values(
+        ["Score", "Trend Align", "Vol Quality", "RS Stability"],
+        ascending=[False, False, False, False]
+    ).head(cfg["top_n"])
 
-    watchlist_candidates = combined[
-        combined["Tier"].isin(["B"])
-    ].sort_values("Score", ascending=False).drop_duplicates(subset=["Symbol"]).head(cfg["watchlist_n"])
+    monitor = combined[
+        (combined["Tier"].isin(["A+", "A", "B"])) &
+        (~combined["Hard Gate"] | combined["Tier"].eq("B"))
+    ].drop_duplicates(subset=["Symbol", "Setup Type"]).sort_values(
+        ["Score", "Trend Align", "Vol Quality", "RS Stability"],
+        ascending=[False, False, False, False]
+    ).head(cfg["watchlist_n"])
 
     if not actionable.empty:
-        st.markdown("### 🏆 Top Actionable Picks (A+/A)")
+        st.markdown("### 🏆 Actionable List (Hard-Gate Pass)")
         top_cols = st.columns(len(actionable))
         for i, (_, row) in enumerate(actionable.iterrows()):
             with top_cols[i]:
@@ -1051,53 +1185,104 @@ elif mode == "Swing Rankings":
                     st.caption(f"{row['Setup Type']} • Tier {row['Tier']}")
                     st.metric("Score", f"{row['Score']:.2f}/10")
                     st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
-                    st.caption(f"RSI: {row['RSI']:.1f} | Vol: {row['Vol Ratio']:.2f}x")
+                    st.caption(f"Invalidation: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% risk)")
+                    st.caption(f"Trend:{row['Trend']} | Vol:{row['Vol Ratio']:.2f}x | RSI:{row['RSI']:.1f}")
 
                     sym = row['Symbol']
                     prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
-                    if st.button("Log Setup", key=f"log_setup_new_{i}_{sym}", width='stretch'):
+                    if st.button("Log Setup", key=f"log_setup_phase2_{i}_{sym}", width='stretch'):
                         st.session_state["journal_prefill"] = {
                             "symbol": prefill_symbol,
-                            "strategy": "Swing Ranking",
+                            "strategy": "Swing Family v2",
                             "side": "LONG",
                         }
                         st.switch_page("pages/5_Trading_Journal.py")
     else:
-        st.info("No A+/A setups today under current filters and regime gate.")
+        st.info("No hard-gate pass actionable setups today.")
 
-    if not watchlist_candidates.empty:
-        st.markdown("### 👀 Watchlist Candidates (B Tier)")
-        wl = watchlist_candidates[["Symbol", "Setup Type", "Score", "Price", "Change %", "RS", "Vol Ratio", "RSI"]].copy()
-        wl["Price"] = wl["Price"].apply(format_price)
-        wl["Change %"] = wl["Change %"].apply(format_change)
-        wl["Vol Ratio"] = wl["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
-        wl["RSI"] = wl["RSI"].apply(lambda x: f"{x:.1f}")
-        st.dataframe(wl, width='stretch', hide_index=True)
+    if not monitor.empty:
+        st.markdown("### 👀 Monitor List (A+/A Gate-Blocked + B Tier)")
+        mon = monitor[[
+            "Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Price", "Change %",
+            "Invalidation", "Invalidation %", "RS", "Vol Ratio", "RSI", "Quality Score", "Gate Reason"
+        ]].copy()
+        mon["Price"] = mon["Price"].apply(format_price)
+        mon["Change %"] = mon["Change %"].apply(format_change)
+        mon["Invalidation"] = mon["Invalidation"].apply(format_price)
+        mon["Vol Ratio"] = mon["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+        mon["RSI"] = mon["RSI"].apply(lambda x: f"{x:.1f}")
+        mon["Quality Score"] = mon["Quality Score"].apply(lambda x: f"{x:.2f}")
+        mon["Invalidation %"] = mon["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+        st.dataframe(mon, width='stretch', hide_index=True)
 
-    st.markdown("---")
-    st.markdown("### 🚀 Momentum Candidates")
-    mview = momentum_df[["Symbol", "Tier", "Score", "Price", "Change %", "Vol Ratio", "RSI", "Trend"]].head(12).copy()
-    mview["Price"] = mview["Price"].apply(format_price)
-    mview["Change %"] = mview["Change %"].apply(format_change)
-    mview["Vol Ratio"] = mview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
-    mview["RSI"] = mview["RSI"].apply(lambda x: f"{x:.1f}")
-    st.dataframe(mview, width='stretch', hide_index=True)
+        blocked_a = monitor[(monitor["Tier"].isin(["A+", "A"])) & (~monitor["Hard Gate"])].shape[0]
+        b_count = monitor[monitor["Tier"] == "B"].shape[0]
+        st.caption(f"Breakdown: {blocked_a} A+/A blocked by gates, {b_count} B-tier monitor candidates.")
 
-    st.markdown("### 🛒 Pullback Candidates")
-    pview = pullback_df[["Symbol", "Tier", "Score", "Price", "RSI", "dist_ema20", "Trend", "NR7"]].head(12).copy()
-    pview["Price"] = pview["Price"].apply(format_price)
-    pview["RSI"] = pview["RSI"].apply(lambda x: f"{x:.1f}")
-    pview["dist_ema20"] = pview["dist_ema20"].apply(lambda x: f"{x:.1f}%")
-    pview["NR7"] = pview["NR7"].apply(lambda x: "Yes" if x else "-")
-    st.dataframe(pview, width='stretch', hide_index=True)
+    with st.expander("🏷️ Tier Buckets (A+ / A / B / C)", expanded=False):
+        tier_cols = ["Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Gate Reason", "Price", "Change %", "Invalidation %"]
+        for tier_label in ["A+", "A", "B", "C"]:
+            st.markdown(f"### {tier_label} Tier")
+            tdf = tier_best[tier_best["Tier"] == tier_label][tier_cols].head(15).copy()
+            if tdf.empty:
+                st.info(f"No {tier_label} tier picks.")
+                continue
+            tdf["Price"] = tdf["Price"].apply(format_price)
+            tdf["Change %"] = tdf["Change %"].apply(format_change)
+            tdf["Invalidation %"] = tdf["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+            st.dataframe(tdf, width='stretch', hide_index=True)
 
-    st.markdown("### 🌀 Volatility Expansion Candidates")
-    vview = volatility_df[["Symbol", "Tier", "Score", "Price", "Vol Ratio", "NR7", "Breakout"]].head(12).copy()
-    vview["Price"] = vview["Price"].apply(format_price)
-    vview["Vol Ratio"] = vview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
-    vview["NR7"] = vview["NR7"].apply(lambda x: "Yes" if x else "-")
-    vview["Breakout"] = vview["Breakout"].apply(lambda x: "Yes" if x else "-")
-    st.dataframe(vview, width='stretch', hide_index=True)
+    with st.expander("📊 Setup Family Boards", expanded=False):
+        st.markdown("### 🚀 Momentum")
+        mview_cols = ["Symbol", "Tier", "Score", "Price", "Change %", "RS", "Vol Ratio", "RSI", "Trend", "Gate Status", "Invalidation %"]
+        if not momentum_df.empty:
+            mview = momentum_df[mview_cols].head(12).copy()
+            mview["Price"] = mview["Price"].apply(format_price)
+            mview["Change %"] = mview["Change %"].apply(format_change)
+            mview["Vol Ratio"] = mview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+            mview["RSI"] = mview["RSI"].apply(lambda x: f"{x:.1f}")
+            mview["Invalidation %"] = mview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+            st.dataframe(mview, width='stretch', hide_index=True)
+        else:
+            st.info("No momentum setups today.")
+
+        st.markdown("### 🛒 Pullback")
+        if not pullback_df.empty:
+            pview = pullback_df[["Symbol", "Tier", "Score", "Price", "RSI", "dist_ema20", "Trend", "Gate Status", "Invalidation %"]].head(12).copy()
+            pview["Price"] = pview["Price"].apply(format_price)
+            pview["RSI"] = pview["RSI"].apply(lambda x: f"{x:.1f}")
+            pview["dist_ema20"] = pview["dist_ema20"].apply(lambda x: f"{x:.1f}%")
+            pview["Invalidation %"] = pview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+            st.dataframe(pview, width='stretch', hide_index=True)
+        else:
+            st.info("No pullback setups today.")
+
+        st.markdown("### 🌀 Volatility Contraction")
+        if not volatility_df.empty:
+            vview = volatility_df[["Symbol", "Tier", "Score", "Price", "Vol Ratio", "NR7", "Inside Day", "Gate Status", "Invalidation %"]].head(12).copy()
+            vview["Price"] = vview["Price"].apply(format_price)
+            vview["Vol Ratio"] = vview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+            vview["NR7"] = vview["NR7"].apply(lambda x: "Yes" if x else "-")
+            vview["Inside Day"] = vview["Inside Day"].apply(lambda x: "Yes" if x else "-")
+            vview["Invalidation %"] = vview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+            st.dataframe(vview, width='stretch', hide_index=True)
+        else:
+            st.info("No volatility contraction setups today.")
+
+        st.markdown("### 🧮 Score Decomposition (Top Combined)")
+        dcols = [
+            "Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Quality Score",
+            "Trend Align", "Vol Quality", "RS Stability", "RS Pct", "Vol Pct"
+        ]
+        if not combined.empty:
+            dview = combined[dcols].sort_values("Score", ascending=False).head(20).copy()
+            dview["Quality Score"] = dview["Quality Score"].apply(lambda x: f"{x:.2f}")
+            dview["Trend Align"] = dview["Trend Align"].apply(lambda x: f"{x:.2f}")
+            dview["Vol Quality"] = dview["Vol Quality"].apply(lambda x: f"{x:.2f}")
+            dview["RS Stability"] = dview["RS Stability"].apply(lambda x: f"{x:.2f}")
+            dview["RS Pct"] = dview["RS Pct"].apply(lambda x: f"{x:.2f}")
+            dview["Vol Pct"] = dview["Vol Pct"].apply(lambda x: f"{x:.2f}")
+            st.dataframe(dview, width='stretch', hide_index=True)
 
 # ==================== FOOTER ====================
 st.markdown("---")
