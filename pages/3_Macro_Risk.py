@@ -1,4 +1,7 @@
 import math
+import hashlib
+import json
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -7,10 +10,18 @@ import streamlit as st
 from config import FRED_API_KEY
 from data_fetch import batch_download, fetch_fred_series, fetch_india_vix, prepare_timeseries_for_chart
 from regime_model import load_regime_settings
-from utils import setup_page
+from utils import (
+    setup_page,
+    render_key_observations,
+    get_ui_detail_mode,
+    render_source_freshness,
+    render_regime_timeline_strip,
+)
+from analytics import round_percentages_sum_to_100
 
 
-setup_page("Dashboard Launcher")
+setup_page("Macro Risk")
+view_mode = get_ui_detail_mode("Summary")
 st.title("🌍 India Macro Risk Dashboard")
 st.caption("Configurable regime model combining Macro and Liquidity factors.")
 
@@ -18,6 +29,7 @@ settings = load_regime_settings()
 blend = settings["blend"]
 macro_factors = settings["macro_factors"]
 liquidity_factors = settings["liquidity_factors"]
+REGIME_LOCK_FILE = Path("notes/regime_trend_lock.json")
 
 
 def clip(value: float, lo: float, hi: float) -> float:
@@ -359,6 +371,59 @@ def score_domain(factors: dict, resolver, domain_name: str, offset: int = 0):
     }
 
 
+def _latest_business_day_local() -> pd.Timestamp:
+    t = pd.Timestamp.today().normalize()
+    if t.weekday() < 5:
+        return t
+    return t - pd.offsets.BDay(1)
+
+
+def _load_regime_lock() -> dict:
+    if not REGIME_LOCK_FILE.exists():
+        return {}
+    try:
+        return json.loads(REGIME_LOCK_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_regime_lock(payload: dict) -> None:
+    REGIME_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REGIME_LOCK_FILE.write_text(json.dumps(payload, indent=2))
+
+
+def _build_day_signature(offset: int) -> str:
+    """
+    Build deterministic signature from input data used for a historical day.
+    If this signature is unchanged, keep prior locked regime value.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(f"offset:{offset}|fast:{fast_window}|slow:{slow_window}".encode())
+
+    def feed_series(fid: str, s: pd.Series) -> None:
+        hasher.update(fid.encode())
+        if s is None or s.empty:
+            hasher.update(b"EMPTY")
+            return
+        tail = s.dropna().tail(180)
+        hasher.update(str(len(tail)).encode())
+        for idx, val in tail.items():
+            hasher.update(str(pd.to_datetime(idx).date()).encode())
+            hasher.update(f"{float(val):.8f}".encode())
+
+    for fid, factor in sorted(enabled_macro.items(), key=lambda x: x[0]):
+        if not factor.get("enabled", True):
+            continue
+        feed_series(f"macro:{fid}", resolve_macro_series(factor, offset=offset))
+
+    for fid, factor in sorted(enabled_liquidity.items(), key=lambda x: x[0]):
+        if not factor.get("enabled", True):
+            continue
+        feed_series(f"liq:{fid}", resolve_liquidity_series(factor, offset=offset))
+
+    return hasher.hexdigest()
+
+
 macro_result = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=0)
 liquidity_result = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=0)
 
@@ -403,18 +468,6 @@ p_risk_off = risk_off_raw / prob_total
 p_neutral = neutral_raw / prob_total
 
 
-def rounded_percentages_sum_to_100(values):
-    """Round probabilities to whole percentages while forcing exact sum=100."""
-    raw = [max(0.0, float(v)) * 100.0 for v in values]
-    floors = [int(math.floor(v)) for v in raw]
-    remainder = 100 - sum(floors)
-    # Largest remainder method
-    frac_order = sorted(range(len(raw)), key=lambda i: (raw[i] - floors[i]), reverse=True)
-    out = floors[:]
-    for i in frac_order[: max(0, remainder)]:
-        out[i] += 1
-    return out
-
 if p_risk_on >= risk_on_threshold and p_risk_on > p_risk_off and p_risk_on > p_neutral:
     regime = "🟢 Risk On"
     regime_color = "success"
@@ -446,6 +499,10 @@ with col2:
 with col3:
     st.metric("Final Directional", f"{final_directional:+.2f}")
     st.caption(f"Final Impulse: {final_impulse:+.2f} | Confidence: {confidence:.0%}")
+    st.caption(
+        f"Formula: ({macro_weight:.2f} x {macro_result['directional_norm']:+.2f}) + "
+        f"({liquidity_weight:.2f} x {liquidity_result['directional_norm']:+.2f}) = {final_directional:+.2f}"
+    )
 
 if regime_color == "success":
     st.success(f"### {regime}")
@@ -460,14 +517,92 @@ st.caption(
     f"Final blend: {(1.0 - impulse_influence):.0%} directional + {impulse_influence:.0%} impulse"
 )
 
+observations = [
+    f"Regime: {regime} with {confidence:.0%} confidence.",
+    f"Macro directional {macro_result['directional_norm']:+.2f} vs Liquidity directional {liquidity_result['directional_norm']:+.2f}.",
+]
+if abs(macro_result["directional_norm"] - liquidity_result["directional_norm"]) >= 0.4:
+    observations.append("Macro and Liquidity are diverging materially; reduce position size.")
+if abs(final_impulse) > abs(final_directional) + 0.2:
+    observations.append("Short-term impulse is dominating trend; expect higher noise.")
+render_key_observations(observations)
+
 st.subheader("🎯 Regime Probabilities")
 p1, p2, p3 = st.columns(3)
-disp_risk_on, disp_neutral, disp_risk_off = rounded_percentages_sum_to_100(
+disp_risk_on, disp_neutral, disp_risk_off = round_percentages_sum_to_100(
     [p_risk_on, p_neutral, p_risk_off]
 )
 p1.metric("Risk On", f"{disp_risk_on}%")
 p2.metric("Neutral", f"{disp_neutral}%")
 p3.metric("Risk Off", f"{disp_risk_off}%")
+
+# 90-day pulse-tape timeline (bottom of overview panel)
+timeline_rows = []
+for offset in range(89, -1, -1):
+    macro_day = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=offset)
+    liquidity_day = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=offset)
+
+    if macro_day["has_signal"] and liquidity_day["has_signal"]:
+        impulse_day = (macro_day["impulse_norm"] * macro_weight) + (liquidity_day["impulse_norm"] * liquidity_weight)
+        directional_day = (macro_day["directional_norm"] * macro_weight) + (liquidity_day["directional_norm"] * liquidity_weight)
+        score_day = (directional_day * (1.0 - impulse_influence)) + (impulse_day * impulse_influence)
+        agreement_day = 1.0 - min(abs(macro_day["directional_norm"] - liquidity_day["directional_norm"]) / 2.0, 1.0)
+        quality_day = (macro_day["quality"] + liquidity_day["quality"]) / 2.0
+    elif macro_day["has_signal"]:
+        score_day = (macro_day["directional_norm"] * (1.0 - impulse_influence)) + (macro_day["impulse_norm"] * impulse_influence)
+        agreement_day = 1.0
+        quality_day = macro_day["quality"]
+    elif liquidity_day["has_signal"]:
+        score_day = (liquidity_day["directional_norm"] * (1.0 - impulse_influence)) + (liquidity_day["impulse_norm"] * impulse_influence)
+        agreement_day = 1.0
+        quality_day = liquidity_day["quality"]
+    else:
+        score_day = 0.0
+        agreement_day = 0.0
+        quality_day = 0.0
+
+    conf_score = clip((0.55 * abs(score_day)) + (0.25 * agreement_day) + (0.20 * quality_day), 0.0, 1.0)
+    if conf_score >= 0.67:
+        conf_label = "HIGH"
+    elif conf_score >= 0.45:
+        conf_label = "MEDIUM"
+    else:
+        conf_label = "LOW"
+
+    if score_day >= max(risk_on_threshold, 0.55):
+        day_regime = "RISK_ON"
+    elif score_day <= -max(risk_off_threshold, 0.55):
+        day_regime = "CRISIS"
+    elif score_day < -neutral_band:
+        day_regime = "DEFENSIVE"
+    else:
+        day_regime = "SELECTIVE"
+
+    day_ts = (pd.Timestamp.today().normalize() - pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
+    timeline_rows.append(
+        {
+            "ts": day_ts,
+            "regime": day_regime,
+            "score": round(float(score_day * 10.0), 2),  # display scale -10..+10
+            "confidence": conf_label,
+        }
+    )
+
+render_regime_timeline_strip(timeline_rows, key="macro_regime_timeline_90d")
+
+if view_mode == "Detail":
+    render_source_freshness(
+        {
+            "^TNX": "US 10Y Yield",
+            "DX-Y.NYB": "Dollar Index",
+            "GC=F": "Gold",
+            "CL=F": "Crude Oil",
+            "BTC-USD": "Bitcoin",
+            "^NSEI": "NIFTY 50",
+        },
+        market_data,
+        title="Core Macro Inputs: Source & Freshness",
+    )
 
 factor_df = pd.DataFrame(macro_result["rows"] + liquidity_result["rows"])
 
@@ -506,18 +641,18 @@ if not factor_df.empty:
     else:
         macro_formula_terms = "No valid groups"
 
-    st.subheader("🧮 Score Formula")
-    st.caption(f"Macro Directional = {macro_formula_terms} = {macro_result['directional_norm']:+.3f}")
-    st.caption(
-        f"Final Directional = ({macro_weight:.2f} x {macro_result['directional_norm']:+.3f}) + "
-        f"({liquidity_weight:.2f} x {liquidity_result['directional_norm']:+.3f}) = {final_directional:+.3f}"
-    )
-    st.caption(
-        f"Final Score = ({1.0 - impulse_influence:.2f} x {final_directional:+.3f}) + "
-        f"({impulse_influence:.2f} x {final_impulse:+.3f}) = {final_score:+.3f}"
-    )
+    with st.expander("🧮 Score Formula", expanded=(view_mode == "Detail")):
+        st.caption(f"Macro Directional = {macro_formula_terms} = {macro_result['directional_norm']:+.3f}")
+        st.caption(
+            f"Final Directional = ({macro_weight:.2f} x {macro_result['directional_norm']:+.3f}) + "
+            f"({liquidity_weight:.2f} x {liquidity_result['directional_norm']:+.3f}) = {final_directional:+.3f}"
+        )
+        st.caption(
+            f"Final Score = ({1.0 - impulse_influence:.2f} x {final_directional:+.3f}) + "
+            f"({impulse_influence:.2f} x {final_impulse:+.3f}) = {final_score:+.3f}"
+        )
 
-    with st.expander("📦 Advanced Details (Expand)", expanded=False):
+    with st.expander("📦 Advanced Details (Expand)", expanded=(view_mode == "Detail")):
         st.markdown("**Macro Group Rollup**")
         if not macro_groups.empty:
             st.dataframe(
@@ -561,112 +696,146 @@ if not factor_df.empty:
             top_bear = top_df[top_df["Contribution"] < 0].head(3)["Factor"].tolist()
             neutral_df = explain_df[explain_df["Sentiment"] == "Neutral"].copy()
             neutral_list = neutral_df.head(3)["Factor"].tolist()
-            st.write("**Top Bullish Drivers**")
+            st.markdown("<span style='color:#2e7d32;font-weight:700'>Top Bullish Drivers</span>", unsafe_allow_html=True)
             if top_bull:
                 for item in top_bull:
-                    st.write(f"- {item}")
+                    st.markdown(f"<span style='color:#2e7d32'>- {item}</span>", unsafe_allow_html=True)
             else:
                 st.write("- None")
-            st.write("**Top Bearish Drivers**")
+            st.markdown("<span style='color:#c62828;font-weight:700'>Top Bearish Drivers</span>", unsafe_allow_html=True)
             if top_bear:
                 for item in top_bear:
-                    st.write(f"- {item}")
+                    st.markdown(f"<span style='color:#c62828'>- {item}</span>", unsafe_allow_html=True)
             else:
                 st.write("- None")
-            st.write("**Top Neutral Drivers**")
+            st.markdown("<span style='color:#f9a825;font-weight:700'>Top Neutral Drivers</span>", unsafe_allow_html=True)
             if neutral_list:
                 for item in neutral_list:
-                    st.write(f"- {item}")
+                    st.markdown(f"<span style='color:#f9a825'>- {item}</span>", unsafe_allow_html=True)
             else:
                 st.write("- None")
 
-st.subheader("📉 Regime Trend (Last 7 Sessions)")
-trend_scores = []
-trend_regimes = []
+with st.expander("📉 Regime Trend & Diagnostics (Expand)", expanded=(view_mode == "Detail")):
+    trend_scores = []
+    trend_regimes = []
+    trend_days = []
+    latest_bd_local = _latest_business_day_local()
+    lock_payload = _load_regime_lock()
+    lock_changed = False
 
-for offset in range(6, -1, -1):
-    macro_day = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=offset)
-    liquidity_day = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=offset)
+    for offset in range(6, -1, -1):
+        day = (latest_bd_local - pd.offsets.BDay(offset)).normalize()
+        day_key = str(day.date())
+        macro_day = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=offset)
+        liquidity_day = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=offset)
 
-    if macro_day["has_signal"] and liquidity_day["has_signal"]:
-        impulse_day = (macro_day["impulse_norm"] * macro_weight) + (liquidity_day["impulse_norm"] * liquidity_weight)
-        directional_day = (macro_day["directional_norm"] * macro_weight) + (liquidity_day["directional_norm"] * liquidity_weight)
-        score_day = (directional_day * (1.0 - impulse_influence)) + (impulse_day * impulse_influence)
-    elif macro_day["has_signal"]:
-        score_day = (macro_day["directional_norm"] * (1.0 - impulse_influence)) + (macro_day["impulse_norm"] * impulse_influence)
-    elif liquidity_day["has_signal"]:
-        score_day = (liquidity_day["directional_norm"] * (1.0 - impulse_influence)) + (liquidity_day["impulse_norm"] * impulse_influence)
-    else:
-        score_day = 0.0
+        if macro_day["has_signal"] and liquidity_day["has_signal"]:
+            impulse_day = (macro_day["impulse_norm"] * macro_weight) + (liquidity_day["impulse_norm"] * liquidity_weight)
+            directional_day = (macro_day["directional_norm"] * macro_weight) + (liquidity_day["directional_norm"] * liquidity_weight)
+            score_day = (directional_day * (1.0 - impulse_influence)) + (impulse_day * impulse_influence)
+        elif macro_day["has_signal"]:
+            score_day = (macro_day["directional_norm"] * (1.0 - impulse_influence)) + (macro_day["impulse_norm"] * impulse_influence)
+        elif liquidity_day["has_signal"]:
+            score_day = (liquidity_day["directional_norm"] * (1.0 - impulse_influence)) + (liquidity_day["impulse_norm"] * impulse_influence)
+        else:
+            score_day = 0.0
 
-    trend_scores.append(score_day)
-    if score_day > neutral_band:
-        trend_regimes.append("🟢 Risk On")
-    elif score_day < -neutral_band:
-        trend_regimes.append("🔴 Risk Off")
-    else:
-        trend_regimes.append("🟡 Neutral")
+        if score_day > neutral_band:
+            regime_day = "🟢 Risk On"
+        elif score_day < -neutral_band:
+            regime_day = "🔴 Risk Off"
+        else:
+            regime_day = "🟡 Neutral"
 
-trend_df = pd.DataFrame({
-    "Day": pd.date_range(end=pd.Timestamp.today(), periods=7).date,
-    "Score": trend_scores,
-    "Regime": trend_regimes,
-})
+        # Lock historical values unless that day's source-data signature changes.
+        sig = _build_day_signature(offset)
+        locked = lock_payload.get(day_key)
+        is_latest = day == latest_bd_local
+        if (not is_latest) and isinstance(locked, dict) and locked.get("signature") == sig:
+            trend_scores.append(float(locked.get("score", score_day)))
+            trend_regimes.append(str(locked.get("regime", regime_day)))
+        else:
+            trend_scores.append(score_day)
+            trend_regimes.append(regime_day)
+            lock_payload[day_key] = {
+                "score": float(score_day),
+                "regime": regime_day,
+                "signature": sig,
+                "updated_at": pd.Timestamp.now().isoformat(),
+            }
+            if not is_latest:
+                lock_changed = True
+        trend_days.append(day.date())
 
-trend_fig = go.Figure()
-trend_fig.add_trace(go.Scatter(
-    x=trend_df["Day"],
-    y=trend_df["Score"],
-    mode="lines+markers",
-    marker=dict(
-        color=["green" if r == "🟢 Risk On" else ("red" if r == "🔴 Risk Off" else "orange") for r in trend_df["Regime"]],
-        size=10,
-    ),
-    line=dict(width=2),
-    name="Regime Score",
-))
-trend_fig.update_layout(height=300, yaxis_title="Score (-1 to +1)")
-st.plotly_chart(trend_fig, width='stretch')
+    # Keep lock store bounded (approx last 400 calendar days)
+    cutoff_day = (latest_bd_local - pd.Timedelta(days=400)).date()
+    old_keys = [k for k in lock_payload.keys() if pd.to_datetime(k, errors="coerce").date() < cutoff_day]
+    for k in old_keys:
+        lock_payload.pop(k, None)
+        lock_changed = True
+    if lock_changed:
+        _save_regime_lock(lock_payload)
 
-st.subheader("📈 Enabled Macro Charts")
-macro_chart_items = []
-for factor in enabled_macro.values():
-    if "symbol" in factor and factor["symbol"] in market_data:
-        macro_chart_items.append((factor["label"], factor["symbol"]))
+    trend_df = pd.DataFrame({
+        "Day": trend_days,
+        "Score": trend_scores,
+        "Regime": trend_regimes,
+    })
 
-for idx in range(0, len(macro_chart_items), 2):
-    c1, c2 = st.columns(2)
-    label1, symbol1 = macro_chart_items[idx]
-    with c1:
-        df1 = market_data.get(symbol1)
-        if df1 is not None and not df1.empty:
-            with st.expander(label1):
-                fig1 = go.Figure()
-                chart_df = prepare_timeseries_for_chart(df1)
-                fig1.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label1))
-                fig1.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
-                st.plotly_chart(fig1, width='stretch')
+    trend_fig = go.Figure()
+    trend_fig.add_trace(go.Scatter(
+        x=trend_df["Day"],
+        y=trend_df["Score"],
+        mode="lines+markers",
+        marker=dict(
+            color=["green" if r == "🟢 Risk On" else ("red" if r == "🔴 Risk Off" else "orange") for r in trend_df["Regime"]],
+            size=10,
+        ),
+        line=dict(width=2),
+        name="Regime Score",
+    ))
+    trend_fig.update_layout(height=300, yaxis_title="Score (-1 to +1)")
+    st.plotly_chart(trend_fig, width='stretch')
 
-    if idx + 1 < len(macro_chart_items):
-        label2, symbol2 = macro_chart_items[idx + 1]
-        with c2:
-            df2 = market_data.get(symbol2)
-            if df2 is not None and not df2.empty:
-                with st.expander(label2):
-                    fig2 = go.Figure()
-                    chart_df = prepare_timeseries_for_chart(df2)
-                    fig2.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label2))
-                    fig2.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
-                    st.plotly_chart(fig2, width='stretch')
+    st.markdown("### 📈 Enabled Macro Charts")
+    macro_chart_items = []
+    for factor in enabled_macro.values():
+        if "symbol" in factor and factor["symbol"] in market_data:
+            macro_chart_items.append((factor["label"], factor["symbol"]))
 
-st.subheader("💧 Liquidity Drivers")
-for factor in enabled_liquidity.values():
-    label = factor.get("label", "Liquidity")
-    series = resolve_liquidity_series(factor, offset=0)
-    if series.empty:
-        continue
-    with st.expander(label):
-        st.line_chart(series)
+    for idx in range(0, len(macro_chart_items), 2):
+        c1, c2 = st.columns(2)
+        label1, symbol1 = macro_chart_items[idx]
+        with c1:
+            df1 = market_data.get(symbol1)
+            if df1 is not None and not df1.empty:
+                with st.expander(label1):
+                    fig1 = go.Figure()
+                    chart_df = prepare_timeseries_for_chart(df1)
+                    fig1.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label1))
+                    fig1.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
+                    st.plotly_chart(fig1, width='stretch')
+
+        if idx + 1 < len(macro_chart_items):
+            label2, symbol2 = macro_chart_items[idx + 1]
+            with c2:
+                df2 = market_data.get(symbol2)
+                if df2 is not None and not df2.empty:
+                    with st.expander(label2):
+                        fig2 = go.Figure()
+                        chart_df = prepare_timeseries_for_chart(df2)
+                        fig2.add_trace(go.Scatter(x=chart_df.index, y=chart_df["Close"], mode="lines", name=label2))
+                        fig2.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), showlegend=False)
+                        st.plotly_chart(fig2, width='stretch')
+
+    st.markdown("### 💧 Liquidity Drivers")
+    for factor in enabled_liquidity.values():
+        label = factor.get("label", "Liquidity")
+        series = resolve_liquidity_series(factor, offset=0)
+        if series.empty:
+            continue
+        with st.expander(label):
+            st.line_chart(series)
 
 st.markdown("---")
 st.caption("Configure factor weights and enabled factors from the Regime Settings page.")

@@ -13,9 +13,10 @@ import pandas as pd
 from config import FRED_SERIES, FRED_API_KEY, LIQUIDITY_THRESHOLDS
 from data_fetch import fetch_fred_series, batch_download
 
-from utils import setup_page
+from utils import setup_page, render_key_observations, get_ui_detail_mode
 
-setup_page("Dashboard Launcher")
+setup_page("Liquidity & Money Supply")
+view_mode = get_ui_detail_mode("Summary")
 
 # ==================== EDUCATIONAL GUIDE ====================
 
@@ -244,56 +245,80 @@ with col_r:
 
 st.markdown("---")
 
+observations = []
+if regime:
+    observations.append(f"Liquidity stance: {regime.replace('###', '').strip()}")
+for alert in alerts[:3]:
+    observations.append(alert.replace("**", ""))
+if "DGS10" in series_data:
+    dgs = series_data["DGS10"]
+    observations.append(f"US 10Y daily move: {dgs['change_pct']:+.2f}%")
+render_key_observations(observations)
+
 # ==================== METRICS GRID ====================
 
-st.subheader("📊 Full Liquidity Pulse")
-# Loop through all available data to ensure nothing is removed
-grid_cols = st.columns(4)
-for i, (sid, data) in enumerate(series_data.items()):
-    info = INDICATOR_GUIDE.get(sid, {"desc": "Federal Reserve Data", "title": data["name"]})
-    
-    is_positive_liquidity = True
-    # Logic for metrics color
-    if sid in ["WTREGEN", "RRPONTSYD", "SOFR", "DGS10", "DFF"] and data["change_pct"] > 0:
-        is_positive_liquidity = False
-    elif sid in ["WALCL", "M2SL"] and data["change_pct"] < 0:
-        is_positive_liquidity = False
-        
-    val_str = f"{data['latest']:,.2f}"
-    if sid in ["SOFR", "IORB", "DGS10", "DFF"]:
-        val_str += "%"
-    elif sid in ["M2SL"]:
-        val_str = f"${data['latest']:,.0f}B"
-        
-    with grid_cols[i % 4]:
-        st.metric(
-            label=data["name"],
-            value=val_str,
-            delta=f"{data['change_pct']:+.2f}% (Daily)",
-            delta_color="normal" if is_positive_liquidity else "inverse",
-            help=info["desc"]
-        )
-        st.caption(f"📅 {data['date']}")
+with st.expander("📊 Full Liquidity Pulse (Expand)", expanded=False):
+    grid_cols = st.columns(4)
+    for i, (sid, data) in enumerate(series_data.items()):
+        info = INDICATOR_GUIDE.get(sid, {"desc": "Federal Reserve Data", "title": data["name"]})
+
+        is_positive_liquidity = True
+        if sid in ["WTREGEN", "RRPONTSYD", "SOFR", "DGS10", "DFF"] and data["change_pct"] > 0:
+            is_positive_liquidity = False
+        elif sid in ["WALCL", "M2SL"] and data["change_pct"] < 0:
+            is_positive_liquidity = False
+
+        val_str = f"{data['latest']:,.2f}"
+        if sid in ["SOFR", "IORB", "DGS10", "DFF"]:
+            val_str += "%"
+        elif sid in ["M2SL"]:
+            val_str = f"${data['latest']:,.0f}B"
+
+        with grid_cols[i % 4]:
+            st.metric(
+                label=data["name"],
+                value=val_str,
+                delta=f"{data['change_pct']:+.2f}% (Daily)",
+                delta_color="normal" if is_positive_liquidity else "inverse",
+                help=info["desc"]
+            )
+            st.caption(f"📅 {data['date']}")
 
 # ==================== TREND CHARTS ====================
 st.markdown("---")
-st.subheader("📈 Historical Trends (90 Days)")
+with st.expander("📈 Historical Trends (90 Days) (Expand)", expanded=(view_mode == "Detail")):
+    if series_data:
+        chart_cols = st.columns(2)
+        display_charts = ["WALCL", "RRPONTSYD", "WTREGEN", "SOFR", "M2SL", "DFF"]
 
-if series_data:
-    chart_cols = st.columns(2)
-    display_charts = ["WALCL", "RRPONTSYD", "WTREGEN", "SOFR", "M2SL", "DFF"]
-    
-    chart_idx = 0
-    for sid in display_charts:
-        if sid in series_data:
-            data = series_data[sid]
-            with chart_cols[chart_idx % 2]:
-                st.write(f"**{data['name']} Trend**")
-                df_chart = data["df"].set_index("date")
-                st.line_chart(df_chart["value"], height=200)
-                chart_idx += 1
-else:
-    st.info("No trend data available")
+        chart_idx = 0
+        for sid in display_charts:
+            if sid in series_data:
+                data = series_data[sid]
+                with chart_cols[chart_idx % 2]:
+                    st.write(f"**{data['name']} Trend**")
+                    df_chart = data["df"].set_index("date")
+                    st.line_chart(df_chart["value"], height=200)
+                    chart_idx += 1
+    else:
+        st.info("No trend data available")
+
+if view_mode == "Detail":
+    meta_rows = []
+    for sid, payload in series_data.items():
+        src = "Yahoo (^TNX)" if sid == "DGS10" else "FRED"
+        meta_rows.append(
+            {
+                "Factor": payload.get("name", sid),
+                "Series": sid,
+                "Source": src,
+                "As Of": str(payload.get("date", "")),
+                "Freshness": "Close-only",
+            }
+        )
+    if meta_rows:
+        st.markdown("#### Source & Freshness")
+        st.dataframe(pd.DataFrame(meta_rows), width="stretch", hide_index=True)
 
 st.markdown("---")
 st.caption("Data source: FRED for liquidity series; US 10Y synchronized to Yahoo ^TNX (same as other dashboards). Values: WALCL/TGA in $M, RRP in $B, SOFR/Rates in %. | Net Liquidity View.")

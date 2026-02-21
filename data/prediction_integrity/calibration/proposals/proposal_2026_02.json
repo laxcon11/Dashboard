@@ -1,0 +1,24 @@
+{
+  "proposal_id": "PI-CAL-202602",
+  "month": "2026-02",
+  "status": "PENDING_APPROVAL",
+  "generated_at": "2026-02-21T15:19:33",
+  "based_on_report": "data/prediction_integrity/calibration/monthly_calibration_2026_02.json",
+  "criteria_summary": {
+    "count": 0
+  },
+  "proposed_changes": [
+    {
+      "field": "none",
+      "current": null,
+      "proposed": null,
+      "reason": "No matured outcomes available. Carry current settings until sufficient sample."
+    }
+  ],
+  "review_notes": "No-data month. You can approve as NO_OP or request manual parameter adjustment.",
+  "approval": {
+    "approved_by": null,
+    "approved_at": null,
+    "comments": null
+  }
+}

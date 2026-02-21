@@ -159,6 +159,13 @@ Not investment advice.
 
 ---
 
+## Documentation
+
+Detailed scoring and governance logic:
+- `docs/SCORING_LOGIC.md`
+
+---
+
 ## Author
 
 Built using:

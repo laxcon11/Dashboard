@@ -6,7 +6,10 @@ Centralizes common functions to reduce code duplication
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 import logging
+import json
+from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
 
 from config import PRICE_FETCH_MODE
@@ -43,6 +46,20 @@ def setup_page(title: str, layout: str = "wide"):
     """, unsafe_allow_html=True)
 
 
+def get_ui_detail_mode(default: str = "Summary") -> str:
+    """Global page density control for summary/detail rendering."""
+    if "ui_detail_mode" not in st.session_state:
+        st.session_state["ui_detail_mode"] = default
+    mode = st.sidebar.radio(
+        "View Mode",
+        options=["Summary", "Detail"],
+        index=0 if st.session_state["ui_detail_mode"] == "Summary" else 1,
+        help="Summary: decision-first minimal UI. Detail: full diagnostics and tables.",
+        key="ui_detail_mode",
+    )
+    return mode
+
+
 # ==================== UI COMPONENTS ====================
 
 def display_market_breadth(advances: int, declines: int, unchanged: int):
@@ -69,6 +86,17 @@ def display_market_breadth(advances: int, declines: int, unchanged: int):
         st.error("⚠️ Strong declining day - Bearish sentiment")
     else:
         st.info("➡️ Mixed market - Neutral sentiment")
+
+
+def render_key_observations(observations: list[str], title: str = "🔎 Key Observations", max_items: int = 5):
+    """Render compact key observations block with top bullet points."""
+    clean = [str(x).strip() for x in observations if str(x).strip()]
+    if not clean:
+        return
+
+    st.markdown(f"### {title}")
+    for item in clean[:max_items]:
+        st.markdown(f"- {item}")
 
 
 # ==================== PRICE FORMATTING ====================
@@ -309,7 +337,8 @@ def create_price_table(
     symbols_dict: Dict[str, str],
     data: Dict[str, pd.DataFrame],
     columns: Optional[list] = None,
-    mode: Optional[str] = None
+    mode: Optional[str] = None,
+    include_meta: bool = False,
 ) -> pd.DataFrame:
     """
     Create standardized price table
@@ -326,18 +355,248 @@ def create_price_table(
     if columns is None:
         columns = ["Asset", "Price", "Change %"]
 
+    telemetry_map: Dict[str, Dict[str, Any]] = {}
+    if include_meta:
+        try:
+            from data_fetch import get_last_batch_telemetry
+            telem = get_last_batch_telemetry()
+            if telem is not None and not telem.empty:
+                for _, row in telem.iterrows():
+                    telemetry_map[str(row.get("symbol"))] = {
+                        "source": row.get("source", "UNKNOWN"),
+                        "age_bdays": row.get("age_bdays"),
+                    }
+        except Exception:
+            telemetry_map = {}
+
     rows = []
     for symbol, name in symbols_dict.items():
         df = data.get(symbol)
         price, change, change_pct = get_live_price_safe(symbol, df, mode=mode)
+        as_of = "N/A"
+        if df is not None and not df.empty:
+            idx = getattr(df, "index", None)
+            if isinstance(idx, pd.DatetimeIndex) and len(idx) > 0:
+                as_of = idx[-1].strftime("%Y-%m-%d")
 
-        rows.append({
+        row = {
             columns[0]: name,
             columns[1]: format_price(price),
             columns[2]: format_change(change_pct)
-        })
+        }
+        if include_meta:
+            meta = telemetry_map.get(symbol, {})
+            row["Source"] = meta.get("source", "API")
+            age = meta.get("age_bdays")
+            row["Age(BD)"] = "-" if age is None or pd.isna(age) else int(age)
+            row["As Of"] = as_of
+        rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+def render_source_freshness(symbols_dict: Dict[str, str], data: Dict[str, pd.DataFrame], title: str = "Source & Freshness"):
+    """Render compact source/freshness telemetry table."""
+    rows = []
+    telem_map: Dict[str, Dict[str, Any]] = {}
+    try:
+        from data_fetch import get_last_batch_telemetry
+        telem = get_last_batch_telemetry()
+        if telem is not None and not telem.empty:
+            for _, row in telem.iterrows():
+                telem_map[str(row.get("symbol"))] = {
+                    "source": row.get("source", "API"),
+                    "age": row.get("age_bdays"),
+                    "severity": row.get("severity", "OK"),
+                }
+    except Exception:
+        pass
+
+    for symbol, label in symbols_dict.items():
+        df = data.get(symbol)
+        as_of = "N/A"
+        if df is not None and not df.empty:
+            idx = getattr(df, "index", None)
+            if isinstance(idx, pd.DatetimeIndex) and len(idx) > 0:
+                as_of = idx[-1].strftime("%Y-%m-%d")
+        meta = telem_map.get(symbol, {})
+        rows.append(
+            {
+                "Factor": label,
+                "Symbol": symbol,
+                "Source": meta.get("source", "API"),
+                "As Of": as_of,
+                "Age(BD)": "-" if meta.get("age") is None or pd.isna(meta.get("age")) else int(meta["age"]),
+                "Status": meta.get("severity", "OK"),
+            }
+        )
+
+    if rows:
+        st.markdown(f"#### {title}")
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+def render_regime_timeline_strip(timeline: list[Dict[str, Any]], key: str = "regime_timeline") -> None:
+    """
+    Render a 90-day pulse-tape regime timeline with transition markers.
+    Input row format:
+      {"ts":"YYYY-MM-DD","regime":"RISK_ON|SELECTIVE|DEFENSIVE|CRISIS","score":float,"confidence":"HIGH|MEDIUM|LOW"}
+    """
+    if not timeline:
+        st.info("No regime timeline available.")
+        return
+
+    rows = timeline[-90:]
+    payload = json.dumps(rows)
+    html = f"""
+    <div id="{key}" class="rt-wrap">
+      <div class="rt-head">
+        <div class="rt-title">REGIME TIMELINE (90D)</div>
+        <div class="rt-sub">Pulse Tape</div>
+      </div>
+      <div class="rt-scroll">
+        <div class="rt-track"></div>
+      </div>
+      <div class="rt-tip" id="{key}-tip"></div>
+    </div>
+    <style>
+      .rt-wrap {{
+        width: 100%;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #d9e2ec;
+      }}
+      .rt-head {{
+        display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;
+      }}
+      .rt-title {{
+        font-size: 11px; font-weight: 700; letter-spacing: .1em; color: #cfd9e2;
+      }}
+      .rt-sub {{
+        font-size: 10px; color: #7f93a7;
+      }}
+      .rt-scroll {{
+        overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth;
+        border: 1px solid #23303d; border-radius: 8px; background: #0b1116;
+        padding: 8px 8px 6px 8px;
+      }}
+      .rt-track {{
+        position: relative; height: 56px; min-width: 600px;
+        display: flex; align-items: center;
+      }}
+      .rt-base {{
+        position: absolute; left: 0; right: 0; top: 50%;
+        transform: translateY(-50%);
+        height: 1px; background: rgba(94,116,136,.45);
+      }}
+      .rt-seg-wrap {{
+        position: relative; width: 10px; height: 56px; flex: 0 0 10px;
+      }}
+      .rt-seg {{
+        position: absolute; bottom: 10px; left: 1px; right: 1px;
+        border-radius: 2px; transition: all .4s ease;
+      }}
+      .rt-transition {{
+        position: absolute; left: 0; top: 2px; bottom: 2px;
+        width: 2px; background: rgba(255,255,255,.86);
+        box-shadow: 0 0 8px rgba(255,255,255,.35);
+      }}
+      .rt-current-dot {{
+        position: absolute; top: 1px; left: 50%; transform: translateX(-50%);
+        width: 5px; height: 5px; border-radius: 50%;
+        background: #ffffff; box-shadow: 0 0 8px rgba(255,255,255,.85);
+      }}
+      .rt-current-pulse {{
+        position: absolute; top: 1px; left: 50%; transform: translateX(-50%);
+        width: 5px; height: 5px; border-radius: 50%;
+        background: rgba(255,255,255,.6); animation: rtPulse 1.4s infinite;
+      }}
+      .rt-tip {{
+        position: fixed; z-index: 9999; pointer-events: none;
+        display: none; min-width: 190px; max-width: 240px;
+        background: rgba(5,10,14,.96); border: 1px solid #2a3a49; border-radius: 8px;
+        padding: 8px 10px; color: #dbe4ec; font-size: 11px; line-height: 1.25;
+        box-shadow: 0 10px 30px rgba(0,0,0,.45);
+      }}
+      .rt-tip .d {{ font-weight: 700; margin-bottom: 4px; }}
+      .rt-tip .r {{ margin-top: 2px; }}
+      @keyframes rtPulse {{
+        0% {{ transform: translateX(-50%) scale(1); opacity: .9; }}
+        100% {{ transform: translateX(-50%) scale(2.4); opacity: 0; }}
+      }}
+    </style>
+    <script>
+      (() => {{
+        const data = {payload};
+        const root = document.getElementById("{key}");
+        if (!root || !Array.isArray(data) || !data.length) return;
+        const scroll = root.querySelector(".rt-scroll");
+        const track = root.querySelector(".rt-track");
+        const tip = document.getElementById("{key}-tip");
+        const colors = {{
+          "RISK_ON": "#10b981",
+          "SELECTIVE": "#0ea5e9",
+          "DEFENSIVE": "#f59e0b",
+          "CRISIS": "#ef4444"
+        }};
+        const confOpacity = {{ "HIGH": 1.0, "MEDIUM": 0.8, "LOW": 0.6 }};
+        track.style.minWidth = Math.max(600, data.length * 10) + "px";
+        const base = document.createElement("div");
+        base.className = "rt-base";
+        track.appendChild(base);
+        function showTip(evt, row, isTransition) {{
+          const score = Number(row.score || 0);
+          tip.innerHTML = `
+            <div class="d">${{row.ts || ""}}</div>
+            <div class="r">Regime: <b>${{row.regime || "N/A"}}</b>${{isTransition ? " • Transition Day" : ""}}</div>
+            <div class="r">Score: <b>${{score > 0 ? "+" : ""}}${{score.toFixed(2)}}</b></div>
+            <div class="r">Confidence: <b>${{row.confidence || "N/A"}}</b></div>`;
+          tip.style.display = "block";
+          const margin = 10;
+          const maxX = window.innerWidth - tip.offsetWidth - margin;
+          const maxY = window.innerHeight - tip.offsetHeight - margin;
+          const x = Math.min(maxX, Math.max(margin, evt.clientX + 12));
+          const y = Math.min(maxY, Math.max(margin, evt.clientY - 12));
+          tip.style.left = x + "px";
+          tip.style.top = y + "px";
+        }}
+        function hideTip() {{ tip.style.display = "none"; }}
+        data.forEach((row, i) => {{
+          const w = document.createElement("div");
+          w.className = "rt-seg-wrap";
+          const s = document.createElement("div");
+          s.className = "rt-seg";
+          const scoreAbs = Math.min(2, Math.abs(Number(row.score || 0)));
+          const h = 18 + (scoreAbs * 7);
+          s.style.height = h + "px";
+          s.style.background = colors[row.regime] || "#64748b";
+          s.style.opacity = String(confOpacity[row.confidence] ?? 0.7);
+          const isTransition = i > 0 && data[i-1].regime !== row.regime;
+          if (isTransition) {{
+            const t = document.createElement("div");
+            t.className = "rt-transition";
+            w.appendChild(t);
+          }}
+          if (i === data.length - 1) {{
+            const d = document.createElement("div");
+            d.className = "rt-current-dot";
+            w.appendChild(d);
+            const p = document.createElement("div");
+            p.className = "rt-current-pulse";
+            w.appendChild(p);
+          }}
+          w.appendChild(s);
+          w.addEventListener("mousemove", (e) => showTip(e, row, isTransition));
+          w.addEventListener("mouseenter", (e) => showTip(e, row, isTransition));
+          w.addEventListener("mouseleave", hideTip);
+          track.appendChild(w);
+        }});
+        requestAnimationFrame(() => {{
+          scroll.scrollLeft = scroll.scrollWidth;
+        }});
+      }})();
+    </script>
+    """
+    components.html(html, height=108, scrolling=False)
 
 
 # ==================== ERROR HANDLING ====================

@@ -260,6 +260,11 @@ BHAVCOPY_SCAN_DIRS = [
     ] if p
 ]
 BHAVCOPY_MAX_FILES_PER_DIR = int(os.getenv("BHAVCOPY_MAX_FILES_PER_DIR", "200"))
+# End-of-day authoritative reconcile policy:
+# - Intraday: use local + API (Bhavcopy only as fallback for missing/stale failures)
+# - After cutoff IST: overwrite latest NSE day from Bhavcopy for parity with exchange close
+BHAVCOPY_EOD_RECONCILE_ENABLED = os.getenv("BHAVCOPY_EOD_RECONCILE_ENABLED", "1") == "1"
+BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR = int(os.getenv("BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR", "20"))
 
 
 # ==================== VALIDATION ====================

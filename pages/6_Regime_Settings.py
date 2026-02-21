@@ -1,10 +1,11 @@
 import streamlit as st
 
 from regime_model import load_regime_settings, save_regime_settings, reset_regime_settings
-from utils import setup_page
+from utils import setup_page, get_ui_detail_mode
 
 
-setup_page("Dashboard Launcher")
+setup_page("Regime Settings")
+_ = get_ui_detail_mode("Summary")
 st.title("⚙️ Regime Settings")
 st.caption("Configure Macro + Liquidity scoring inputs, weights, and thresholds.")
 

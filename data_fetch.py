@@ -15,8 +15,10 @@ import streamlit as st
 import logging
 import requests
 import zipfile
+import re
 from pathlib import Path
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 from config import (
     CACHE_TTL,
@@ -31,6 +33,8 @@ from config import (
     BHAVCOPY_LOOKBACK_DAYS,
     BHAVCOPY_SCAN_DIRS,
     BHAVCOPY_MAX_FILES_PER_DIR,
+    BHAVCOPY_EOD_RECONCILE_ENABLED,
+    BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR,
 )
 
 # ==================== LOGGING SETUP ====================
@@ -49,6 +53,9 @@ _LAST_BATCH_SOURCE_MAP: Dict[str, str] = {}
 _LAST_BATCH_DATE_MAP: Dict[str, Optional[pd.Timestamp]] = {}
 _LAST_BATCH_AGE_MAP: Dict[str, Optional[int]] = {}
 _LAST_BATCH_STALE_MAP: Dict[str, bool] = {}
+
+
+_LAST_BHAVCOPY_SNAPSHOT: Dict[str, object] = {"prices": {}, "trade_date": None, "path": None}
 
 
 # ==================== SYMBOL VALIDATION ====================
@@ -177,17 +184,27 @@ def _standardize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
         norm = str(col).strip().upper().replace(" ", "").replace("_", "")
         if norm == "SYMBOL":
             rename[col] = "SYMBOL"
+        elif norm in {"TCKRSYMB", "TICKERSYMBOL"}:
+            rename[col] = "SYMBOL"
         elif norm == "CLOSE":
+            rename[col] = "CLOSE"
+        elif norm in {"CLSPRIC", "CLOSINGPRICE"}:
             rename[col] = "CLOSE"
         elif norm in {"PREVCLOSE", "PREVIOUSECLOSE"}:
             rename[col] = "PREVCLOSE"
+        elif norm in {"PRVSCLSGPRIC", "PREVIOUSCLOSINGPRICE"}:
+            rename[col] = "PREVCLOSE"
         elif norm == "SERIES":
             rename[col] = "SERIES"
+        elif norm == "SCTYSRS":
+            rename[col] = "SERIES"
+        elif norm in {"VOLUME", "TTLTRADGVOL", "TOTALTRADINGVOLUME"}:
+            rename[col] = "VOLUME"
     return df.rename(columns=rename)
 
 
-def _extract_bhavcopy_prices(df: pd.DataFrame) -> Dict[str, Tuple[float, Optional[float]]]:
-    """Return symbol->(close, prev_close) from a bhavcopy-like DataFrame."""
+def _extract_bhavcopy_prices(df: pd.DataFrame) -> Dict[str, Tuple[float, Optional[float], Optional[float]]]:
+    """Return symbol->(close, prev_close, volume) from a bhavcopy-like DataFrame."""
     if df is None or df.empty:
         return {}
 
@@ -212,16 +229,24 @@ def _extract_bhavcopy_prices(df: pd.DataFrame) -> Dict[str, Tuple[float, Optiona
     if local.empty:
         return {}
 
-    prices: Dict[str, Tuple[float, Optional[float]]] = {}
+    if "TTLTRADGVOL" in local.columns and "VOLUME" not in local.columns:
+        local["VOLUME"] = pd.to_numeric(local["TTLTRADGVOL"], errors="coerce")
+    elif "VOLUME" in local.columns:
+        local["VOLUME"] = pd.to_numeric(local["VOLUME"], errors="coerce")
+    else:
+        local["VOLUME"] = pd.NA
+
+    prices: Dict[str, Tuple[float, Optional[float], Optional[float]]] = {}
     for _, row in local.iterrows():
         symbol = f"{row['SYMBOL']}.NS"
         close = float(row["CLOSE"])
         prev_close = None if pd.isna(row["PREVCLOSE"]) else float(row["PREVCLOSE"])
-        prices[symbol] = (close, prev_close)
+        vol = None if pd.isna(row["VOLUME"]) else float(row["VOLUME"])
+        prices[symbol] = (close, prev_close, vol)
     return prices
 
 
-def _read_bhavcopy_file(path: Path) -> Dict[str, Tuple[float, Optional[float]]]:
+def _read_bhavcopy_file(path: Path) -> Dict[str, Tuple[float, Optional[float], Optional[float]]]:
     """Parse bhavcopy CSV or ZIP and return symbol price map."""
     try:
         if path.suffix.lower() == ".csv":
@@ -240,6 +265,40 @@ def _read_bhavcopy_file(path: Path) -> Dict[str, Tuple[float, Optional[float]]]:
     except Exception as exc:
         logger.debug("Bhavcopy parse failed for %s: %s", path, exc)
     return {}
+
+
+def _extract_bhavcopy_trade_date(df: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """Best-effort extraction of trade date from Bhavcopy dataframe."""
+    if df is None or df.empty:
+        return None
+    for col in df.columns:
+        norm = str(col).strip().upper().replace(" ", "").replace("_", "")
+        if norm in {"TRADDT", "BIZDT", "DATE1", "TIMESTAMP", "TRADEDATE"}:
+            s = pd.to_datetime(df[col], errors="coerce").dropna()
+            if not s.empty:
+                return s.max().normalize()
+    return None
+
+
+def _read_bhavcopy_file_with_meta(path: Path) -> Tuple[Dict[str, Tuple[float, Optional[float], Optional[float]]], Optional[pd.Timestamp]]:
+    """Parse Bhavcopy and return (prices, trade_date)."""
+    try:
+        if path.suffix.lower() == ".csv":
+            df = pd.read_csv(path, low_memory=False)
+            return _extract_bhavcopy_prices(df), _extract_bhavcopy_trade_date(df)
+
+        if path.suffix.lower() == ".zip":
+            with zipfile.ZipFile(path, "r") as zf:
+                csv_members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                for member in csv_members:
+                    with zf.open(member) as fp:
+                        df = pd.read_csv(fp, low_memory=False)
+                        prices = _extract_bhavcopy_prices(df)
+                        if prices:
+                            return prices, _extract_bhavcopy_trade_date(df)
+    except Exception as exc:
+        logger.debug("Bhavcopy parse(meta) failed for %s: %s", path, exc)
+    return {}, None
 
 
 def _list_bhavcopy_candidates() -> List[Path]:
@@ -261,6 +320,25 @@ def _list_bhavcopy_candidates() -> List[Path]:
         files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
         candidates.extend(files[:BHAVCOPY_MAX_FILES_PER_DIR])
 
+    def _extract_date_hint(p: Path) -> Optional[pd.Timestamp]:
+        name = p.name.upper()
+        patterns = [
+            r"(\d{8})",            # YYYYMMDD or DDMMYYYY (ambiguous)
+            r"(\d{2}[A-Z]{3}\d{4})",  # 01FEB2024
+            r"(\d{6})",            # DDMMYY
+        ]
+        for pat in patterns:
+            m = re.search(pat, name)
+            if not m:
+                continue
+            token = m.group(1)
+            for fmt in ("%Y%m%d", "%d%m%Y", "%d%b%Y", "%d%m%y"):
+                try:
+                    return pd.to_datetime(token, format=fmt, errors="raise").normalize()
+                except Exception:
+                    continue
+        return None
+
     # Deduplicate while preserving order
     seen = set()
     unique: List[Path] = []
@@ -269,13 +347,21 @@ def _list_bhavcopy_candidates() -> List[Path]:
         if key not in seen:
             seen.add(key)
             unique.append(p)
+
+    # Prefer latest dated files first; fallback to mtime.
+    def _sort_key(p: Path):
+        d = _extract_date_hint(p)
+        d_ord = int(d.value) if d is not None else -1
+        return (d_ord, p.stat().st_mtime)
+
+    unique = sorted(unique, key=_sort_key, reverse=True)
     return unique
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def load_latest_bhavcopy_prices() -> Dict[str, Tuple[float, Optional[float]]]:
+def load_latest_bhavcopy_prices() -> Dict[str, Tuple[float, Optional[float], Optional[float]]]:
     """
-    Load latest available Bhavcopy price map: symbol -> (close, prev_close).
+    Load latest available Bhavcopy price map: symbol -> (close, prev_close, volume).
     Returns empty dict if no valid file is found.
     """
     if not BHAVCOPY_FALLBACK_ENABLED:
@@ -291,16 +377,26 @@ def load_latest_bhavcopy_prices() -> Dict[str, Tuple[float, Optional[float]]]:
     candidates = _list_bhavcopy_candidates()
     if not candidates:
         logger.info("Bhavcopy fallback enabled but no candidate files found.")
+        _LAST_BHAVCOPY_SNAPSHOT.update({"prices": {}, "trade_date": None, "path": None})
         return {}
 
     for path in candidates:
-        prices = _read_bhavcopy_file(path)
+        prices, trade_date = _read_bhavcopy_file_with_meta(path)
         if prices:
             logger.info("Using Bhavcopy fallback file: %s (%d symbols)", path, len(prices))
+            _LAST_BHAVCOPY_SNAPSHOT.update({"prices": prices, "trade_date": trade_date, "path": str(path)})
             return prices
 
     logger.info("Bhavcopy fallback enabled but no valid bhavcopy content parsed.")
+    _LAST_BHAVCOPY_SNAPSHOT.update({"prices": {}, "trade_date": None, "path": None})
     return {}
+
+
+def get_latest_bhavcopy_snapshot() -> Dict[str, object]:
+    """Return latest bhavcopy snapshot metadata after load_latest_bhavcopy_prices call."""
+    if not _LAST_BHAVCOPY_SNAPSHOT.get("prices"):
+        _ = load_latest_bhavcopy_prices()
+    return dict(_LAST_BHAVCOPY_SNAPSHOT)
 
 
 def get_bhavcopy_price(symbol: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -316,7 +412,7 @@ def get_bhavcopy_price(symbol: str) -> Tuple[Optional[float], Optional[float], O
     if not row:
         return None, None, None
 
-    close, prev_close = row
+    close, prev_close, _ = row
     if prev_close is None or prev_close == 0:
         return close, None, None
 
@@ -325,14 +421,23 @@ def get_bhavcopy_price(symbol: str) -> Tuple[Optional[float], Optional[float], O
     return close, change, change_pct
 
 
-def _build_fallback_price_df(price: float, prev_close: Optional[float]) -> pd.DataFrame:
+def _build_fallback_price_df(
+    price: float,
+    prev_close: Optional[float],
+    trade_date: Optional[pd.Timestamp] = None,
+    volume: Optional[float] = None,
+) -> pd.DataFrame:
     """
     Build a minimal 2-row OHLCV DataFrame so downstream chart/price code can operate.
     """
-    today = datetime.now().date()
-    prev_day = today - timedelta(days=1)
+    if trade_date is None:
+        tday = pd.Timestamp.today().normalize()
+    else:
+        tday = pd.to_datetime(trade_date).normalize()
+    prev_day = (tday - pd.offsets.BDay(1)).normalize()
     if prev_close is None or prev_close <= 0:
         prev_close = price
+    vol_today = 0.0 if volume is None or pd.isna(volume) else float(max(0.0, volume))
 
     df = pd.DataFrame(
         {
@@ -340,9 +445,9 @@ def _build_fallback_price_df(price: float, prev_close: Optional[float]) -> pd.Da
             "High": [prev_close, price],
             "Low": [prev_close, price],
             "Close": [prev_close, price],
-            "Volume": [0.0, 0.0],
+            "Volume": [0.0, vol_today],
         },
-        index=pd.to_datetime([prev_day, today]),
+        index=pd.to_datetime([prev_day, tday]),
     )
     return df
 
@@ -373,6 +478,19 @@ def _latest_business_day() -> pd.Timestamp:
     if today.weekday() < 5:
         return today
     return today - pd.offsets.BDay(1)
+
+
+def _is_after_bhav_eod_cutoff_ist() -> bool:
+    try:
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+        cutoff = int(BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR)
+        # EOD reconcile window:
+        # - same-day evening after cutoff (e.g., 20:00+)
+        # - post-midnight pre-open (carry forward previous session reconcile window)
+        return (now_ist.hour >= cutoff) or (now_ist.hour < 9)
+    except Exception:
+        # Fallback approximation for environments without tz data
+        return False
 
 
 def _business_day_age(last_date: Optional[pd.Timestamp], ref_date: Optional[pd.Timestamp] = None) -> Optional[int]:
@@ -415,6 +533,61 @@ def get_last_batch_telemetry() -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def quick_data_health_summary() -> Dict[str, object]:
+    """
+    Lightweight integrity snapshot for launcher banner.
+    """
+    summary: Dict[str, object] = {
+        "ok": True,
+        "missing_symbols": 0,
+        "duplicates": 0,
+        "stale_warn": 0,
+        "stale_error": 0,
+        "message": "Data health OK",
+    }
+    try:
+        local = load_local_nse_history()
+        if local is None or local.empty:
+            summary.update({"ok": False, "message": "Local history unavailable"})
+            return summary
+
+        work = local.copy()
+        work["date"] = pd.to_datetime(work["date"], errors="coerce").dt.normalize()
+        work["symbol"] = work["symbol"].astype(str).str.upper().str.strip()
+        work = work.dropna(subset=["date", "symbol"])
+
+        from NSE_Config import NIFTY_200
+
+        universe = set(NIFTY_200)
+        available = set(work["symbol"].unique())
+        missing = universe - available
+        summary["missing_symbols"] = len(missing)
+        summary["duplicates"] = int(work.duplicated(subset=["symbol", "date"]).sum())
+
+        latest_bd = pd.Timestamp.today().normalize()
+        if latest_bd.weekday() >= 5:
+            latest_bd = latest_bd - pd.offsets.BDay(1)
+        ages = work.groupby("symbol")["date"].max().apply(
+            lambda d: max(0, len(pd.bdate_range(pd.Timestamp(d).normalize(), latest_bd)) - 1)
+        )
+        summary["stale_warn"] = int((ages >= DATA_STALENESS_WARN_DAYS).sum())
+        summary["stale_error"] = int((ages >= DATA_STALENESS_ERROR_DAYS).sum())
+
+        summary["ok"] = (
+            summary["missing_symbols"] == 0
+            and summary["duplicates"] == 0
+            and summary["stale_error"] == 0
+        )
+        if not summary["ok"]:
+            summary["message"] = (
+                f"missing={summary['missing_symbols']} | dup={summary['duplicates']} | stale={summary['stale_error']}"
+            )
+    except Exception as exc:
+        summary.update({"ok": False, "message": f"Health check error: {exc}"})
+    return summary
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
@@ -674,18 +847,74 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
         # 4) Persist incremental API rows back to local parquet for NSE symbols.
         persist_local_nse_updates(api_updates)
 
-        # 5) Bhavcopy fallback for still-missing NSE symbols.
+        # 5) Bhavcopy fallback for still-missing NSE symbols and stale local-only symbols.
+        bhav_prices = load_latest_bhavcopy_prices()
+        bhav_snapshot = get_latest_bhavcopy_snapshot()
+        bhav_trade_date = bhav_snapshot.get("trade_date")
+        bhav_updates: Dict[str, pd.DataFrame] = {}
+
         missing_nse = [s for s in valid_symbols if s not in result and _is_nse_equity_symbol(s)]
-        if missing_nse:
-            bhav_prices = load_latest_bhavcopy_prices()
-            for symbol in missing_nse:
+        for symbol in missing_nse:
+            row = bhav_prices.get(symbol)
+            if not row:
+                continue
+            close, prev_close, vol = row
+            bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol)
+            result[symbol] = bdf
+            source_map[symbol] = "BHAVCOPY"
+            bhav_updates[symbol] = bdf
+            logger.warning("%s: Using Bhavcopy fallback (missing).", symbol)
+
+        stale_local_nse = [
+            s for s in valid_symbols
+            if _is_nse_equity_symbol(s)
+            and s in result
+            and source_map.get(s) == "LOCAL"
+            and not result[s].empty
+            and result[s].index.max().normalize() < latest_bd
+        ]
+        for symbol in stale_local_nse:
+            row = bhav_prices.get(symbol)
+            if not row:
+                continue
+            close, prev_close, vol = row
+            bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol)
+            merged = pd.concat([result[symbol], bdf], axis=0)
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            result[symbol] = merged
+            source_map[symbol] = "LOCAL+BHAVCOPY"
+            bhav_updates[symbol] = bdf
+            logger.warning("%s: Using Bhavcopy fallback (stale local).", symbol)
+
+        if bhav_updates:
+            persist_local_nse_updates(bhav_updates)
+
+        # 6) EOD reconcile: after IST cutoff, if Bhavcopy is for latest business day, use it as final source of truth.
+        if (
+            BHAVCOPY_EOD_RECONCILE_ENABLED
+            and _is_after_bhav_eod_cutoff_ist()
+            and isinstance(bhav_trade_date, pd.Timestamp)
+            and bhav_trade_date.normalize() >= latest_bd
+        ):
+            eod_updates: Dict[str, pd.DataFrame] = {}
+            for symbol in valid_symbols:
+                if not _is_nse_equity_symbol(symbol):
+                    continue
                 row = bhav_prices.get(symbol)
                 if not row:
                     continue
-                close, prev_close = row
-                result[symbol] = _build_fallback_price_df(close, prev_close)
-                source_map[symbol] = "BHAVCOPY"
-                logger.warning("%s: Using Bhavcopy fallback.", symbol)
+                close, prev_close, vol = row
+                bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol)
+                if symbol in result and not result[symbol].empty:
+                    merged = pd.concat([result[symbol], bdf], axis=0)
+                    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                    result[symbol] = merged
+                else:
+                    result[symbol] = bdf
+                source_map[symbol] = "BHAVCOPY(EOD)"
+                eod_updates[symbol] = bdf
+            if eod_updates:
+                persist_local_nse_updates(eod_updates)
 
         # Mark symbols that ended up local-only and stale (API failed / not refreshed)
         for symbol, df in result.items():

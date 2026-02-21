@@ -1,89 +1,127 @@
 import streamlit as st
-from utils import setup_page
+from utils import setup_page, get_ui_detail_mode
+from data_fetch import quick_data_health_summary
+from factor_registry import FACTOR_REGISTRY
+from pathlib import Path
+import json
 
 setup_page("Dashboard Launcher")
+view_mode = get_ui_detail_mode("Summary")
 st.sidebar.success("Select a dashboard above")
 
 st.title("🚀 Dashboard Launcher")
+st.caption("Decision-first macro-to-execution workflow for disciplined swing trading.")
+st.caption(f"UI mode: **{view_mode}**")
 
+health = quick_data_health_summary()
+if health.get("ok"):
+    st.success("Data Health: OK")
+else:
+    st.warning(f"Data Health Warning: {health.get('message')}")
+
+trust_file = Path("logs/data_trust_latest.json")
+if trust_file.exists():
+    try:
+        trust = json.loads(trust_file.read_text())
+        status = str(trust.get("status", "UNKNOWN")).upper()
+        score = trust.get("trust_score", "N/A")
+        if status == "PASS":
+            st.success(f"Data Trust: {status} ({score})")
+        elif status == "WARN":
+            st.warning(f"Data Trust: {status} ({score})")
+        else:
+            st.error(f"Data Trust: {status} ({score})")
+    except Exception:
+        st.info("Data Trust: report present but unreadable.")
+else:
+    st.info("Data Trust: not generated yet.")
+
+st.subheader("🎯 Recommended Flow")
+f1, f2, f3, f4, f5, f6, f7 = st.columns(7)
+with f1:
+    st.info("1) Global + Liquidity\n\nRead risk backdrop")
+with f2:
+    st.info("2) Macro Risk\n\nSet bias: Risk On / Neutral / Risk Off")
+with f3:
+    st.info("3) NSE Dashboard\n\nPick setups with gates")
+with f4:
+    st.info("4) Portfolio Risk\n\nCheck concentration/exposure")
+with f5:
+    st.info("5) Journal\n\nLog and review execution")
+with f6:
+    st.info("6) Ops\n\nRun EOD + alerts")
+with f7:
+    st.info("7) Prediction Integrity\n\nReview calibration + approvals")
+
+with st.expander("🗂 Pages & Configuration", expanded=False):
+    st.markdown("""
+    **Pages**
+    - `0_NSE_Dashboard.py`
+    - `1_Global_Markets.py`
+    - `2_Money_Supply.py`
+    - `3_Macro_Risk.py`
+    - `4_Leading_Indicators.py`
+    - `5_Trading_Journal.py`
+    - `6_Regime_Settings.py`
+    - `7_Portfolio_Risk.py`
+    - `8_Ops_Automation.py`
+    - `9_Prediction_Integrity.py`
+    - `10_Scoring_Audit.py`
+
+    **Core files**
+    - `NSE_Config.py` (universe/categories/watchlists)
+    - `config.py` (global symbols and app settings)
+    - `regime_model.py` (regime scoring settings)
+    - `watchlist_manager.py` (saved watchlists)
+    - `data_fetch.py` (data pipeline, fallback paths)
+    """)
+
+with st.expander("📊 Data Sources & Notes", expanded=False):
+    st.markdown("""
+    - **Yahoo Finance**: stock/index/market prices (typically delayed)
+    - **FRED**: liquidity/economic series
+    - **Fallback**: proxy and local fallback paths are used where configured
+    - Regime output is a decision aid, not a guarantee
+    - FRED API key: [https://fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html)
+    """)
+
+with st.expander("🧭 Factor Registry (Single Source of Truth)", expanded=False):
+    rows = []
+    for key, meta in FACTOR_REGISTRY.items():
+        rows.append(
+            {
+                "Factor": key,
+                "Label": meta.get("label", ""),
+                "Symbol": meta.get("symbol", ""),
+                "Source": meta.get("source", ""),
+                "Global Mode": meta.get("update_mode", {}).get("global_markets", ""),
+                "Default Mode": meta.get("update_mode", {}).get("default", ""),
+                "Fallback": meta.get("fallback", ""),
+            }
+        )
+    st.dataframe(rows, width="stretch", hide_index=True)
+
+st.subheader("🌳 Decision Flow (How Stocks Move To Tradable)")
 st.markdown("""
-Integrated macro-to-execution workflow for disciplined swing trading.
-
-## 🎯 Workflow (Top-Down)
-
-### 1️⃣ Global Markets
-- Global indices, FX, commodities, rates, and crypto snapshot
-- First read on risk-on / risk-off
-
-### 2️⃣ Money Supply & Liquidity
-- Fed balance sheet, RRP, M2, rates, and liquidity context
-- Validates whether liquidity supports trend continuation
-
-### 3️⃣ Macro Risk Dashboard
-- Composite macro + liquidity regime assessment
-- Regime tags for directional bias (Risk On / Neutral / Risk Off)
-
-### 4️⃣ Leading Indicators Dashboard
-- Forward-looking triggers (yield curve, copper/gold, credit, USD)
-- Daily and directional impulse context
-
-### 5️⃣ NSE Dashboard ⭐
-- Core universe: 230 tracked stocks (base universe + F&O delta)
-- Stock selection modes:
-  - Preset watchlists
-  - Category view: Sector-wise (first pass) or Thematic
-  - Custom selection
-- Swing engine + rankings + one-click journal handoff
-
-### 6️⃣ Trading Journal 📔
-- Log setups/trades, track lifecycle, and review performance
-
-### 7️⃣ Regime Settings ⚙️
-- Edit factor weights and directional controls
-- Prevent single-factor dominance and tune model behavior
-
----
-
-## 🔧 Configuration
-
-Core files:
-- `NSE_Config.py` - Universe, sector/thematic categories, preset watchlists
-- `config.py` - Global markets and macro symbol settings
-- `regime_model.py` - Regime scoring logic
-- `watchlist_manager.py` - Persistent watchlists
-- `data_fetch.py` - Data access and fallback paths
-- `FRED_API_KEY` in `config.py` - Required for liquidity series
-
-## 🗂 Dashboard Structure
-
-Pages:
-- 0_NSE_Dashboard.py
-- 1_Global_Markets.py
-- 2_Money_Supply.py
-- 3_Macro_Risk.py
-- 4_Leading_Indicators.py
-- 5_Trading_Journal.py
-- 6_Regime_Settings.py
-
----
-
-## 📊 Data Sources
-- **Yahoo Finance**: Stock/index prices (typically delayed)
-- **FRED**: US economic/liquidity data (free API key)
-- **Fallback behavior**: Some indicators use proxy/fallback mappings when primary series is unavailable
-
----
-
-## ⚠️ Important Notes
-- Markets: Mon-Fri 9:15 AM - 3:30 PM IST
-- Data can be delayed depending on source availability
-- FRED API key: [https://fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html)
-- Regime output is a decision aid, not a prediction guarantee
-
----
-
-**👈 Select a dashboard from the sidebar to begin**
+```mermaid
+flowchart TD
+    A["Start: Selected Watchlist Stocks"] --> B{"Setup Qualification"}
+    B -->|"Meets at least one setup family"| C["Scored Candidate"]
+    B -->|"Fails all setup families"| X["Excluded for today"]
+    C --> D{"Entry Safety Checks"}
+    D -->|"Pass: Regime + Liquidity + Quality"| E{"Tier Classification"}
+    D -->|"Fail any check"| M["Watch / Improve (with Block Reason)"]
+    E -->|"A+ or A"| T["Tradable Now List"]
+    E -->|"B or C"| W["Watchlist / Tier Buckets"]
+```
 """)
+
+st.markdown("**Step Explanations**")
+st.markdown("- **Setup Qualification**: Stock must satisfy at least one setup family rule (Momentum, Pullback, or Volatility Contraction).")
+st.markdown("- **Entry Safety Checks**: Risk controls are applied: Regime check, Liquidity check, and Stock Quality check.")
+st.markdown("- **Tier Classification**: Candidate is graded A+/A/B/C by score and tie-breakers.")
+st.markdown("- **Tradable Now**: Only candidates with **A+/A** and **Entry Safety Checks = Pass** appear here.")
+st.markdown("- **Watch / Improve**: Gate-blocked names or lower tiers stay visible with block reason/invalidation for monitoring.")
 
 # Status indicators
 col1, col2, col3 = st.columns(3)

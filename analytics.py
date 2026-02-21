@@ -1,11 +1,24 @@
 import pandas as pd
 import numpy as np
 import logging
+import math
 from indicators import calculate_rsi, calculate_ema, calculate_atr
 from config import BREAKOUT_WINDOW
 
 
 logger = logging.getLogger(__name__)
+
+
+def round_percentages_sum_to_100(values) -> list[int]:
+    """Round probability-like values to whole percentages and force exact 100 total."""
+    raw = [max(0.0, float(v)) * 100.0 for v in values]
+    floors = [int(math.floor(v)) for v in raw]
+    remainder = 100 - sum(floors)
+    frac_order = sorted(range(len(raw)), key=lambda i: (raw[i] - floors[i]), reverse=True)
+    out = floors[:]
+    for i in frac_order[: max(0, remainder)]:
+        out[i] += 1
+    return out
 
 
 def detect_gap(df):

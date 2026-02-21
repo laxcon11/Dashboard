@@ -53,7 +53,9 @@ from utils import (
     format_price,
     format_change,
     create_line_chart,
-    get_live_price_safe
+    get_live_price_safe,
+    render_key_observations,
+    get_ui_detail_mode,
 )
 
 # ==================== LOGGING ====================
@@ -71,7 +73,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== PAGE CONFIG ====================
-setup_page("Dashboard Launcher")
+setup_page("NSE Dashboard")
+view_mode = get_ui_detail_mode("Summary")
 
 st.title("🚀 NSE Dashboard Launcher")
 st.caption("Advanced swing trading analysis for Indian markets - NIFTY 200 Coverage")
@@ -237,24 +240,25 @@ for col, (symbol, name) in zip(cols, MAIN_INDICES.items()):
     else:
         col.metric(name, "No Data")
 
+# Build sector context once and reuse in swing mode for objective "Selective" guidance.
+sector_context_rows = []
+for symbol, name in NSE_SECTOR_INDICES.items():
+    df = sector_data.get(symbol)
+    _, _, chg_pct = get_live_price_safe(symbol, df)
+    if chg_pct is None:
+        continue
+    sector_context_rows.append({"Sector": name, "Change %": float(chg_pct)})
+sector_context_df = pd.DataFrame(sector_context_rows)
+if not sector_context_df.empty:
+    sector_context_df = sector_context_df.sort_values("Change %", ascending=False).reset_index(drop=True)
+
 # ==================== SECTORAL VIEW - IMPROVED BAR CHART ====================
 if mode != "Swing Rankings":
     st.subheader("📊 Sectoral Performance")
     st.caption("✅ Includes Banking & Capital Market sectors")
 
-    sector_performance = []
-    for symbol, name in NSE_SECTOR_INDICES.items():
-        df = sector_data.get(symbol)
-        price, change, change_pct = get_live_price_safe(symbol, df)
-
-        if change_pct is not None:
-            sector_performance.append({
-                'Sector': name,
-                'Change %': change_pct
-            })
-
-    if sector_performance:
-        sector_df = pd.DataFrame(sector_performance).sort_values('Change %', ascending=False)
+    if not sector_context_df.empty:
+        sector_df = sector_context_df.copy()
 
         # IMPROVED: Better text positioning for readability
         fig = go.Figure()
@@ -671,44 +675,6 @@ elif mode == "Full Analysis":
                 st.metric("Resistance", format_price(resistance),
                          f"{((resistance - price) / price * 100):.2f}% away" if price else "")
 
-        # Smart Trade Planner
-        st.markdown("---")
-        with st.expander("🛡️ Smart Trade Planner (Risk/Reward Calculator)", expanded=True):
-            avg_range = calculate_atr(df, 14).iloc[-1]
-            
-            p_col1, p_col2, p_col3 = st.columns(3)
-            
-            with p_col1:
-                risk_amt = st.number_input("Max Risk (Loss) ₹", value=5000, step=1000, help="Amount you are willing to lose if Stop Loss is hit")
-                entry = st.number_input("Entry Price", value=float(price))
-            
-            with p_col2:
-                sl_type = st.selectbox("Stop Loss Strategy", ["2x ATR (Vol Based)", "Recent Low (20D)", "3% Fixed"])
-                
-                if "ATR" in sl_type:
-                    stop_loss = entry - (avg_range * 2)
-                    sl_desc = f"Based on 2x ATR ({avg_range:.2f})"
-                elif "Recent Low" in sl_type:
-                    stop_loss = df['Low'].tail(20).min()
-                    sl_desc = "Lowest low of last 20 days"
-                else:
-                    stop_loss = entry * 0.97
-                    sl_desc = "Fixed 3% Stop"
-                
-                st.metric("Suggested Stop Loss", format_price(stop_loss), sl_desc)
-                
-            with p_col3:
-                risk_per_share = entry - stop_loss
-                if risk_per_share > 0:
-                    qty = int(risk_amt / risk_per_share)
-                    target = entry + (risk_per_share * 2) # 1:2
-                    capital_req = qty * entry
-                    
-                    st.metric("Target (1:2 Risk)", format_price(target), f"Capital Req: {format_price(capital_req)}")
-                    st.success(f"Position Size: **{qty} shares**")
-                else:
-                    st.error("Invalid Stop Loss (Must be < Entry)")
-
         # IMPROVEMENT: VWAP added to chart
         st.markdown("**📊 Price Chart with Moving Averages, VWAP & Levels**")
 
@@ -821,6 +787,44 @@ elif mode == "Full Analysis":
             avg_vol = df['Volume'].tail(20).mean()
             st.write(f"**Avg Volume (20D)**: {avg_vol/1000000:.2f}M")
 
+        # Smart Trade Planner (moved below chart section)
+        st.markdown("---")
+        with st.expander("🛡️ Smart Trade Planner (Risk/Reward Calculator)", expanded=True):
+            avg_range = calculate_atr(df, 14).iloc[-1]
+
+            p_col1, p_col2, p_col3 = st.columns(3)
+
+            with p_col1:
+                risk_amt = st.number_input("Max Risk (Loss) ₹", value=5000, step=1000, help="Amount you are willing to lose if Stop Loss is hit")
+                entry = st.number_input("Entry Price", value=float(price))
+
+            with p_col2:
+                sl_type = st.selectbox("Stop Loss Strategy", ["2x ATR (Vol Based)", "Recent Low (20D)", "3% Fixed"])
+
+                if "ATR" in sl_type:
+                    stop_loss = entry - (avg_range * 2)
+                    sl_desc = f"Based on 2x ATR ({avg_range:.2f})"
+                elif "Recent Low" in sl_type:
+                    stop_loss = df['Low'].tail(20).min()
+                    sl_desc = "Lowest low of last 20 days"
+                else:
+                    stop_loss = entry * 0.97
+                    sl_desc = "Fixed 3% Stop"
+
+                st.metric("Suggested Stop Loss", format_price(stop_loss), sl_desc)
+
+            with p_col3:
+                risk_per_share = entry - stop_loss
+                if risk_per_share > 0:
+                    qty = int(risk_amt / risk_per_share)
+                    target = entry + (risk_per_share * 2) # 1:2
+                    capital_req = qty * entry
+
+                    st.metric("Target (1:2 Risk)", format_price(target), f"Capital Req: {format_price(capital_req)}")
+                    st.success(f"Position Size: **{qty} shares**")
+                else:
+                    st.error("Invalid Stop Loss (Must be < Entry)")
+
     else:
         st.warning(f"Insufficient data for {selected_stock}")
 
@@ -925,9 +929,52 @@ elif mode == "Swing Rankings":
         regime_adj = 0.0
 
     r1, r2, r3 = st.columns(3)
-    r1.metric("Regime Filter", regime_label)
+    r1.metric("Market Regime", regime_label)
     r2.metric("A/D Breadth", f"{advances}:{declines}", f"{breadth_ratio:.2f}")
     r3.info(f"{regime_bias} | {swing_strictness}")
+
+    # Objective context for Neutral/Selective regimes using sector-level dispersion and breadth.
+    if regime_label == "🟡 Neutral":
+        st.markdown("### 🎯 Selective Context (Objective)")
+        if sector_context_df.empty:
+            st.info("Sector context unavailable for now.")
+        else:
+            sector_adv = int((sector_context_df["Change %"] > 0).sum())
+            sector_total = int(len(sector_context_df))
+            sector_breadth = (sector_adv / sector_total) if sector_total > 0 else 0.0
+            sector_dispersion = float(sector_context_df["Change %"].std(ddof=0)) if sector_total > 1 else 0.0
+            leadership_spread = float(sector_context_df["Change %"].iloc[0] - sector_context_df["Change %"].iloc[-1])
+
+            if sector_breadth >= 0.65 and sector_dispersion < 0.8:
+                selective_note = "Broad participation improving. You can be less selective."
+            elif sector_breadth <= 0.35:
+                selective_note = "Weak participation. Keep exposure light and prioritize capital protection."
+            else:
+                selective_note = "Dispersion market. Focus only on leadership sectors and avoid laggards."
+
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Sector Breadth", f"{sector_adv}/{sector_total}", f"{sector_breadth:.0%}")
+            s2.metric("Sector Dispersion", f"{sector_dispersion:.2f}")
+            s3.metric("Leadership Spread", f"{leadership_spread:+.2f}%")
+            st.caption(selective_note)
+
+            leaders = sector_context_df.head(3).copy()
+            laggards = sector_context_df.tail(2).copy().sort_values("Change %", ascending=True)
+            l1, l2 = st.columns(2)
+            with l1:
+                st.markdown("**Focus Sectors (Top 3)**")
+                st.dataframe(
+                    leaders.assign(**{"Change %": leaders["Change %"].map(lambda x: f"{x:+.2f}%")}),
+                    width="stretch",
+                    hide_index=True,
+                )
+            with l2:
+                st.markdown("**Avoid / Underweight (Bottom 2)**")
+                st.dataframe(
+                    laggards.assign(**{"Change %": laggards["Change %"].map(lambda x: f"{x:+.2f}%")}),
+                    width="stretch",
+                    hide_index=True,
+                )
 
     def clip01(v):
         return max(0.0, min(1.0, v))
@@ -949,9 +996,26 @@ elif mode == "Swing Rankings":
 
     regime_gate_pass = regime_label != "🔴 Risk Off"
     g1, g2, g3 = st.columns(3)
-    g1.metric("Liquidity Gate", liquidity_label, f"Score {liq_score:+d}")
-    g2.metric("Regime Gate", "Pass" if regime_gate_pass else "Blocked", regime_label)
-    g3.metric("Hard Gates", "Pass" if (regime_gate_pass and liquidity_gate_pass) else "Blocked")
+    g1.metric("Liquidity Check", liquidity_label, f"Score {liq_score:+d}")
+    g2.metric("Regime Check", "Pass" if regime_gate_pass else "Blocked", regime_label)
+    g3.metric("Global Checks", "Pass" if (regime_gate_pass and liquidity_gate_pass) else "Blocked")
+
+    n_change = 0.0
+    b_change = 0.0
+    if nifty_df is not None and "Close" in nifty_df.columns:
+        s = pd.to_numeric(nifty_df["Close"], errors="coerce").dropna()
+        if len(s) >= 2 and s.iloc[-2] != 0:
+            n_change = ((s.iloc[-1] - s.iloc[-2]) / s.iloc[-2]) * 100
+    if bank_df is not None and "Close" in bank_df.columns:
+        s = pd.to_numeric(bank_df["Close"], errors="coerce").dropna()
+        if len(s) >= 2 and s.iloc[-2] != 0:
+            b_change = ((s.iloc[-1] - s.iloc[-2]) / s.iloc[-2]) * 100
+    swing_observations = [
+        f"Regime filter: {regime_label} ({regime_bias}).",
+        f"Liquidity gate: {liquidity_label} (score {liq_score:+d}).",
+        f"NIFTY {n_change:+.2f}% | BANKNIFTY {b_change:+.2f}% | Breadth {advances}:{declines} ({breadth_ratio:.2f}).",
+    ]
+    render_key_observations(swing_observations)
 
     raw_rows = []
     with st.spinner("Scoring candidates with setup-family and hard gates..."):
@@ -1136,28 +1200,48 @@ elif mode == "Swing Rankings":
     t3.metric("B", int(tier_counts.get("B", 0)))
     t4.metric("C", int(tier_counts.get("C", 0)))
 
-    st.markdown(f"### ⭐ Top Ranked Picks (Best {cfg['top_n']})")
-    top_ranked = tier_best.head(cfg["top_n"]).copy()
-    if not top_ranked.empty:
-        top_rank_cols = st.columns(len(top_ranked))
-        for i, (_, row) in enumerate(top_ranked.iterrows()):
-            with top_rank_cols[i]:
-                with st.container(border=True):
-                    st.markdown(f"#### {i+1}. {row['Symbol']}")
-                    st.caption(f"{row['Setup Type']} • Tier {row['Tier']}")
-                    st.metric("Score", f"{row['Score']:.2f}/10")
-                    st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
-                    st.caption(f"Gate: {row['Gate Status']} ({row['Gate Reason']})")
-                    st.caption(f"Invalidation: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% risk)")
-                    sym = row['Symbol']
-                    prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
-                    if st.button("Log Setup", key=f"log_setup_toprank_{i}_{sym}", width='stretch'):
-                        st.session_state["journal_prefill"] = {
-                            "symbol": prefill_symbol,
-                            "strategy": "Top Ranked Pick",
-                            "side": "LONG",
-                        }
-                        st.switch_page("pages/5_Trading_Journal.py")
+    execution_mode = st.toggle(
+        "Execution Mode (Tradable-Only)",
+        value=True,
+        help="ON: show only executable picks. OFF: show discovery view with pre-gate and blocked candidates.",
+    )
+    if execution_mode:
+        st.caption("Mode: Execution-first. Primary view shows only Tradable Now setups.")
+    else:
+        st.caption("Mode: Discovery-first. Includes pre-gate and blocked/watch candidates.")
+
+    hard_pass_total = combined[combined["Hard Gate"]].drop_duplicates(subset=["Symbol"]).shape[0]
+    hard_pass_a_total = combined[
+        combined["Hard Gate"] & combined["Tier"].isin(["A+", "A"])
+    ].drop_duplicates(subset=["Symbol"]).shape[0]
+    st.caption(
+        f"Tradable-check pass: {hard_pass_total} symbols | "
+        f"A+/A among tradable-check pass: {hard_pass_a_total}"
+    )
+
+    if not execution_mode:
+        st.markdown(f"### ⭐ Top Ranked (Pre-Gate) - Best {cfg['top_n']}")
+        top_ranked = tier_best.head(cfg["top_n"]).copy()
+        if not top_ranked.empty:
+            top_rank_cols = st.columns(len(top_ranked))
+            for i, (_, row) in enumerate(top_ranked.iterrows()):
+                with top_rank_cols[i]:
+                    with st.container(border=True):
+                        st.markdown(f"#### {i+1}. {row['Symbol']}")
+                        st.caption(f"{row['Setup Type']} • Tier {row['Tier']}")
+                        st.metric("Score", f"{row['Score']:.2f}/10")
+                        st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
+                        st.caption(f"Entry Gate: {row['Gate Status']} ({row['Gate Reason']})")
+                        st.caption(f"Invalidation: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% risk)")
+                        sym = row['Symbol']
+                        prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
+                        if st.button("Log Setup", key=f"log_setup_toprank_{i}_{sym}", width='stretch'):
+                            st.session_state["journal_prefill"] = {
+                                "symbol": prefill_symbol,
+                                "strategy": "Top Ranked Pick",
+                                "side": "LONG",
+                            }
+                            st.switch_page("pages/5_Trading_Journal.py")
 
     actionable = combined[
         (combined["Tier"].isin(["A+", "A"])) &
@@ -1176,7 +1260,7 @@ elif mode == "Swing Rankings":
     ).head(cfg["watchlist_n"])
 
     if not actionable.empty:
-        st.markdown("### 🏆 Actionable List (Hard-Gate Pass)")
+        st.markdown("### 🏆 Tradable Now (A+/A + Entry Gate Pass)")
         top_cols = st.columns(len(actionable))
         for i, (_, row) in enumerate(actionable.iterrows()):
             with top_cols[i]:
@@ -1198,14 +1282,20 @@ elif mode == "Swing Rankings":
                         }
                         st.switch_page("pages/5_Trading_Journal.py")
     else:
-        st.info("No hard-gate pass actionable setups today.")
+        if hard_pass_total == 0:
+            st.info("No stock passed Entry Gate today (Regime + Liquidity + Quality).")
+        elif hard_pass_a_total == 0:
+            st.info(f"{hard_pass_total} stocks passed Entry Gate, but all are B/C tier (no A+/A tradable picks).")
+        else:
+            st.info("No A+/A tradable setups passed Entry Gate today.")
 
-    if not monitor.empty:
-        st.markdown("### 👀 Monitor List (A+/A Gate-Blocked + B Tier)")
+    if (not execution_mode) and (not monitor.empty):
+        st.markdown("### 👀 Watch / Improve (A+/A Blocked + B Tier)")
         mon = monitor[[
             "Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Price", "Change %",
             "Invalidation", "Invalidation %", "RS", "Vol Ratio", "RSI", "Quality Score", "Gate Reason"
         ]].copy()
+        mon = mon.rename(columns={"Gate Status": "Entry Gate", "Gate Reason": "Block Reason"})
         mon["Price"] = mon["Price"].apply(format_price)
         mon["Change %"] = mon["Change %"].apply(format_change)
         mon["Invalidation"] = mon["Invalidation"].apply(format_price)
@@ -1217,72 +1307,95 @@ elif mode == "Swing Rankings":
 
         blocked_a = monitor[(monitor["Tier"].isin(["A+", "A"])) & (~monitor["Hard Gate"])].shape[0]
         b_count = monitor[monitor["Tier"] == "B"].shape[0]
-        st.caption(f"Breakdown: {blocked_a} A+/A blocked by gates, {b_count} B-tier monitor candidates.")
+        st.caption(f"Breakdown: {blocked_a} A+/A blocked, {b_count} B-tier watch candidates.")
 
-    with st.expander("🏷️ Tier Buckets (A+ / A / B / C)", expanded=False):
-        tier_cols = ["Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Gate Reason", "Price", "Change %", "Invalidation %"]
-        for tier_label in ["A+", "A", "B", "C"]:
-            st.markdown(f"### {tier_label} Tier")
-            tdf = tier_best[tier_best["Tier"] == tier_label][tier_cols].head(15).copy()
-            if tdf.empty:
-                st.info(f"No {tier_label} tier picks.")
-                continue
-            tdf["Price"] = tdf["Price"].apply(format_price)
-            tdf["Change %"] = tdf["Change %"].apply(format_change)
-            tdf["Invalidation %"] = tdf["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(tdf, width='stretch', hide_index=True)
+        blocked_diag = monitor[(monitor["Tier"].isin(["A+", "A"])) & (~monitor["Hard Gate"])].copy()
+        if not blocked_diag.empty:
+            st.markdown("#### Why A+/A Were Blocked")
+            diag_rows = []
+            for _, row in blocked_diag.head(20).iterrows():
+                reasons = str(row.get("Gate Reason", "Unknown"))
+                diag_rows.append(
+                    {
+                        "Symbol": row["Symbol"],
+                        "Setup": row["Setup Type"],
+                        "Tier": row["Tier"],
+                        "Score": f"{row['Score']:.2f}",
+                        "Regime Check": "Pass" if bool(row.get("Regime Gate")) else "Blocked",
+                        "Liquidity Check": "Pass" if bool(row.get("Liquidity Gate")) else "Blocked",
+                        "Quality Check": "Pass" if bool(row.get("Quality Gate")) else "Blocked",
+                        "Block Reason": reasons,
+                    }
+                )
+            st.dataframe(pd.DataFrame(diag_rows), width="stretch", hide_index=True)
 
-    with st.expander("📊 Setup Family Boards", expanded=False):
-        st.markdown("### 🚀 Momentum")
-        mview_cols = ["Symbol", "Tier", "Score", "Price", "Change %", "RS", "Vol Ratio", "RSI", "Trend", "Gate Status", "Invalidation %"]
-        if not momentum_df.empty:
-            mview = momentum_df[mview_cols].head(12).copy()
-            mview["Price"] = mview["Price"].apply(format_price)
-            mview["Change %"] = mview["Change %"].apply(format_change)
-            mview["Vol Ratio"] = mview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
-            mview["RSI"] = mview["RSI"].apply(lambda x: f"{x:.1f}")
-            mview["Invalidation %"] = mview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(mview, width='stretch', hide_index=True)
-        else:
-            st.info("No momentum setups today.")
+    if (not execution_mode) and (view_mode == "Detail"):
+        with st.expander("🏷️ Tier Buckets (A+ / A / B / C)", expanded=False):
+            tier_cols = ["Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Gate Reason", "Price", "Change %", "Invalidation %"]
+            for tier_label in ["A+", "A", "B", "C"]:
+                st.markdown(f"### {tier_label} Tier")
+                tdf = tier_best[tier_best["Tier"] == tier_label][tier_cols].head(15).copy()
+                if tdf.empty:
+                    st.info(f"No {tier_label} tier picks.")
+                    continue
+                tdf = tdf.rename(columns={"Gate Status": "Entry Gate", "Gate Reason": "Block Reason"})
+                tdf["Price"] = tdf["Price"].apply(format_price)
+                tdf["Change %"] = tdf["Change %"].apply(format_change)
+                tdf["Invalidation %"] = tdf["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+                st.dataframe(tdf, width='stretch', hide_index=True)
 
-        st.markdown("### 🛒 Pullback")
-        if not pullback_df.empty:
-            pview = pullback_df[["Symbol", "Tier", "Score", "Price", "RSI", "dist_ema20", "Trend", "Gate Status", "Invalidation %"]].head(12).copy()
-            pview["Price"] = pview["Price"].apply(format_price)
-            pview["RSI"] = pview["RSI"].apply(lambda x: f"{x:.1f}")
-            pview["dist_ema20"] = pview["dist_ema20"].apply(lambda x: f"{x:.1f}%")
-            pview["Invalidation %"] = pview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(pview, width='stretch', hide_index=True)
-        else:
-            st.info("No pullback setups today.")
+    if (not execution_mode) and (view_mode == "Detail"):
+        with st.expander("📊 Setup Family Boards", expanded=False):
+            st.markdown("### 🚀 Momentum")
+            mview_cols = ["Symbol", "Tier", "Score", "Price", "Change %", "RS", "Vol Ratio", "RSI", "Trend", "Gate Status", "Invalidation %"]
+            if not momentum_df.empty:
+                mview = momentum_df[mview_cols].head(12).copy()
+                mview["Price"] = mview["Price"].apply(format_price)
+                mview["Change %"] = mview["Change %"].apply(format_change)
+                mview["Vol Ratio"] = mview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+                mview["RSI"] = mview["RSI"].apply(lambda x: f"{x:.1f}")
+                mview["Invalidation %"] = mview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+                st.dataframe(mview, width='stretch', hide_index=True)
+            else:
+                st.info("No momentum setups today.")
 
-        st.markdown("### 🌀 Volatility Contraction")
-        if not volatility_df.empty:
-            vview = volatility_df[["Symbol", "Tier", "Score", "Price", "Vol Ratio", "NR7", "Inside Day", "Gate Status", "Invalidation %"]].head(12).copy()
-            vview["Price"] = vview["Price"].apply(format_price)
-            vview["Vol Ratio"] = vview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
-            vview["NR7"] = vview["NR7"].apply(lambda x: "Yes" if x else "-")
-            vview["Inside Day"] = vview["Inside Day"].apply(lambda x: "Yes" if x else "-")
-            vview["Invalidation %"] = vview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(vview, width='stretch', hide_index=True)
-        else:
-            st.info("No volatility contraction setups today.")
+            st.markdown("### 🛒 Pullback")
+            if not pullback_df.empty:
+                pview = pullback_df[["Symbol", "Tier", "Score", "Price", "RSI", "dist_ema20", "Trend", "Gate Status", "Invalidation %"]].head(12).copy()
+                pview["Price"] = pview["Price"].apply(format_price)
+                pview["RSI"] = pview["RSI"].apply(lambda x: f"{x:.1f}")
+                pview["dist_ema20"] = pview["dist_ema20"].apply(lambda x: f"{x:.1f}%")
+                pview["Invalidation %"] = pview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+                st.dataframe(pview, width='stretch', hide_index=True)
+            else:
+                st.info("No pullback setups today.")
 
-        st.markdown("### 🧮 Score Decomposition (Top Combined)")
-        dcols = [
-            "Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Quality Score",
-            "Trend Align", "Vol Quality", "RS Stability", "RS Pct", "Vol Pct"
-        ]
-        if not combined.empty:
-            dview = combined[dcols].sort_values("Score", ascending=False).head(20).copy()
-            dview["Quality Score"] = dview["Quality Score"].apply(lambda x: f"{x:.2f}")
-            dview["Trend Align"] = dview["Trend Align"].apply(lambda x: f"{x:.2f}")
-            dview["Vol Quality"] = dview["Vol Quality"].apply(lambda x: f"{x:.2f}")
-            dview["RS Stability"] = dview["RS Stability"].apply(lambda x: f"{x:.2f}")
-            dview["RS Pct"] = dview["RS Pct"].apply(lambda x: f"{x:.2f}")
-            dview["Vol Pct"] = dview["Vol Pct"].apply(lambda x: f"{x:.2f}")
-            st.dataframe(dview, width='stretch', hide_index=True)
+            st.markdown("### 🌀 Volatility Contraction")
+            if not volatility_df.empty:
+                vview = volatility_df[["Symbol", "Tier", "Score", "Price", "Vol Ratio", "NR7", "Inside Day", "Gate Status", "Invalidation %"]].head(12).copy()
+                vview["Price"] = vview["Price"].apply(format_price)
+                vview["Vol Ratio"] = vview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+                vview["NR7"] = vview["NR7"].apply(lambda x: "Yes" if x else "-")
+                vview["Inside Day"] = vview["Inside Day"].apply(lambda x: "Yes" if x else "-")
+                vview["Invalidation %"] = vview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+                st.dataframe(vview, width='stretch', hide_index=True)
+            else:
+                st.info("No volatility contraction setups today.")
+
+            st.markdown("### 🧮 Score Decomposition (Top Combined)")
+            dcols = [
+                "Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Quality Score",
+                "Trend Align", "Vol Quality", "RS Stability", "RS Pct", "Vol Pct"
+            ]
+            if not combined.empty:
+                dview = combined[dcols].sort_values("Score", ascending=False).head(20).copy()
+                dview["Quality Score"] = dview["Quality Score"].apply(lambda x: f"{x:.2f}")
+                dview["Trend Align"] = dview["Trend Align"].apply(lambda x: f"{x:.2f}")
+                dview["Vol Quality"] = dview["Vol Quality"].apply(lambda x: f"{x:.2f}")
+                dview["RS Stability"] = dview["RS Stability"].apply(lambda x: f"{x:.2f}")
+                dview["RS Pct"] = dview["RS Pct"].apply(lambda x: f"{x:.2f}")
+                dview["Vol Pct"] = dview["Vol Pct"].apply(lambda x: f"{x:.2f}")
+                st.dataframe(dview, width='stretch', hide_index=True)
 
 # ==================== FOOTER ====================
 st.markdown("---")

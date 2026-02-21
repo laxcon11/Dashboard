@@ -2,13 +2,15 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
+import json
 from NSE_Config import NIFTY_200
 from data_fetch import batch_download, extract_price_data
-from utils import setup_page
+from utils import setup_page, get_ui_detail_mode
 import analytics
 
 
-setup_page("Dashboard Launcher")
+setup_page("Trading Journal")
+view_mode = get_ui_detail_mode("Summary")
 
 st.title("🚀 Trading Journal")
 st.caption("Track your trades, analyze your performance, and refine your strategy.")
@@ -17,35 +19,63 @@ st.caption("Track your trades, analyze your performance, and refine your strateg
 journal_prefill = st.session_state.pop("journal_prefill", None)
 query_params = st.query_params
 
+def _qp_scalar(value, default: str = "") -> str:
+    if isinstance(value, (list, tuple)):
+        return str(value[0]) if value else default
+    if value is None:
+        return default
+    return str(value)
+
 if isinstance(journal_prefill, dict):
     pre_symbol = str(journal_prefill.get("symbol", ""))
     pre_strategy = str(journal_prefill.get("strategy", "Swing Ranking"))
     pre_side = str(journal_prefill.get("side", "LONG"))
 else:
-    pre_symbol = query_params.get("symbol", "")
-    pre_strategy = query_params.get("strategy", "Swing Rank")
-    pre_side = query_params.get("side", "LONG")
+    pre_symbol = _qp_scalar(query_params.get("symbol", ""), "")
+    pre_strategy = _qp_scalar(query_params.get("strategy", "Swing Rank"), "Swing Rank")
+    pre_side = _qp_scalar(query_params.get("side", "LONG"), "LONG")
 
 
 # ==================== FILE HANDLING ====================
 NOTES_DIR = Path("notes")
 NOTES_DIR.mkdir(exist_ok=True)
 JOURNAL_FILE = NOTES_DIR / "trading_journal.csv"
+JOURNAL_META_FILE = NOTES_DIR / "trading_journal.meta.json"
+JOURNAL_SCHEMA_VERSION = 2
+JOURNAL_COLUMNS = [
+    "Date", "Symbol", "Side", "Entry Price", "Exit Price", "Quantity", "Strategy", "Setup Family",
+    "Status", "Notes", "Regime", "Liquidity", "Stance", "Trade Intent", "Factor Context",
+    "Invalidation", "Invalidation %", "Mistake Tags", "Chart Link", "Exit Reason", "Exit Date",
+    "Holding Days", "Outcome R", "Outcome Bucket"
+]
 
 def load_journal():
-    if JOURNAL_FILE.exists():
+    if not JOURNAL_FILE.exists():
+        return pd.DataFrame(columns=JOURNAL_COLUMNS)
+    try:
+        df = pd.read_csv(JOURNAL_FILE)
+        for c in JOURNAL_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        # Ensure numeric fields remain numeric-friendly
+        for nc in ["Entry Price", "Exit Price", "Quantity", "Invalidation", "Invalidation %", "Holding Days", "Outcome R"]:
+            df[nc] = pd.to_numeric(df[nc], errors="coerce").fillna(0.0)
+        # Auto-migration marker
+        meta = {"schema_version": JOURNAL_SCHEMA_VERSION, "updated_at": datetime.now().isoformat()}
         try:
-            return pd.read_csv(JOURNAL_FILE)
-        except Exception as e:
-            st.error(f"Error loading journal: {e}")
-            return pd.DataFrame()
-    else:
-        # Create empty dataframe with columns
-        return pd.DataFrame(columns=[
-            "Date", "Symbol", "Side", "Entry Price", "Exit Price", 
-            "Quantity", "Strategy", "Status", "Notes",
-            "Regime", "Liquidity", "Stance", "Trade Intent", "Mistake Tags", "Chart Link", "Exit Reason"
-        ])
+            if JOURNAL_META_FILE.exists():
+                old = json.loads(JOURNAL_META_FILE.read_text())
+                if int(old.get("schema_version", 0)) < JOURNAL_SCHEMA_VERSION:
+                    df.to_csv(JOURNAL_FILE, index=False)
+            else:
+                df.to_csv(JOURNAL_FILE, index=False)
+            JOURNAL_META_FILE.write_text(json.dumps(meta, indent=2))
+        except Exception:
+            pass
+        return df[JOURNAL_COLUMNS]
+    except Exception as e:
+        st.error(f"Error loading journal: {e}")
+        return pd.DataFrame()
 
 def save_entry(entry):
     df = load_journal()
@@ -98,6 +128,7 @@ if page_mode == "Log New Trade":
                 strategy_options,
                 index=strategy_options.index(pre_strategy) if pre_strategy in strategy_options else 0
             )
+            setup_family = st.selectbox("Setup Family", ["Momentum", "Pullback", "Volatility Contraction", "Breakout", "Mean Reversion", "Other"])
         
         with col2:
             entry_price = st.number_input("Entry Price", min_value=0.0, format="%.2f")
@@ -106,7 +137,8 @@ if page_mode == "Log New Trade":
             target = st.number_input("Target (Optional)", min_value=0.0, format="%.2f")
             # Auto-Capture Market Context
             context = analytics.get_current_context() # Future: pass actual data if available
-            
+            invalidation = st.number_input("Invalidation Price (Optional)", min_value=0.0, format="%.2f", help="Price level where trade thesis is invalid.")
+
             # --- NEW FIELDS ---
             col1, col2 = st.columns(2)
             with col1:
@@ -114,6 +146,11 @@ if page_mode == "Log New Trade":
                     ["Swing Breakout", "Pullback", "Mean Reversion", "Position", "Experimental", "Intraday"])
             with col2:
                 chart_link = st.text_input("Chart / Screenshot Link", placeholder="TradingView or Imgur link")
+            factor_context = st.multiselect(
+                "Factor Context",
+                ["Regime Risk On", "Regime Neutral", "Regime Risk Off", "Liquidity Improving", "Liquidity Tightening",
+                 "Sector Strength", "Market Breadth Positive", "Market Breadth Weak", "High Volatility", "Event Risk"]
+            )
             
             mistakes = st.multiselect("Mistake Tags (Leave empty if none)", 
                 ["Early Entry", "Ignored Regime", "Oversized Position", "Chased Price", "No Stop Loss", "Emotional Entry"])
@@ -135,15 +172,23 @@ if page_mode == "Log New Trade":
                     "Exit Price": 0.0,
                     "Quantity": quantity,
                     "Strategy": strategy,
+                    "Setup Family": setup_family,
                     "Status": "OPEN",
                     "Notes": notes,
                     "Regime": context.get("regime", "Unknown"),
                     "Liquidity": context.get("liquidity", "Unknown"),
                     "Stance": context.get("stance", "Neutral"),
                     "Trade Intent": intent,
+                    "Factor Context": ", ".join(factor_context) if factor_context else "",
+                    "Invalidation": invalidation if invalidation > 0 else 0.0,
+                    "Invalidation %": (((entry_price - invalidation) / entry_price) * 100 if invalidation > 0 and entry_price > 0 else 0.0),
                     "Mistake Tags": ", ".join(mistakes) if mistakes else "",
                     "Chart Link": chart_link,
-                    "Exit Reason": ""
+                    "Exit Reason": "",
+                    "Exit Date": "",
+                    "Holding Days": 0,
+                    "Outcome R": 0.0,
+                    "Outcome Bucket": "",
                 }
                 save_entry(entry)
                 st.success(f"✅ Trade logged for {final_symbol}")
@@ -209,14 +254,17 @@ elif page_mode == "View History":
                     cols.insert(entry_idx + 1, col)
                     entry_idx += 1
         
-        st.dataframe(
-            display_df[cols].style.applymap(
-                lambda x: 'color: #00FF00' if isinstance(x, (int, float)) and x > 0 else ('color: #FF0000' if isinstance(x, (int, float)) and x < 0 else ''),
-                subset=["Unrealized P&L"] if "Unrealized P&L" in display_df.columns else []
-            ),
-            width='stretch', 
-            hide_index=True
-        )
+        if view_mode == "Summary":
+            display_df = display_df.sort_values("Date", ascending=False).head(200)
+
+        if "Unrealized P&L" in display_df.columns:
+            styled = display_df[cols].style.map(
+                lambda x: "color: #00AA00" if isinstance(x, (int, float)) and x > 0 else ("color: #CC0000" if isinstance(x, (int, float)) and x < 0 else ""),
+                subset=["Unrealized P&L"]
+            )
+            st.dataframe(styled, width="stretch", hide_index=True)
+        else:
+            st.dataframe(display_df[cols], width="stretch", hide_index=True)
         
         # Close Trade UI
         st.markdown("### 🔒 Close a Trade")
@@ -237,6 +285,42 @@ elif page_mode == "View History":
                         df.at[idx, 'Exit Price'] = exit_price
                         df.at[idx, 'Status'] = 'CLOSED'
                         df.at[idx, 'Exit Reason'] = exit_reason
+                        df.at[idx, 'Exit Date'] = datetime.now().strftime("%Y-%m-%d")
+
+                        # Holding period + R multiple outcome
+                        try:
+                            entry_dt = pd.to_datetime(df.at[idx, 'Date'])
+                            exit_dt = pd.to_datetime(df.at[idx, 'Exit Date'])
+                            holding_days = max(int((exit_dt - entry_dt).days), 0)
+                        except Exception:
+                            holding_days = 0
+                        df.at[idx, 'Holding Days'] = holding_days
+
+                        entry_px = float(df.at[idx, 'Entry Price']) if pd.notna(df.at[idx, 'Entry Price']) else 0.0
+                        qty = float(df.at[idx, 'Quantity']) if pd.notna(df.at[idx, 'Quantity']) else 0.0
+                        side_txt = str(df.at[idx, 'Side']).upper()
+                        pnl = ((exit_price - entry_px) * qty) if side_txt == "LONG" else ((entry_px - exit_price) * qty)
+
+                        invalidation = float(df.at[idx, 'Invalidation']) if pd.notna(df.at[idx, 'Invalidation']) else 0.0
+                        if invalidation > 0 and entry_px > 0 and qty > 0:
+                            risk_per_share = (entry_px - invalidation) if side_txt == "LONG" else (invalidation - entry_px)
+                            risk_amt = max(risk_per_share * qty, 0.0)
+                            outcome_r = (pnl / risk_amt) if risk_amt > 0 else 0.0
+                        else:
+                            outcome_r = 0.0
+                        df.at[idx, 'Outcome R'] = outcome_r
+                        if outcome_r >= 2:
+                            bucket = "Strong Win"
+                        elif outcome_r > 0:
+                            bucket = "Win"
+                        elif outcome_r <= -1:
+                            bucket = "Full Loss"
+                        elif outcome_r < 0:
+                            bucket = "Loss"
+                        else:
+                            bucket = "Flat"
+                        df.at[idx, 'Outcome Bucket'] = bucket
+
                         if close_notes:
                             existing_notes = df.at[idx, 'Notes']
                             existing_notes = "" if pd.isna(existing_notes) else str(existing_notes)
@@ -256,7 +340,7 @@ elif page_mode == "Performance Stats":
     st.subheader("📊 Performance Statistics")
     
     df = load_journal()
-    closed_trades = df[df["Status"] == "CLOSED"]
+    closed_trades = df[df["Status"] == "CLOSED"].copy()
     
     if not closed_trades.empty:
         # Calculate P&L
@@ -306,6 +390,103 @@ elif page_mode == "Performance Stats":
             
         st.markdown("### 📈 Recent Performance")
         st.bar_chart(closed_trades["PnL"])
+
+        # Expectancy slicing
+        closed_trades["Holding Days"] = pd.to_numeric(closed_trades["Holding Days"], errors="coerce").fillna(0).astype(int)
+        closed_trades["Outcome R"] = pd.to_numeric(closed_trades["Outcome R"], errors="coerce").fillna(0.0)
+        closed_trades["Holding Bucket"] = pd.cut(
+            closed_trades["Holding Days"],
+            bins=[-1, 2, 7, 21, 10000],
+            labels=["0-2D", "3-7D", "8-21D", "22D+"]
+        )
+
+        def summarize_expectancy(df_in: pd.DataFrame, group_col: str) -> pd.DataFrame:
+            if df_in.empty or group_col not in df_in.columns:
+                return pd.DataFrame()
+            out = (
+                df_in.groupby(group_col, dropna=False)
+                .agg(
+                    Trades=("PnL", "count"),
+                    WinRate=("PnL", lambda s: (s > 0).mean() * 100),
+                    AvgPnL=("PnL", "mean"),
+                    ExpectancyR=("Outcome R", "mean"),
+                )
+                .reset_index()
+            )
+            return out.sort_values("ExpectancyR", ascending=False)
+
+        by_setup = summarize_expectancy(closed_trades, "Setup Family")
+        by_regime = summarize_expectancy(closed_trades, "Regime")
+        by_holding = summarize_expectancy(closed_trades, "Holding Bucket")
+        if view_mode == "Detail":
+            st.markdown("### 🧩 Performance Slicing")
+            s1, s2, s3 = st.columns(3)
+            with s1:
+                st.write("**By Setup Family**")
+                if not by_setup.empty:
+                    st.dataframe(
+                        by_setup.assign(
+                            WinRate=by_setup["WinRate"].map(lambda x: f"{x:.1f}%"),
+                            AvgPnL=by_setup["AvgPnL"].map(lambda x: f"₹{x:,.0f}"),
+                            ExpectancyR=by_setup["ExpectancyR"].map(lambda x: f"{x:.2f}")
+                        ),
+                        width="stretch",
+                        hide_index=True
+                    )
+            with s2:
+                st.write("**By Regime at Entry**")
+                if not by_regime.empty:
+                    st.dataframe(
+                        by_regime.assign(
+                            WinRate=by_regime["WinRate"].map(lambda x: f"{x:.1f}%"),
+                            AvgPnL=by_regime["AvgPnL"].map(lambda x: f"₹{x:,.0f}"),
+                            ExpectancyR=by_regime["ExpectancyR"].map(lambda x: f"{x:.2f}")
+                        ),
+                        width="stretch",
+                        hide_index=True
+                    )
+            with s3:
+                st.write("**By Holding Period**")
+                if not by_holding.empty:
+                    st.dataframe(
+                        by_holding.assign(
+                            WinRate=by_holding["WinRate"].map(lambda x: f"{x:.1f}%"),
+                            AvgPnL=by_holding["AvgPnL"].map(lambda x: f"₹{x:,.0f}"),
+                            ExpectancyR=by_holding["ExpectancyR"].map(lambda x: f"{x:.2f}")
+                        ),
+                        width="stretch",
+                        hide_index=True
+                    )
+
+        # Feedback loop suggestions
+        st.markdown("### 🔁 Feedback Loop Suggestions")
+        suggestions = []
+        if not by_setup.empty:
+            weak_setup = by_setup[by_setup["Trades"] >= 3].sort_values("ExpectancyR").head(1)
+            if not weak_setup.empty and weak_setup["ExpectancyR"].iloc[0] < 0:
+                suggestions.append(
+                    f"Reduce weight on setup `{weak_setup['Setup Family'].iloc[0]}` (ExpectancyR {weak_setup['ExpectancyR'].iloc[0]:.2f})."
+                )
+        if not by_regime.empty:
+            riskoff = by_regime[by_regime["Regime"].astype(str).str.contains("Risk Off", case=False, na=False)]
+            if not riskoff.empty and riskoff["ExpectancyR"].iloc[0] < 0:
+                suggestions.append("Avoid new discretionary longs in Risk Off regime; tighten checklist.")
+        tag_counts = (
+            closed_trades["Mistake Tags"]
+            .fillna("")
+            .str.split(",")
+            .explode()
+            .str.strip()
+        )
+        tag_counts = tag_counts[tag_counts != ""].value_counts()
+        if not tag_counts.empty:
+            suggestions.append(f"Most frequent mistake tag: `{tag_counts.index[0]}` ({int(tag_counts.iloc[0])} times).")
+
+        if suggestions:
+            for s in suggestions[:5]:
+                st.write(f"- {s}")
+        else:
+            st.write("- Not enough evidence yet for robust suggestions.")
         
     else:
         st.info("No closed trades to analyze yet.")

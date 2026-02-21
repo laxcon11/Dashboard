@@ -11,9 +11,14 @@ Checks:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from NSE_Config import NIFTY_200, STOCK_CATEGORIES
 from config import LOCAL_NSE_HISTORY_PATH, DATA_STALENESS_WARN_DAYS, DATA_STALENESS_ERROR_DAYS

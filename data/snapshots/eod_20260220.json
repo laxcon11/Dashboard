@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-02-20T22:20:38.973629",
+  "regime": "\ud83d\udfe1 Neutral",
+  "regime_score": 0,
+  "breadth": {
+    "advances": 59,
+    "declines": 31,
+    "ratio": 1.903225806451613
+  },
+  "top_movers": [
+    {
+      "symbol": "HYUNDAI.NS",
+      "change_pct": 5.1535947888010085
+    },
+    {
+      "symbol": "ABB.NS",
+      "change_pct": 4.676982253693505
+    },
+    {
+      "symbol": "POWERINDIA.NS",
+      "change_pct": 4.463699619272679
+    },
+    {
+      "symbol": "KEI.NS",
+      "change_pct": 4.1019108334714725
+    },
+    {
+      "symbol": "PERSISTENT.NS",
+      "change_pct": -3.304215723509305
+    },
+    {
+      "symbol": "POLICYBZR.NS",
+      "change_pct": 3.2892009259483714
+    },
+    {
+      "symbol": "SIEMENS.NS",
+      "change_pct": 3.1894644652863957
+    },
+    {
+      "symbol": "CANBK.NS",
+      "change_pct": 3.1655707304928344
+    },
+    {
+      "symbol": "IRCTC.NS",
+      "change_pct": 3.1489790562380056
+    },
+    {
+      "symbol": "JSWENERGY.NS",
+      "change_pct": 2.8848168980296554
+    },
+    {
+      "symbol": "BDL.NS",
+      "change_pct": 2.808728190322427
+    },
+    {
+      "symbol": "ASHOKLEY.NS",
+      "change_pct": 2.634036299405193
+    },
+    {
+      "symbol": "BANDHANBNK.NS",
+      "change_pct": 2.454713891629554
+    },
+    {
+      "symbol": "CGPOWER.NS",
+      "change_pct": 2.2396148007299157
+    },
+    {
+      "symbol": "PREMIERENE.NS",
+      "change_pct": 2.1187582977774624
+    }
+  ],
+  "watchlists_scanned": 10,
+  "symbols_scanned": 229
+}
