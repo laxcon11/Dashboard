@@ -36,6 +36,7 @@ from config import (
     BHAVCOPY_EOD_RECONCILE_ENABLED,
     BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR,
 )
+from trading_calendar import latest_nse_business_day, nse_business_day_age
 
 # ==================== LOGGING SETUP ====================
 
@@ -474,10 +475,7 @@ def _period_to_days(period: str) -> int:
 
 
 def _latest_business_day() -> pd.Timestamp:
-    today = pd.Timestamp.today().normalize()
-    if today.weekday() < 5:
-        return today
-    return today - pd.offsets.BDay(1)
+    return latest_nse_business_day()
 
 
 def _is_after_bhav_eod_cutoff_ist() -> bool:
@@ -507,14 +505,7 @@ def _is_nse_market_hours_ist() -> bool:
 
 def _business_day_age(last_date: Optional[pd.Timestamp], ref_date: Optional[pd.Timestamp] = None) -> Optional[int]:
     """Business-day gap between last_date and ref_date."""
-    if last_date is None or pd.isna(last_date):
-        return None
-    if ref_date is None:
-        ref_date = _latest_business_day()
-    if last_date > ref_date:
-        return 0
-    bdays = pd.bdate_range(last_date.normalize(), ref_date.normalize())
-    return max(0, len(bdays) - 1)
+    return nse_business_day_age(last_date, ref_date or _latest_business_day())
 
 
 def get_last_batch_telemetry() -> pd.DataFrame:
@@ -579,11 +570,9 @@ def quick_data_health_summary() -> Dict[str, object]:
         summary["missing_symbols"] = len(missing)
         summary["duplicates"] = int(work.duplicated(subset=["symbol", "date"]).sum())
 
-        latest_bd = pd.Timestamp.today().normalize()
-        if latest_bd.weekday() >= 5:
-            latest_bd = latest_bd - pd.offsets.BDay(1)
+        latest_bd = latest_nse_business_day()
         ages = work.groupby("symbol")["date"].max().apply(
-            lambda d: max(0, len(pd.bdate_range(pd.Timestamp(d).normalize(), latest_bd)) - 1)
+            lambda d: (nse_business_day_age(pd.Timestamp(d), latest_bd) or 0)
         )
         summary["stale_warn"] = int((ages >= DATA_STALENESS_WARN_DAYS).sum())
         summary["stale_error"] = int((ages >= DATA_STALENESS_ERROR_DAYS).sum())
