@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
 
 from config import PRICE_FETCH_MODE
+from regime_state import load_regime_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,14 @@ def _render_grouped_sidebar_nav() -> None:
             ("Global Markets", "pages/1_Global_Markets.py"),
             ("Liquidity & Money Supply", "pages/2_Money_Supply.py"),
             ("Leading Indicators", "pages/4_Leading_Indicators.py"),
+            ("India Macro Context", "pages/13_India_Macro_Context.py"),
+            ("News Feed", "pages/14_News_Feed.py"),
         ],
         "Journal": [
             ("Trading Journal", "pages/5_Trading_Journal.py"),
             ("Portfolio Risk", "pages/7_Portfolio_Risk.py"),
             ("Prediction Integrity", "pages/9_Prediction_Integrity.py"),
+            ("Stock EOD Profile", "pages/15_Stock_Fundamentals.py"),
         ],
         "Admin / Ops": [
             ("Regime Settings", "pages/6_Regime_Settings.py"),
@@ -145,6 +149,49 @@ def render_key_observations(observations: list[str], title: str = "🔎 Key Obse
     st.markdown(f"### {title}")
     for item in clean[:max_items]:
         st.markdown(f"- {item}")
+
+
+def render_decision_header(
+    regime_label: Optional[str] = None,
+    final_score: Optional[float] = None,
+    confidence: Optional[float] = None,
+    bias: Optional[str] = None,
+    source: Optional[str] = None,
+) -> None:
+    """
+    Compact command-strip style decision header.
+    Falls back to SSOT snapshot when values are omitted.
+    """
+    snap = load_regime_snapshot()
+    regime = regime_label if regime_label is not None else str(snap.get("regime_label", "Unknown"))
+    score = final_score if final_score is not None else snap.get("final_score")
+    conf = confidence if confidence is not None else snap.get("confidence")
+    decision_bias = bias if bias is not None else snap.get("bias")
+    src = source if source is not None else snap.get("source")
+
+    def _fmt_score(v):
+        try:
+            return f"{float(v):+.2f}"
+        except Exception:
+            return "N/A"
+
+    def _fmt_conf(v):
+        try:
+            return f"{float(v):.0%}"
+        except Exception:
+            return "N/A"
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Regime", str(regime))
+    with c2:
+        st.metric("Score", _fmt_score(score))
+    with c3:
+        st.metric("Confidence", _fmt_conf(conf))
+    with c4:
+        st.metric("Bias", str(decision_bias or "N/A"))
+    if src:
+        st.caption(f"SSOT source: {src}")
 
 
 # ==================== PRICE FORMATTING ====================
@@ -502,6 +549,12 @@ def render_regime_timeline_strip(timeline: list[Dict[str, Any]], key: str = "reg
         <div class="rt-title">REGIME TIMELINE (90D)</div>
         <div class="rt-sub">Pulse Tape</div>
       </div>
+      <div class="rt-legend">
+        <div class="rt-leg-item"><span class="rt-leg-dot" style="background:#10b981"></span><span><b>Risk On</b>: broad risk appetite</span></div>
+        <div class="rt-leg-item"><span class="rt-leg-dot" style="background:#0ea5e9"></span><span><b>Selective</b>: mixed, stock/sector selective</span></div>
+        <div class="rt-leg-item"><span class="rt-leg-dot" style="background:#f59e0b"></span><span><b>Defensive</b>: cautious, lower beta preference</span></div>
+        <div class="rt-leg-item"><span class="rt-leg-dot" style="background:#ef4444"></span><span><b>Crisis</b>: risk-off stress regime</span></div>
+      </div>
       <div class="rt-scroll">
         <div class="rt-track"></div>
       </div>
@@ -521,6 +574,18 @@ def render_regime_timeline_strip(timeline: list[Dict[str, Any]], key: str = "reg
       }}
       .rt-sub {{
         font-size: 10px; color: #7f93a7;
+      }}
+      .rt-legend {{
+        display: flex; flex-wrap: wrap; gap: 10px 14px;
+        margin-bottom: 8px; font-size: 11px; color: #b9c7d4;
+      }}
+      .rt-leg-item {{
+        display: inline-flex; align-items: center; gap: 6px;
+      }}
+      .rt-leg-dot {{
+        width: 10px; height: 10px; border-radius: 50%;
+        border: 1px solid rgba(255,255,255,.2);
+        box-shadow: 0 0 0 1px rgba(0,0,0,.35) inset;
       }}
       .rt-scroll {{
         overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth;

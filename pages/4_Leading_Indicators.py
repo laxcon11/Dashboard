@@ -14,7 +14,14 @@ from data_fetch import (
     fetch_fred_series,
     prepare_timeseries_for_chart
 )
-from utils import setup_page, get_live_price_safe, render_key_observations, get_ui_detail_mode, render_source_freshness
+from utils import (
+    setup_page,
+    get_live_price_safe,
+    render_key_observations,
+    get_ui_detail_mode,
+    render_source_freshness,
+    render_decision_header,
+)
 import analytics
 from config import FRED_API_KEY, MARKET_SYMBOLS as CONFIG_MARKET_SYMBOLS, LEADING_SYMBOLS as CONFIG_LEADING_SYMBOLS
 
@@ -87,6 +94,7 @@ st.markdown("""
 # ==================== TITLE ====================
 st.markdown('<h1 class="main-title">📊 Leading Indicators Dashboard</h1>', unsafe_allow_html=True)
 st.markdown("**Early signals of market direction** • Liquidity • Yields • Currency • Risk Assets")
+render_decision_header(source="macro_ssot")
 st.markdown("---")
 
 # ==================== SIGNAL EXPLANATIONS ====================
@@ -441,7 +449,7 @@ if is_valid_signal(cg_signal):
 observations.append(f"Daily impulse {daily_normalized:+.2f}, directional impulse {directional_normalized:+.2f}.")
 render_key_observations(observations)
 
-with st.expander("🧠 Factor Breakdown (Expand)", expanded=(view_mode == "Detail")):
+with st.expander("🧠 Factor Breakdown (Expand)", expanded=False):
     for name, values in factor_scores.items():
         daily_sent = score_to_sentiment(values["daily"])
         directional_sent = score_to_sentiment(values["directional"])
@@ -473,7 +481,7 @@ else:
 st.markdown("---")
 
 # ==================== LIQUIDITY TRENDS ====================
-with st.expander("💰 Liquidity Trends (Expand)", expanded=(view_mode == "Detail")):
+with st.expander("💰 Liquidity Trends (Expand)", expanded=False):
     if liquidity_data:
         liquidity_shown = False
 
@@ -509,7 +517,7 @@ with st.expander("💰 Liquidity Trends (Expand)", expanded=(view_mode == "Detai
 st.markdown("---")
 
 # ==================== RATIO TRENDS ====================
-with st.expander("📈 Key Ratio Trends (Expand)", expanded=(view_mode == "Detail")):
+with st.expander("📈 Key Ratio Trends (Expand)", expanded=False):
     col1, col2 = st.columns(2)
 
     with col1:
@@ -579,7 +587,7 @@ with st.expander("📈 Key Ratio Trends (Expand)", expanded=(view_mode == "Detai
 st.markdown("---")
 
 # ==================== MARKET INDICATORS ====================
-with st.expander("📊 View All Market Indicators", expanded=(view_mode == "Detail")):
+with st.expander("📊 View All Market Indicators", expanded=False):
     for symbol, label in MARKET_SYMBOLS.items():
         df = market_data.get(symbol)
         if df is not None and len(df) > 0:
@@ -618,7 +626,7 @@ with st.expander("📊 View All Market Indicators", expanded=(view_mode == "Deta
                     st.metric("Latest", f"{latest:.2f}", f"{change:+.2f}%")
 
 # ==================== SUMMARY ====================
-with st.expander("📝 Signal Summary (Expand)", expanded=(view_mode == "Detail")):
+with st.expander("📝 Signal Summary (Expand)", expanded=False):
 
     summary_rows = []
 

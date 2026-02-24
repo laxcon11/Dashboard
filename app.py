@@ -2,6 +2,8 @@ import streamlit as st
 from utils import setup_page, get_ui_detail_mode
 from data_fetch import quick_data_health_summary
 from factor_registry import FACTOR_REGISTRY
+from config import RSS_FEEDS
+from data_fetch import fetch_rss_feeds
 from pathlib import Path
 import json
 
@@ -67,6 +69,11 @@ with st.expander("🗂 Pages & Configuration", expanded=False):
     - `8_Ops_Automation.py`
     - `9_Prediction_Integrity.py`
     - `10_Scoring_Audit.py`
+    - `11_Tradable_Universe.py`
+    - `12_Todo_Tracker.py`
+    - `13_India_Macro_Context.py`
+    - `14_News_Feed.py`
+    - `15_Stock_Fundamentals.py`
 
     **Core files**
     - `NSE_Config.py` (universe/categories/watchlists)
@@ -76,10 +83,38 @@ with st.expander("🗂 Pages & Configuration", expanded=False):
     - `data_fetch.py` (data pipeline, fallback paths)
     """)
 
+st.subheader("Additional Modules")
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.info("India Macro Context\n\nGlobal headwinds/tailwinds for Indian equities via FRED")
+with c2:
+    st.info("News Feed\n\nLive RSS headlines from Indian & global sources")
+with c3:
+    st.info("Stock EOD Profile\n\nEOD snapshot first; fundamentals only when provider allows")
+
+with st.expander("📰 Today's Headlines", expanded=False):
+    try:
+        recent = fetch_rss_feeds(RSS_FEEDS, max_per_feed=2, max_total=5)
+        if recent is None or recent.empty:
+            st.caption("No headlines available right now.")
+        else:
+            for _, row in recent.iterrows():
+                title = str(row.get("title", "")).strip()
+                link = str(row.get("link", "")).strip()
+                source = str(row.get("source", "")).strip()
+                if link:
+                    st.markdown(f"- [{title}]({link})  \n  `{source}`")
+                else:
+                    st.markdown(f"- {title}  \n  `{source}`")
+    except Exception:
+        st.caption("Headlines panel unavailable in this session.")
+
 with st.expander("📊 Data Sources & Notes", expanded=False):
     st.markdown("""
     - **Yahoo Finance**: stock/index/market prices (typically delayed)
     - **FRED**: liquidity/economic series
+    - **RSS**: contextual India/global news headlines
+    - **EODHD / Finnhub**: profile/fundamentals/news (plan and key dependent)
     - **Fallback**: proxy and local fallback paths are used where configured
     - Regime output is a decision aid, not a guarantee
     - FRED API key: [https://fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html)

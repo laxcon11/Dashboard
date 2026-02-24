@@ -22,18 +22,7 @@ if str(ROOT) not in sys.path:
 
 from NSE_Config import NIFTY_200, STOCK_CATEGORIES
 from config import LOCAL_NSE_HISTORY_PATH, DATA_STALENESS_WARN_DAYS, DATA_STALENESS_ERROR_DAYS
-
-
-def latest_business_day() -> pd.Timestamp:
-    today = pd.Timestamp.today().normalize()
-    if today.weekday() < 5:
-        return today
-    return today - pd.offsets.BDay(1)
-
-
-def business_day_age(last_date: pd.Timestamp, ref: pd.Timestamp) -> int:
-    bdays = pd.bdate_range(last_date.normalize(), ref.normalize())
-    return max(0, len(bdays) - 1)
+from trading_calendar import latest_nse_business_day, nse_business_day_age
 
 
 def main() -> None:
@@ -82,9 +71,9 @@ def main() -> None:
     if cat_missing:
         print(f"[warn] category_missing_sample={cat_missing[:20]}")
 
-    latest = latest_business_day()
+    latest = latest_nse_business_day()
     last_dates = work.groupby("symbol")["date"].max()
-    ages = last_dates.apply(lambda d: business_day_age(d, latest))
+    ages = last_dates.apply(lambda d: (nse_business_day_age(pd.Timestamp(d), latest) or 0))
     warn_n = int((ages >= DATA_STALENESS_WARN_DAYS).sum())
     err_n = int((ages >= DATA_STALENESS_ERROR_DAYS).sum())
     print(

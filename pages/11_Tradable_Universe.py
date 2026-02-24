@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from NSE_Config import NIFTY_200
+from trading_calendar import is_nse_trading_day
 from utils import setup_page, get_ui_detail_mode
 
 
@@ -34,7 +35,7 @@ def _run_script(script_name: str, args: list[str] | None = None) -> tuple[int, s
         return 1, f"Failed to run {' '.join(cmd)}: {exc}"
 
 
-def _write_tradable_heartbeat() -> None:
+def _write_tradable_heartbeat(success: bool, details: str = "") -> None:
     run_date = pd.Timestamp.now(tz="Asia/Kolkata").normalize().tz_localize(None)
     SNAPSHOT_META_PATH.parent.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_META_PATH.write_text(
@@ -44,6 +45,8 @@ def _write_tradable_heartbeat() -> None:
                 "rows_written_today": None,
                 "updated_at": pd.Timestamp.now(tz="Asia/Kolkata").isoformat(),
                 "source": "tradable_universe_full_refresh",
+                "run_status": "SUCCESS" if success else "FAILED",
+                "run_details": str(details or "")[:5000],
             },
             indent=2,
         )
@@ -60,15 +63,16 @@ with ctl1:
         run_logs.append(f"$ scripts/alert_engine.py\n{out2}")
         rc3, out3 = _run_script("data_trust_score.py")
         run_logs.append(f"$ scripts/data_trust_score.py\n{out3}")
-        _write_tradable_heartbeat()
-        if rc == 0 and rc2 == 0 and rc3 == 0:
+        all_ok = (rc == 0 and rc2 == 0 and rc3 == 0)
+        _write_tradable_heartbeat(success=all_ok, details="\n\n".join(run_logs))
+        if all_ok:
             st.success("Full refresh completed.")
         else:
             st.warning("Full refresh completed with warnings/errors. Review logs below.")
         st.code("\n\n".join(run_logs)[-12000:], language="text")
         st.rerun()
 with ctl2:
-    st.caption("Runs EOD pipeline, alerts, and trust score, then updates today heartbeat.")
+    st.caption("Runs EOD pipeline, alerts, and trust score, then records SUCCESS/FAILED run heartbeat.")
 
 
 def _strip_ns(sym: str) -> str:
@@ -77,7 +81,7 @@ def _strip_ns(sym: str) -> str:
 
 
 def _is_trading_day(d: pd.Timestamp) -> bool:
-    return int(d.weekday()) < 5
+    return bool(is_nse_trading_day(d))
 
 
 def _calc_streak(date_set: set[pd.Timestamp], ordered_dates: list[pd.Timestamp], current_d: pd.Timestamp) -> int:
@@ -119,12 +123,14 @@ if not all_dates:
 
 latest_date = all_dates[-1]
 latest_run_date = latest_date
+latest_run_status = "UNKNOWN"
 if SNAPSHOT_META_PATH.exists():
     try:
         meta = pd.read_json(SNAPSHOT_META_PATH, typ="series")
         meta_d = pd.to_datetime(meta.get("last_run_date"), errors="coerce")
         if not pd.isna(meta_d):
             latest_run_date = meta_d.normalize()
+        latest_run_status = str(meta.get("run_status", "UNKNOWN")).upper()
     except Exception:
         pass
 lookback_dates = all_dates[-20:] if len(all_dates) >= 20 else all_dates
@@ -236,6 +242,8 @@ if orphan_master:
 
 if stale_today:
     st.warning(f"Snapshot is stale for trading day {today_ist.date()} (latest run: {latest_run_date.date()}).")
+elif latest_run_status == "FAILED":
+    st.warning("Latest full refresh failed. Snapshot date is current but generation steps reported errors.")
 
 st.caption(f"Latest run: {latest_run_date.date()} | Lookback days loaded: {len(lookback_dates)}")
 

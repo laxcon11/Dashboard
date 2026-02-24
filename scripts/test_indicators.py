@@ -13,7 +13,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from indicators import calculate_rsi, calculate_ema, calculate_atr
-import analytics
+from analytics import calculate_volume_ratio, detect_breakout, detect_gap
 
 class TestIndicatorCalculations(unittest.TestCase):
     
@@ -92,7 +92,7 @@ class TestIndicatorCalculations(unittest.TestCase):
         gap_data = self.sample_data.copy()
         gap_data['Open'] = gap_data['Open'].astype(float)
         gap_data.loc[gap_data.index[-1], 'Open'] = gap_data['Close'].iloc[-2] * 1.03  # 3% gap
-        gap, gap_pct = analytics.detect_gap(gap_data)
+        gap, gap_pct = detect_gap(gap_data)
         self.assertAlmostEqual(gap_pct, 3.0, delta=0.5)
     
     def test_breakout_detection(self):
@@ -101,7 +101,7 @@ class TestIndicatorCalculations(unittest.TestCase):
         breakout_data = self.sample_data.copy()
         prior_high = breakout_data['High'].iloc[-21:-1].max()
         breakout_data.loc[breakout_data.index[-1], 'Close'] = prior_high + 5
-        signal = analytics.detect_breakout(breakout_data, window=20)
+        signal = detect_breakout(breakout_data, window=20)
         self.assertTrue(signal)
     
     def test_volume_ratio(self):
@@ -109,7 +109,7 @@ class TestIndicatorCalculations(unittest.TestCase):
         # Create data with high volume
         vol_data = self.sample_data.copy()
         vol_data.loc[vol_data.index[-1], 'Volume'] = 300000  # 3x average
-        ratio = analytics.calculate_volume_ratio(vol_data)
+        ratio = calculate_volume_ratio(vol_data)
         self.assertAlmostEqual(ratio, 3.0, delta=0.5)
     
     def test_division_by_zero_protection(self):
@@ -117,7 +117,7 @@ class TestIndicatorCalculations(unittest.TestCase):
         # Create data with zero volume
         zero_vol_data = self.sample_data.copy()
         zero_vol_data['Volume'] = 0
-        ratio = analytics.calculate_volume_ratio(zero_vol_data)
+        ratio = calculate_volume_ratio(zero_vol_data)
         self.assertEqual(ratio, 0)
 
 def run_tests():

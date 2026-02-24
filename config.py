@@ -179,6 +179,240 @@ FRED_SERIES = {
     "Effective Fed Funds Rate": "DFF"
 }
 
+# Additional FRED macro context series (separate from liquidity dashboard series)
+FRED_SERIES_INDIA_MACRO = {
+    "USD/INR Exchange Rate": "DEXINUS",
+    "US CPI (YoY)": "CPIAUCSL",
+    "US Core PCE": "PCEPILFE",
+    "US Unemployment Rate": "UNRATE",
+    "US Industrial Production": "INDPRO",
+    "WTI Crude Oil Price": "DCOILWTICO",
+    "Gold Price (FRED)": "GOLDAMGBD228NLBM",
+    "US 10Y Yield": "DGS10",
+    "ECB Balance Sheet (EUR bn)": "ECBASSETS",
+    "US Credit Spread (BAA-AAA)": "BAA10Y",
+}
+
+
+# ==================== RSS NEWS FEEDS ====================
+# Every feed maps directly to a tracked signal, sector, or macro factor.
+
+RSS_FEEDS = {
+    # Market overview & regime
+    "ET Markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "Moneycontrol Markets": "https://www.moneycontrol.com/rss/marketsindia.xml",
+    "Business Standard Markets": "https://www.business-standard.com/rss/markets-106.rss",
+    "NSE Official Press": "https://nsearchives.nseindia.com/content/press/press.xml",
+    "SEBI Orders & Circulars": "https://www.sebi.gov.in/sebiweb/other/RssFeed.jsp?sectionId=1",
+
+    # Macro regime inputs
+    "Reuters Fed/Economy": "https://feeds.reuters.com/reuters/businessNews",
+    "FT Markets": "https://www.ft.com/rss/home",
+    "Bloomberg Economics": "https://feeds.bloomberg.com/economics/news.rss",
+    "WSJ Economy": "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml",
+    "ET Rupee / Forex": "https://economictimes.indiatimes.com/markets/forex/rssfeeds/1977588.cms",
+    "Reuters Forex": "https://feeds.reuters.com/reuters/MBSfunds",
+    "Reuters Oil": "https://feeds.reuters.com/reuters/businessNews",
+    "ET Oil & Gas": "https://economictimes.indiatimes.com/industry/energy/oil-gas/rssfeeds/13358093.cms",
+    "Platts/S&P Oil": "https://www.spglobal.com/commodityinsights/en/rss-feed/oil",
+    "ET Commodities": "https://economictimes.indiatimes.com/markets/commodities/rssfeeds/1808152.cms",
+    "Kitco Gold": "https://feeds.kitco.com/KitcoNewsRSS",
+    "Reuters Credit": "https://feeds.reuters.com/reuters/businessNews",
+    "RBI Press Releases": "https://rbi.org.in/scripts/rss.aspx",
+    "ET RBI": "https://economictimes.indiatimes.com/news/economy/policy/rssfeeds/1373380680.cms",
+
+    # Institutional flows
+    "ET FII/DII Flows": "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2143429.cms",
+    "NSDL FPI Data": "https://www.fpi.nsdl.co.in/web/Reports/Rss.aspx",
+    "Moneycontrol FII": "https://www.moneycontrol.com/rss/fiidii.xml",
+
+    # Gift Nifty / pre-market
+    "ET Gift Nifty / SGX": "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2143429.cms",
+    "Moneycontrol Pre-market": "https://www.moneycontrol.com/rss/marketsindia.xml",
+
+    # Sectors
+    "ET Banking & Finance": "https://economictimes.indiatimes.com/industry/banking/finance/rssfeeds/13358259.cms",
+    "BS Banking": "https://www.business-standard.com/rss/finance-103.rss",
+    "RBI Banking Regulation": "https://rbi.org.in/scripts/rss.aspx",
+    "Moneycontrol Banking": "https://www.moneycontrol.com/rss/marketsindia.xml",
+    "ET Technology": "https://economictimes.indiatimes.com/tech/rssfeeds/13357270.cms",
+    "BS Tech": "https://www.business-standard.com/rss/technology-108.rss",
+    "Nasscom": "https://nasscom.in/rss.xml",
+    "TechCrunch": "https://techcrunch.com/feed/",
+    "The Information": "https://www.theinformation.com/feed",
+    "ET Pharma": "https://economictimes.indiatimes.com/industry/healthcare/biotech/pharmaceuticals/rssfeeds/1520885659.cms",
+    "BS Pharma": "https://www.business-standard.com/rss/companies-101.rss",
+    "FDA Drug Approvals": "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml",
+    "FDA Warning Letters": "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/warning-letters/rss.xml",
+    "ET Energy": "https://economictimes.indiatimes.com/industry/energy/rssfeeds/2143429.cms",
+    "Ministry of Power India": "https://powermin.gov.in/en/rss.xml",
+    "Mercom India (Renewables)": "https://mercomindia.com/feed/",
+    "IEA Oil Market": "https://www.iea.org/news/rss",
+    "ET Metals": "https://economictimes.indiatimes.com/industry/indl-goods/svs/metals-mining/rssfeeds/13358209.cms",
+    "Steel Mint": "https://www.steelmint.com/rss/news.rss",
+    "Metal Miner": "https://agmetalminer.com/feed/",
+    "ET Auto": "https://economictimes.indiatimes.com/industry/auto/rssfeeds/35443329.cms",
+    "BS Auto": "https://www.business-standard.com/rss/automobile-104.rss",
+    "SIAM (Auto Sales Data)": "https://www.siam.in/rss.aspx",
+    "ET Real Estate": "https://economictimes.indiatimes.com/industry/services/property-/-cstruction/rssfeeds/13358319.cms",
+    "PropTiger/Housing": "https://www.housing.com/news/feed/",
+    "Knight Frank India": "https://www.knightfrank.co.in/blog/feed/",
+    "ET Cement": "https://economictimes.indiatimes.com/industry/indl-goods/svs/cement/rssfeeds/13358319.cms",
+    "Cement Manufacturers Assoc": "https://www.cmaindia.org/rss/news.xml",
+    "ET FMCG": "https://economictimes.indiatimes.com/industry/cons-products/fmcg/rssfeeds/13358309.cms",
+    "BS FMCG": "https://www.business-standard.com/rss/companies-101.rss",
+    "ET Capital Goods": "https://economictimes.indiatimes.com/industry/indl-goods/svs/engineering/rssfeeds/13358199.cms",
+    "Ministry of Defence India": "https://mod.gov.in/rss.xml",
+    "Indian Defence Review": "https://www.indiandefencereview.com/feed/",
+    "ET Telecom": "https://economictimes.indiatimes.com/industry/telecom/rssfeeds/13358249.cms",
+    "Telecom Talk": "https://telecomtalk.info/feed/",
+    "ET Consumer / Retail": "https://economictimes.indiatimes.com/industry/services/retail/rssfeeds/13358329.cms",
+    "ET Hospitality": "https://economictimes.indiatimes.com/industry/services/hotels-/-restaurants/rssfeeds/13358339.cms",
+    "ET Chemicals": "https://economictimes.indiatimes.com/industry/chemicals/rssfeeds/2143429.cms",
+    "ICIS Chemical News": "https://www.icis.com/explore/resources/news/feed/",
+    "ET Insurance": "https://economictimes.indiatimes.com/industry/banking/insurance/rssfeeds/13358269.cms",
+    "IRDA Press": "https://irdai.gov.in/rss.xml",
+    "ET Aviation": "https://economictimes.indiatimes.com/industry/transportation/airlines-/-aviation/rssfeeds/13358369.cms",
+    "ET Shipping & Ports": "https://economictimes.indiatimes.com/industry/transportation/shipping-/-transport/rssfeeds/13358379.cms",
+    "Reuters World Markets": "https://feeds.reuters.com/reuters/businessNews",
+    "AP Business": "https://rsshub.app/ap/topics/apf-business",
+    "Nikkei Asia": "https://asia.nikkei.com/rss/feed/nar",
+    "ET Earnings": "https://economictimes.indiatimes.com/markets/earnings/rssfeeds/2143429.cms",
+    "BS Results": "https://www.business-standard.com/rss/companies-101.rss",
+}
+
+RSS_FEED_TAGS = {
+    "regime_overview": [
+        "ET Markets", "Moneycontrol Markets", "Business Standard Markets", "NSE Official Press", "Reuters World Markets",
+    ],
+    "macro_us_fed": [
+        "Reuters Fed/Economy", "FT Markets", "Bloomberg Economics", "WSJ Economy",
+    ],
+    "macro_crude_oil": [
+        "Reuters Oil", "ET Oil & Gas", "Platts/S&P Oil", "IEA Oil Market",
+    ],
+    "macro_gold": [
+        "ET Commodities", "Kitco Gold",
+    ],
+    "macro_dxy_usdinr": [
+        "ET Rupee / Forex", "Reuters Forex",
+    ],
+    "macro_rbi": [
+        "RBI Press Releases", "ET RBI",
+    ],
+    "fii_dii_flows": [
+        "ET FII/DII Flows", "NSDL FPI Data", "Moneycontrol FII",
+    ],
+    "gift_nifty_premarket": [
+        "ET Gift Nifty / SGX", "Moneycontrol Pre-market",
+    ],
+    "sector_banks_nbfc": [
+        "ET Banking & Finance", "BS Banking", "RBI Banking Regulation", "Moneycontrol Banking",
+    ],
+    "sector_it_tech": [
+        "ET Technology", "BS Tech", "Nasscom", "TechCrunch",
+    ],
+    "sector_pharma": [
+        "ET Pharma", "BS Pharma", "FDA Drug Approvals", "FDA Warning Letters",
+    ],
+    "sector_energy": [
+        "ET Energy", "Ministry of Power India", "Mercom India (Renewables)", "IEA Oil Market",
+    ],
+    "sector_metals": [
+        "ET Metals", "Steel Mint", "Metal Miner",
+    ],
+    "sector_auto": [
+        "ET Auto", "BS Auto", "SIAM (Auto Sales Data)",
+    ],
+    "sector_realestate": [
+        "ET Real Estate", "PropTiger/Housing", "Knight Frank India",
+    ],
+    "sector_cement": [
+        "ET Cement", "Cement Manufacturers Assoc",
+    ],
+    "sector_fmcg": [
+        "ET FMCG", "BS FMCG",
+    ],
+    "sector_capital_goods_defence": [
+        "ET Capital Goods", "Ministry of Defence India", "Indian Defence Review",
+    ],
+    "sector_telecom": [
+        "ET Telecom", "Telecom Talk",
+    ],
+    "sector_consumer_services": [
+        "ET Consumer / Retail", "ET Hospitality",
+    ],
+    "sector_chemicals": [
+        "ET Chemicals", "ICIS Chemical News",
+    ],
+    "sector_insurance_cm": [
+        "ET Insurance", "IRDA Press",
+    ],
+    "sector_services_ports_aviation": [
+        "ET Aviation", "ET Shipping & Ports",
+    ],
+    "earnings_results": [
+        "ET Earnings", "BS Results",
+    ],
+    "global_indices": [
+        "Reuters World Markets", "AP Business", "Nikkei Asia", "FT Markets",
+    ],
+}
+
+RSS_DEFAULT_ACTIVE = [
+    "ET Markets",
+    "Business Standard Markets",
+    "Reuters Fed/Economy",
+    "RBI Press Releases",
+    "ET FII/DII Flows",
+    "ET Banking & Finance",
+    "ET Technology",
+    "Kitco Gold",
+    "ET Oil & Gas",
+    "ET Earnings",
+]
+
+RSS_CACHE_TTL = 600
+RSS_MAX_ITEMS_PER_FEED = 8
+RSS_MAX_TOTAL_ITEMS = 60
+
+
+# ==================== FINNHUB ====================
+
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+if not FINNHUB_API_KEY:
+    print("⚠️  FINNHUB_API_KEY not found in .env - Fundamentals features disabled")
+
+FINNHUB_NSE_PREFIX = "NSE:"
+FINNHUB_METRICS = [
+    "peBasicExclExtraTTM",
+    "pbAnnual",
+    "epsBasicExclExtraItemsTTM",
+    "revenueGrowthTTMYoy",
+    "grossMarginTTM",
+    "debtEquityAnnual",
+    "dividendYieldIndicatedAnnual",
+    "52WeekHigh",
+    "52WeekLow",
+    "beta",
+]
+FINNHUB_NEWS_TTL = 900
+FINNHUB_FUNDAMENTALS_TTL = 3600
+FINNHUB_RATE_LIMIT_PAUSE = 0.5
+
+
+# ==================== EODHD ====================
+
+EODHD_API_KEY = os.getenv("EODHD_API_KEY", "").strip()
+if not EODHD_API_KEY:
+    print("⚠️  EODHD_API_KEY not found in .env - India fundamentals/news fallback disabled")
+
+EODHD_BASE_URL = os.getenv("EODHD_BASE_URL", "https://eodhd.com").strip().rstrip("/")
+EODHD_NSE_SUFFIX = ".NSE"
+EODHD_NEWS_TTL = 900
+EODHD_FUNDAMENTALS_TTL = 3600
+EODHD_RATE_LIMIT_PAUSE = 0.3
+
 
 # ==================== TECHNICAL SETTINGS ====================
 

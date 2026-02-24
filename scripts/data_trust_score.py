@@ -25,6 +25,7 @@ from analytics import round_percentages_sum_to_100
 from config import DATA_STALENESS_ERROR_DAYS, LOCAL_NSE_HISTORY_PATH
 from data_fetch import get_latest_bhavcopy_snapshot, load_latest_bhavcopy_prices
 from regime_model import load_regime_settings
+from trading_calendar import latest_nse_business_day, nse_business_day_age
 
 
 LOG_DIR = Path("logs")
@@ -33,18 +34,6 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
-
-def latest_business_day() -> pd.Timestamp:
-    t = pd.Timestamp.today().normalize()
-    if t.weekday() < 5:
-        return t
-    return t - pd.offsets.BDay(1)
-
-
-def business_day_age(last_date: pd.Timestamp, ref: pd.Timestamp) -> int:
-    bdays = pd.bdate_range(last_date.normalize(), ref.normalize())
-    return max(0, len(bdays) - 1)
 
 
 def integrity_score(df: pd.DataFrame, universe: set[str]) -> tuple[float, dict]:
@@ -57,8 +46,8 @@ def integrity_score(df: pd.DataFrame, universe: set[str]) -> tuple[float, dict]:
     available = set(work["symbol"].unique())
     missing = sorted(universe - available)
     dup = int(work.duplicated(subset=["symbol", "date"]).sum())
-    ref = latest_business_day()
-    ages = work.groupby("symbol")["date"].max().apply(lambda d: business_day_age(d, ref))
+    ref = latest_nse_business_day()
+    ages = work.groupby("symbol")["date"].max().apply(lambda d: (nse_business_day_age(pd.Timestamp(d), ref) or 0))
     stale_err = int((ages >= DATA_STALENESS_ERROR_DAYS).sum())
 
     missing_rate = len(missing) / max(1, len(universe))

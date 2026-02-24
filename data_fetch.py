@@ -16,10 +16,17 @@ import logging
 import requests
 import zipfile
 import re
+import time
+import string
+from difflib import SequenceMatcher
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
+try:
+    import feedparser
+except Exception:  # pragma: no cover - optional dependency guard
+    feedparser = None
 from config import (
     CACHE_TTL,
     DATA_STALENESS_WARN_DAYS,
@@ -35,6 +42,12 @@ from config import (
     BHAVCOPY_MAX_FILES_PER_DIR,
     BHAVCOPY_EOD_RECONCILE_ENABLED,
     BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR,
+    FINNHUB_NSE_PREFIX,
+    FINNHUB_METRICS,
+    FINNHUB_RATE_LIMIT_PAUSE,
+    EODHD_BASE_URL,
+    EODHD_NSE_SUFFIX,
+    EODHD_RATE_LIMIT_PAUSE,
 )
 from trading_calendar import latest_nse_business_day, nse_business_day_age
 
@@ -1145,6 +1158,738 @@ def fetch_fred_series(series_id: str, api_key: str, days: int = 30) -> Optional[
     except Exception as e:
         logger.error(f"FRED fetch failed for {series_id}: {e}")
         return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_fred_batch(series_dict: Dict[str, str], api_key: str, days: int = 180) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch a batch of FRED series using the existing fetch_fred_series function.
+    Returns dict[label] = DataFrame for successful pulls only.
+    """
+    out: Dict[str, pd.DataFrame] = {}
+    if not api_key or not isinstance(series_dict, dict):
+        return out
+
+    for label, series_id in series_dict.items():
+        try:
+            df = fetch_fred_series(series_id, api_key, days=days)
+            if df is not None and not df.empty:
+                out[str(label)] = df.copy()
+        except Exception:
+            continue
+    return out
+
+
+def _normalize_title(text: str) -> str:
+    txt = str(text or "").lower()
+    trans = str.maketrans("", "", string.punctuation)
+    txt = txt.translate(trans)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
+def _title_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, _normalize_title(a), _normalize_title(b)).ratio()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_rss_feed(feed_name: str, url: str, max_items: int = 8) -> List[Dict[str, object]]:
+    """
+    Fetch and parse a single RSS feed.
+    Returns list of dicts with keys: title, link, published, summary, source
+    Returns empty list on any failure (never raises).
+    """
+    if not feed_name or not url:
+        return []
+    if feedparser is None:
+        return []
+
+    try:
+        t0 = time.perf_counter()
+        resp = session.get(url, timeout=12)
+        _latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        if resp.status_code != 200:
+            logger.warning("RSS fetch failed [%s]: http_status=%s latency_ms=%s", feed_name, resp.status_code, _latency_ms)
+            return []
+        parsed = feedparser.parse(resp.content)
+        entries = getattr(parsed, "entries", []) or []
+        items: List[Dict[str, object]] = []
+        for e in entries[:max_items]:
+            title = str(getattr(e, "title", "")).strip()
+            link = str(getattr(e, "link", "")).strip()
+            summary = str(getattr(e, "summary", "") or getattr(e, "description", "")).strip()
+            published_raw = (
+                getattr(e, "published", None)
+                or getattr(e, "updated", None)
+                or getattr(e, "created", None)
+            )
+            published = pd.to_datetime(published_raw, errors="coerce")
+            items.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "published": None if pd.isna(published) else published,
+                    "summary": summary[:300],
+                    "source": str(feed_name),
+                }
+            )
+        return items
+    except Exception as exc:
+        logger.warning("RSS fetch failed [%s]: %s", feed_name, exc)
+        return []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_rss_feed_health(feed_name: str, url: str, max_items: int = 8) -> Dict[str, object]:
+    """
+    Fetch one RSS feed with diagnostics.
+    Returns health payload including latency, item count, and parse/fetch error markers.
+    Never raises.
+    """
+    out: Dict[str, object] = {
+        "feed": str(feed_name or ""),
+        "status": "Error",
+        "item_count": 0,
+        "latency_ms": None,
+        "fetch_errors": 0,
+        "parse_errors": 0,
+        "error_detail": "",
+    }
+    if not feed_name or not url:
+        out["fetch_errors"] = 1
+        out["error_detail"] = "missing_feed_or_url"
+        return out
+    if feedparser is None:
+        out["fetch_errors"] = 1
+        out["error_detail"] = "feedparser_not_installed"
+        return out
+
+    try:
+        t0 = time.perf_counter()
+        resp = session.get(url, timeout=12)
+        out["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
+        if resp.status_code != 200:
+            out["fetch_errors"] = 1
+            out["error_detail"] = f"http_{resp.status_code}"
+            return out
+
+        parsed = feedparser.parse(resp.content)
+        if getattr(parsed, "bozo", 0):
+            out["parse_errors"] = 1
+            try:
+                out["error_detail"] = str(getattr(parsed, "bozo_exception", "parse_warning"))
+            except Exception:
+                out["error_detail"] = "parse_warning"
+
+        entries = getattr(parsed, "entries", []) or []
+        out["item_count"] = int(min(len(entries), max_items))
+        out["status"] = "OK" if out["item_count"] > 0 else "Error"
+        if out["status"] == "Error" and not out["error_detail"]:
+            out["error_detail"] = "no_entries"
+        return out
+    except Exception as exc:
+        out["fetch_errors"] = 1
+        out["error_detail"] = str(exc)
+        return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_rss_feeds(feed_dict: Dict[str, str], max_per_feed: int = 10, max_total: int = 50) -> pd.DataFrame:
+    """
+    Fetch multiple RSS feeds and merge into a single DataFrame.
+    Columns: title, link, published (datetime), summary, source (feed name)
+    Sorted by published DESC.
+    Deduplicates by title similarity (80%+ overlap).
+    Returns empty DataFrame on total failure.
+    """
+    try:
+        items: List[Dict[str, object]] = []
+        for source_name, url in (feed_dict or {}).items():
+            items.extend(fetch_rss_feed(str(source_name), str(url), max_items=max_per_feed))
+        return _build_news_df(items, max_total=max_total)
+    except Exception:
+        return pd.DataFrame(columns=["title", "link", "published", "summary", "source"])
+
+
+def _build_news_df(items: List[Dict[str, object]], max_total: int = 60) -> pd.DataFrame:
+    """
+    Internal: deduplicate, sort, and cap a list of news items into a DataFrame.
+    Deduplication: drop if normalized title is 80%+ identical to a seen title.
+    """
+    if not items:
+        return pd.DataFrame(columns=["title", "link", "published", "summary", "source"])
+
+    seen_titles: List[str] = []
+    deduped: List[Dict[str, object]] = []
+    for item in items:
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        duplicate = any(_title_similarity(title, prev) >= 0.80 for prev in seen_titles)
+        if duplicate:
+            continue
+        seen_titles.append(title)
+        deduped.append(
+            {
+                "title": title,
+                "link": str(item.get("link", "")).strip(),
+                "published": pd.to_datetime(item.get("published"), errors="coerce"),
+                "summary": str(item.get("summary", "")).strip(),
+                "source": str(item.get("source", "")).strip(),
+            }
+        )
+
+    if not deduped:
+        return pd.DataFrame(columns=["title", "link", "published", "summary", "source"])
+    df = pd.DataFrame(deduped)
+    df["published"] = pd.to_datetime(df["published"], utc=True, errors="coerce")
+    return df.sort_values("published", ascending=False, na_position="last").head(max_total).reset_index(drop=True)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_rss_feeds_by_tag(tag: str, max_per_feed: int = 6, max_total: int = 30) -> pd.DataFrame:
+    """
+    Fetch all feeds associated with a tag from RSS_FEED_TAGS.
+    """
+    from config import RSS_FEEDS, RSS_FEED_TAGS
+
+    feed_keys = RSS_FEED_TAGS.get(str(tag), [])
+    items: List[Dict[str, object]] = []
+    for key in feed_keys:
+        url = RSS_FEEDS.get(key)
+        if not url:
+            continue
+        items.extend(fetch_rss_feed(str(key), str(url), max_items=max_per_feed))
+    return _build_news_df(items, max_total=max_total)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_rss_feeds_by_keys(feed_keys: List[str], max_per_feed: int = 8, max_total: int = 60) -> pd.DataFrame:
+    """
+    Fetch feeds by a list of feed name keys from RSS_FEEDS.
+    """
+    from config import RSS_FEEDS
+
+    items: List[Dict[str, object]] = []
+    for key in (feed_keys or []):
+        url = RSS_FEEDS.get(str(key))
+        if not url:
+            continue
+        items.extend(fetch_rss_feed(str(key), str(url), max_items=max_per_feed))
+    return _build_news_df(items, max_total=max_total)
+
+
+def _to_finnhub_nse_symbol(symbol_ns: str) -> str:
+    base = str(symbol_ns or "").upper().replace(".NS", "").strip()
+    return f"{FINNHUB_NSE_PREFIX}{base}" if base else ""
+
+
+def _to_eodhd_symbol(symbol: str) -> str:
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return ""
+    if sym.endswith(".NS"):
+        return sym.replace(".NS", EODHD_NSE_SUFFIX)
+    return sym
+
+
+def _eodhd_symbol_candidates(symbol: str) -> List[str]:
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return []
+    base = sym.replace(".NS", "").replace(".NSE", "").replace(".BSE", "")
+    candidates = []
+    if sym.endswith(".NS"):
+        candidates.extend([f"{base}.NSE", f"{base}.BSE", f"{base}.NS"])
+    else:
+        candidates.extend([sym, f"{base}.NSE", f"{base}.BSE"])
+    out = []
+    for c in candidates:
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def _eodhd_base_candidates() -> List[str]:
+    primary = EODHD_BASE_URL.rstrip("/")
+    fallbacks = ["https://eodhd.com", "https://eodhistoricaldata.com"]
+    out = [primary] if primary else []
+    for f in fallbacks:
+        if f not in out:
+            out.append(f)
+    return out
+
+
+def _eodhd_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://eodhd.com/",
+    }
+
+
+def _extract_error_message(resp: requests.Response) -> str:
+    try:
+        body = resp.json() if resp.content else {}
+        if isinstance(body, dict):
+            msg = body.get("message") or body.get("error") or body.get("errors")
+            if msg:
+                return str(msg)
+        if isinstance(body, list) and body:
+            return str(body[0])
+    except Exception:
+        pass
+    text = (resp.text or "").strip()
+    return text[:180] if text else ""
+
+
+def _is_eodhd_eod_only_message(msg: str) -> bool:
+    return "only eod data allowed for free users" in str(msg or "").lower()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def is_eodhd_eod_only(api_key: str) -> bool:
+    """
+    Detect whether EODHD key is restricted to EOD-only plan (fundamentals/news blocked).
+    """
+    if not api_key:
+        return False
+    try:
+        for base_url in _eodhd_base_candidates():
+            for ticker in ("INFY.NSE", "TCS.NSE", "RELIANCE.NSE"):
+                url = f"{base_url}/api/fundamentals/{ticker}"
+                r = session.get(
+                    url,
+                    params={"api_token": api_key.strip(), "fmt": "json"},
+                    headers=_eodhd_headers(),
+                    timeout=8,
+                )
+                if r.status_code == 200:
+                    return False
+                if r.status_code == 403 and _is_eodhd_eod_only_message(_extract_error_message(r)):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _pick_num(d: Dict[str, object], keys: List[str]) -> Optional[float]:
+    for k in keys:
+        if k in d and d.get(k) not in (None, "", "NA", "N/A"):
+            try:
+                return float(d.get(k))
+            except Exception:
+                continue
+    return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_eodhd_fundamentals(symbol: str, api_key: str) -> Dict[str, object]:
+    """
+    Fetch fundamentals from EODHD and map into FINNHUB_METRICS-compatible keys.
+    """
+    if not symbol or not api_key:
+        return {}
+    try:
+        payload = None
+        for base_url in _eodhd_base_candidates():
+            for ticker in _eodhd_symbol_candidates(symbol):
+                url = f"{base_url}/api/fundamentals/{ticker}"
+                resp = session.get(
+                    url,
+                    params={"api_token": api_key.strip(), "fmt": "json"},
+                    headers=_eodhd_headers(),
+                    timeout=12,
+                )
+                if resp.status_code != 200:
+                    continue
+                j = resp.json() if resp.content else {}
+                if isinstance(j, dict) and j:
+                    payload = j
+                    break
+            if payload is not None:
+                break
+        if not isinstance(payload, dict):
+            return {}
+        highlights = payload.get("Highlights", {}) if isinstance(payload.get("Highlights"), dict) else {}
+        valuation = payload.get("Valuation", {}) if isinstance(payload.get("Valuation"), dict) else {}
+        technicals = payload.get("Technicals", {}) if isinstance(payload.get("Technicals"), dict) else {}
+
+        out = {
+            "peBasicExclExtraTTM": _pick_num(highlights, ["PERatio"]) or _pick_num(valuation, ["TrailingPE"]),
+            "pbAnnual": _pick_num(highlights, ["PriceBookMRQ"]) or _pick_num(valuation, ["PriceBook"]),
+            "epsBasicExclExtraItemsTTM": _pick_num(highlights, ["EarningsShare"]),
+            "revenueGrowthTTMYoy": _pick_num(highlights, ["QuarterlyRevenueGrowthYOY"]),
+            "grossMarginTTM": _pick_num(highlights, ["GrossProfitMargin"]),
+            "debtEquityAnnual": _pick_num(highlights, ["DebtEquity"]),
+            "dividendYieldIndicatedAnnual": _pick_num(highlights, ["DividendYield"]),
+            "52WeekHigh": _pick_num(highlights, ["52WeekHigh"]) or _pick_num(technicals, ["52WeekHigh"]),
+            "52WeekLow": _pick_num(highlights, ["52WeekLow"]) or _pick_num(technicals, ["52WeekLow"]),
+            "beta": _pick_num(highlights, ["Beta"]),
+        }
+        return out
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_eodhd_stock_news(symbol: str, api_key: str, days_back: int = 7) -> pd.DataFrame:
+    """
+    Fetch symbol-level news from EODHD.
+    """
+    cols = ["datetime", "headline", "summary", "source", "url"]
+    if not symbol or not api_key:
+        return pd.DataFrame(columns=cols)
+    try:
+        dt_to = datetime.utcnow().date()
+        dt_from = dt_to - timedelta(days=max(1, int(days_back)))
+        rows = []
+        for base_url in _eodhd_base_candidates():
+            for ticker in _eodhd_symbol_candidates(symbol):
+                url = f"{base_url}/api/news"
+                params = {
+                    "api_token": api_key.strip(),
+                    "fmt": "json",
+                    "s": ticker,
+                    "from": str(dt_from),
+                    "to": str(dt_to),
+                    "limit": 50,
+                }
+                resp = session.get(url, params=params, headers=_eodhd_headers(), timeout=12)
+                if resp.status_code != 200:
+                    continue
+                j = resp.json() if resp.content else []
+                if isinstance(j, list) and len(j) > 0:
+                    rows = j
+                    break
+            if rows:
+                break
+        if not isinstance(rows, list):
+            return pd.DataFrame(columns=cols)
+        out = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            out.append(
+                {
+                    "datetime": pd.to_datetime(r.get("date"), errors="coerce"),
+                    "headline": str(r.get("title", "")).strip(),
+                    "summary": str(r.get("content", "")).strip(),
+                    "source": str(r.get("source", "")).strip(),
+                    "url": str(r.get("link", "")).strip(),
+                }
+            )
+        df = pd.DataFrame(out)
+        if df.empty:
+            return pd.DataFrame(columns=cols)
+        return df.sort_values("datetime", ascending=False).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_eodhd_market_news(api_key: str, days_back: int = 7) -> pd.DataFrame:
+    """
+    Fetch broader market news stream from EODHD.
+    """
+    cols = ["datetime", "headline", "summary", "source", "url", "category"]
+    if not api_key:
+        return pd.DataFrame(columns=cols)
+    try:
+        dt_to = datetime.utcnow().date()
+        dt_from = dt_to - timedelta(days=max(1, int(days_back)))
+        url = f"{EODHD_BASE_URL}/api/news"
+        params = {
+            "api_token": api_key.strip(),
+            "fmt": "json",
+            "from": str(dt_from),
+            "to": str(dt_to),
+            "limit": 80,
+        }
+        resp = session.get(url, params=params, headers=_eodhd_headers(), timeout=12)
+        if resp.status_code != 200:
+            return pd.DataFrame(columns=cols)
+        rows = resp.json() if resp.content else []
+        if not isinstance(rows, list):
+            return pd.DataFrame(columns=cols)
+        out = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            out.append(
+                {
+                    "datetime": pd.to_datetime(r.get("date"), errors="coerce"),
+                    "headline": str(r.get("title", "")).strip(),
+                    "summary": str(r.get("content", "")).strip(),
+                    "source": str(r.get("source", "")).strip(),
+                    "url": str(r.get("link", "")).strip(),
+                    "category": "india",
+                }
+            )
+        df = pd.DataFrame(out)
+        if df.empty:
+            return pd.DataFrame(columns=cols)
+        return df.sort_values("datetime", ascending=False).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_finnhub_fundamentals(symbol_ns: str, api_key: str) -> Dict[str, object]:
+    """
+    Fetch basic financials for one NSE stock from Finnhub.
+    Returns metric dict, or {} on any failure.
+    """
+    if not symbol_ns or not api_key:
+        return {}
+    try:
+        import finnhub
+
+        client = finnhub.Client(api_key=api_key)
+        fh_symbol = _to_finnhub_nse_symbol(symbol_ns)
+        if not fh_symbol:
+            return {}
+        payload = client.company_basic_financials(fh_symbol, "all") or {}
+        metrics = payload.get("metric", {}) if isinstance(payload, dict) else {}
+        if not isinstance(metrics, dict):
+            return {}
+        return {k: metrics.get(k) for k in FINNHUB_METRICS}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_finnhub_stock_news(symbol_ns: str, api_key: str, days_back: int = 7) -> pd.DataFrame:
+    """
+    Fetch recent stock-specific news from Finnhub.
+    Returns DataFrame sorted by datetime DESC, empty on failure.
+    """
+    if not symbol_ns or not api_key:
+        return pd.DataFrame(columns=["datetime", "headline", "summary", "source", "url"])
+    try:
+        import finnhub
+
+        client = finnhub.Client(api_key=api_key)
+        fh_symbol = _to_finnhub_nse_symbol(symbol_ns)
+        if not fh_symbol:
+            return pd.DataFrame(columns=["datetime", "headline", "summary", "source", "url"])
+        dt_to = datetime.utcnow().date()
+        dt_from = dt_to - timedelta(days=max(1, int(days_back)))
+        rows = client.company_news(fh_symbol, _from=str(dt_from), to=str(dt_to)) or []
+        data = []
+        for r in rows:
+            ts = pd.to_datetime(r.get("datetime"), unit="s", errors="coerce")
+            data.append(
+                {
+                    "datetime": ts,
+                    "headline": str(r.get("headline", "")).strip(),
+                    "summary": str(r.get("summary", "")).strip(),
+                    "source": str(r.get("source", "")).strip(),
+                    "url": str(r.get("url", "")).strip(),
+                }
+            )
+        df = pd.DataFrame(data)
+        if df.empty:
+            return pd.DataFrame(columns=["datetime", "headline", "summary", "source", "url"])
+        return df.sort_values("datetime", ascending=False).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["datetime", "headline", "summary", "source", "url"])
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_finnhub_market_news(api_key: str, category: str = "general") -> pd.DataFrame:
+    """
+    Fetch general market news from Finnhub.
+    Returns DataFrame sorted by datetime DESC, empty on failure.
+    """
+    if not api_key:
+        return pd.DataFrame(columns=["datetime", "headline", "summary", "source", "url", "category"])
+    try:
+        import finnhub
+
+        client = finnhub.Client(api_key=api_key)
+        rows = client.general_news(category, min_id=0) or []
+        data = []
+        for r in rows:
+            ts = pd.to_datetime(r.get("datetime"), unit="s", errors="coerce")
+            data.append(
+                {
+                    "datetime": ts,
+                    "headline": str(r.get("headline", "")).strip(),
+                    "summary": str(r.get("summary", "")).strip(),
+                    "source": str(r.get("source", "")).strip(),
+                    "url": str(r.get("url", "")).strip(),
+                    "category": str(category),
+                }
+            )
+        df = pd.DataFrame(data)
+        if df.empty:
+            return pd.DataFrame(columns=["datetime", "headline", "summary", "source", "url", "category"])
+        return df.sort_values("datetime", ascending=False).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["datetime", "headline", "summary", "source", "url", "category"])
+
+
+def fetch_finnhub_fundamentals_batch(symbols_ns: List[str], api_key: str) -> Dict[str, Dict[str, object]]:
+    """
+    Fetch fundamentals for multiple NSE symbols.
+    Not cached at batch level; individual fetches are cached.
+    """
+    out: Dict[str, Dict[str, object]] = {}
+    if not api_key:
+        return out
+    for sym in symbols_ns or []:
+        try:
+            out[sym] = fetch_finnhub_fundamentals(sym, api_key)
+            time.sleep(max(0.0, float(FINNHUB_RATE_LIMIT_PAUSE)))
+        except Exception:
+            out[sym] = {}
+    return out
+
+
+def fetch_equity_fundamentals(symbol: str, finnhub_api_key: str = "", eodhd_api_key: str = "") -> Dict[str, object]:
+    """
+    Provider router:
+    - NSE symbols (.NS): EODHD primary -> Finnhub fallback
+    - Others: Finnhub primary -> EODHD fallback
+    """
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return {}
+    if sym.endswith(".NS"):
+        if eodhd_api_key and not is_eodhd_eod_only(eodhd_api_key):
+            e = fetch_eodhd_fundamentals(sym, eodhd_api_key)
+            if e:
+                return e
+        if finnhub_api_key:
+            return fetch_finnhub_fundamentals(sym, finnhub_api_key)
+        return {}
+    if finnhub_api_key:
+        f = fetch_finnhub_fundamentals(sym, finnhub_api_key)
+        if f:
+            return f
+    if eodhd_api_key:
+        return fetch_eodhd_fundamentals(sym, eodhd_api_key)
+    return {}
+
+
+def fetch_equity_fundamentals_batch(
+    symbols: List[str],
+    finnhub_api_key: str = "",
+    eodhd_api_key: str = "",
+) -> Dict[str, Dict[str, object]]:
+    out: Dict[str, Dict[str, object]] = {}
+    for sym in symbols or []:
+        out[sym] = fetch_equity_fundamentals(sym, finnhub_api_key=finnhub_api_key, eodhd_api_key=eodhd_api_key)
+        # Respect free-tier pacing for both providers.
+        pause = max(float(FINNHUB_RATE_LIMIT_PAUSE), float(EODHD_RATE_LIMIT_PAUSE))
+        time.sleep(max(0.0, pause))
+    return out
+
+
+def fetch_equity_stock_news(
+    symbol: str,
+    finnhub_api_key: str = "",
+    eodhd_api_key: str = "",
+    days_back: int = 7,
+) -> pd.DataFrame:
+    sym = str(symbol or "").upper().strip()
+    cols = ["datetime", "headline", "summary", "source", "url"]
+    if not sym:
+        return pd.DataFrame(columns=cols)
+    if sym.endswith(".NS"):
+        if eodhd_api_key and not is_eodhd_eod_only(eodhd_api_key):
+            e = fetch_eodhd_stock_news(sym, eodhd_api_key, days_back=days_back)
+            if not e.empty:
+                return e
+        if finnhub_api_key:
+            return fetch_finnhub_stock_news(sym, finnhub_api_key, days_back=days_back)
+        return pd.DataFrame(columns=cols)
+    if finnhub_api_key:
+        f = fetch_finnhub_stock_news(sym, finnhub_api_key, days_back=days_back)
+        if not f.empty:
+            return f
+    if eodhd_api_key:
+        return fetch_eodhd_stock_news(sym, eodhd_api_key, days_back=days_back)
+    return pd.DataFrame(columns=cols)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def probe_market_data_providers(
+    finnhub_api_key: str = "",
+    eodhd_api_key: str = "",
+    india_symbol_ns: str = "INFY.NS",
+    us_symbol: str = "AAPL",
+) -> Dict[str, object]:
+    """
+    Lightweight provider diagnostics to surface key/network issues in UI.
+    """
+    out: Dict[str, object] = {
+        "finnhub": {"configured": bool(finnhub_api_key), "ok": False, "status_code": None, "message": ""},
+        "eodhd": {"configured": bool(eodhd_api_key), "ok": False, "status_code": None, "message": "", "eod_only": False},
+    }
+
+    if finnhub_api_key:
+        try:
+            url = "https://finnhub.io/api/v1/quote"
+            r = session.get(url, params={"symbol": us_symbol, "token": finnhub_api_key}, timeout=10)
+            out["finnhub"]["status_code"] = int(r.status_code)
+            if r.status_code == 200:
+                out["finnhub"]["ok"] = True
+                out["finnhub"]["message"] = "OK"
+            elif r.status_code == 401:
+                out["finnhub"]["message"] = "Invalid API key"
+            else:
+                out["finnhub"]["message"] = f"HTTP {r.status_code}"
+        except Exception as exc:
+            out["finnhub"]["message"] = f"Network/Error: {exc}"
+
+    if eodhd_api_key:
+        try:
+            last_status = None
+            success_note = None
+            last_resp = None
+            for base_url in _eodhd_base_candidates():
+                for ticker in _eodhd_symbol_candidates(india_symbol_ns):
+                    url = f"{base_url}/api/fundamentals/{ticker}"
+                    r = session.get(
+                        url,
+                        params={"api_token": eodhd_api_key.strip(), "fmt": "json"},
+                        headers=_eodhd_headers(),
+                        timeout=10,
+                    )
+                    last_resp = r
+                    last_status = int(r.status_code)
+                    if r.status_code == 200:
+                        out["eodhd"]["ok"] = True
+                        out["eodhd"]["status_code"] = 200
+                        success_note = f"OK via {base_url} / {ticker}"
+                        break
+                if out["eodhd"]["ok"]:
+                    break
+            if out["eodhd"]["ok"]:
+                out["eodhd"]["message"] = success_note or "OK"
+            else:
+                out["eodhd"]["status_code"] = last_status
+                if last_status == 401:
+                    out["eodhd"]["message"] = "Invalid API key"
+                elif last_status == 403:
+                    detail = _extract_error_message(last_resp) if last_resp is not None else ""
+                    out["eodhd"]["eod_only"] = _is_eodhd_eod_only_message(detail)
+                    out["eodhd"]["message"] = (
+                        "Forbidden (key plan/entitlement or endpoint blocking). "
+                        + detail
+                    ).strip()
+                else:
+                    detail = _extract_error_message(last_resp) if last_resp is not None else ""
+                    out["eodhd"]["message"] = f"HTTP {last_status}" + (f" - {detail}" if detail else "")
+        except Exception as exc:
+            out["eodhd"]["message"] = f"Network/Error: {exc}"
+
+    return out
 
 
 # ==================== INDIA VIX FETCHING ====================

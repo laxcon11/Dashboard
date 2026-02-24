@@ -82,7 +82,10 @@ project/
 │   ├── 9_Prediction_Integrity.py
 │   ├── 10_Scoring_Audit.py
 │   ├── 11_Tradable_Universe.py
-│   └── 12_Todo_Tracker.py
+│   ├── 12_Todo_Tracker.py
+│   ├── 13_India_Macro_Context.py
+│   ├── 14_News_Feed.py
+│   └── 15_Stock_Fundamentals.py
 │
 ├── requirements.txt
 ├── .env.example
@@ -134,6 +137,9 @@ The dashboard will open in your browser.
 * Yahoo Finance (market data)
 * FRED (liquidity and macro data)
 * NSE India (VIX and indices)
+* RSS feeds (India/global market headlines)
+* EODHD (EOD market profile data, plan-dependent)
+* Finnhub (fundamentals/news, plan/key-dependent)
 
 ---
 

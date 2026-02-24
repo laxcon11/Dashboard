@@ -27,6 +27,7 @@ from utils import (
     get_ui_detail_mode,
     render_source_freshness,
     render_regime_timeline_strip,
+    render_decision_header,
 )
 from analytics import round_percentages_sum_to_100
 
@@ -612,27 +613,35 @@ elif regime == "🔴 Risk Off" and confidence >= 0.65:
 else:
     bias = "Selective / Reduced Risk"
 
-st.subheader("📊 Regime Overview")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Macro Directional", f"{macro_result['directional_norm']:+.2f}")
-    st.caption(f"Impulse: {macro_result['impulse_norm']:+.2f} | Valid: {macro_result['valid']}/{macro_result['enabled']}")
-with col2:
-    st.metric("Liquidity Directional", f"{liquidity_result['directional_norm']:+.2f}")
-    liq_caption = f"Impulse: {liquidity_result['impulse_norm']:+.2f} | Valid: {liquidity_result['valid']}/{liquidity_result['enabled']}"
-    if sofr_penalty.get("applied", 0.0) > 0 and sofr_penalty.get("spread_bps") is not None:
-        liq_caption += (
-            f" | SOFR-IORB: {sofr_penalty['spread_bps']:+.1f} bps | "
-            f"Penalty: -{sofr_penalty['applied']:.2f}"
+render_decision_header(
+    regime_label=regime,
+    final_score=final_score,
+    confidence=confidence,
+    bias=bias,
+    source="macro_risk_live",
+)
+
+with st.expander("📊 Regime Overview (Details)", expanded=False):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Macro Directional", f"{macro_result['directional_norm']:+.2f}")
+        st.caption(f"Impulse: {macro_result['impulse_norm']:+.2f} | Valid: {macro_result['valid']}/{macro_result['enabled']}")
+    with col2:
+        st.metric("Liquidity Directional", f"{liquidity_result['directional_norm']:+.2f}")
+        liq_caption = f"Impulse: {liquidity_result['impulse_norm']:+.2f} | Valid: {liquidity_result['valid']}/{liquidity_result['enabled']}"
+        if sofr_penalty.get("applied", 0.0) > 0 and sofr_penalty.get("spread_bps") is not None:
+            liq_caption += (
+                f" | SOFR-IORB: {sofr_penalty['spread_bps']:+.1f} bps | "
+                f"Penalty: -{sofr_penalty['applied']:.2f}"
+            )
+        st.caption(liq_caption)
+    with col3:
+        st.metric("Final Directional", f"{final_directional:+.2f}")
+        st.caption(f"Final Impulse: {final_impulse:+.2f} | Confidence: {confidence:.0%}")
+        st.caption(
+            f"Formula: ({macro_weight:.2f} x {macro_result['directional_norm']:+.2f}) + "
+            f"({liquidity_weight:.2f} x {liquidity_result['directional_norm']:+.2f}) = {final_directional:+.2f}"
         )
-    st.caption(liq_caption)
-with col3:
-    st.metric("Final Directional", f"{final_directional:+.2f}")
-    st.caption(f"Final Impulse: {final_impulse:+.2f} | Confidence: {confidence:.0%}")
-    st.caption(
-        f"Formula: ({macro_weight:.2f} x {macro_result['directional_norm']:+.2f}) + "
-        f"({liquidity_weight:.2f} x {liquidity_result['directional_norm']:+.2f}) = {final_directional:+.2f}"
-    )
 
 if regime_color == "success":
     st.success(f"### {regime}")
@@ -775,14 +784,14 @@ with st.expander("🇮🇳 India Domestic Risk (Context Only - Not Scored Yet)",
         "They are not included in regime score yet."
     )
 
-st.subheader("🎯 Regime Probabilities")
-p1, p2, p3 = st.columns(3)
-disp_risk_on, disp_neutral, disp_risk_off = round_percentages_sum_to_100(
-    [p_risk_on, p_neutral, p_risk_off]
-)
-p1.metric("Risk On", f"{disp_risk_on}%")
-p2.metric("Neutral", f"{disp_neutral}%")
-p3.metric("Risk Off", f"{disp_risk_off}%")
+with st.expander("🎯 Regime Probabilities", expanded=False):
+    p1, p2, p3 = st.columns(3)
+    disp_risk_on, disp_neutral, disp_risk_off = round_percentages_sum_to_100(
+        [p_risk_on, p_neutral, p_risk_off]
+    )
+    p1.metric("Risk On", f"{disp_risk_on}%")
+    p2.metric("Neutral", f"{disp_neutral}%")
+    p3.metric("Risk Off", f"{disp_risk_off}%")
 
 # Publish canonical regime payload for cross-page consistency.
 regime_payload = {
@@ -1170,6 +1179,7 @@ with st.expander("💼 FII / DII Flows", expanded=False):
             cur_month = as_of.to_period("M")
             cur_daily = hist_df[hist_df["date"].dt.to_period("M") == cur_month].copy()
             if not cur_daily.empty:
+                cur_daily = cur_daily.sort_values("date", ascending=False)
                 st.markdown("#### 📆 Current Month (Daily FII/DII Net)")
                 cur_view = cur_daily.copy()
                 cur_view["Date"] = cur_view["date"].dt.strftime("%Y-%m-%d")
@@ -1209,7 +1219,7 @@ with st.expander("💼 FII / DII Flows", expanded=False):
                 mshow["Net"] = mshow["NetValue"].map(lambda x: f"₹{x:,.0f}")
                 mshow["Regime"] = mshow["NetValue"].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
                 mshow["RegimeChange"] = mshow["Regime"].ne(mshow["Regime"].shift(1)).fillna(False)
-                out = mshow[["Month", "Net", "RegimeChange"]].copy()
+                out = mshow[["Month", "Net", "RegimeChange"]].copy().sort_values("Month", ascending=False)
 
                 def _style_regime_change(row):
                     if bool(row["RegimeChange"]):

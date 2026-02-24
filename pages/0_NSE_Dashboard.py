@@ -18,6 +18,7 @@ import numpy as np
 from pathlib import Path
 import logging
 import time
+import importlib.util
 
 # Import from shared modules
 from config import (
@@ -32,8 +33,11 @@ from config import (
     GIFT_NIFTY_DASHBOARD_CARD,
     GIFT_NIFTY_SESSION_START_IST_HOUR,
     GIFT_NIFTY_COLLAPSE_IST_HOUR,
+    EODHD_API_KEY,
+    FINNHUB_API_KEY,
 )
 from gift_nifty import get_gift_nifty_snapshot, is_gift_session_active
+from trading_calendar import is_nse_trading_day
 
 # Import NSE-specific config
 from NSE_Config import (
@@ -44,7 +48,12 @@ from NSE_Config import (
     NIFTY_200
 )
 
-from data_fetch import batch_download, extract_price_data, get_last_batch_telemetry
+from data_fetch import (
+    batch_download,
+    extract_price_data,
+    get_last_batch_telemetry,
+    fetch_equity_fundamentals,
+)
 from indicators import calculate_rsi, calculate_ema, calculate_atr
 
 # Import analytics for centralized logic
@@ -61,6 +70,7 @@ from utils import (
     get_live_price_safe,
     render_key_observations,
     get_ui_detail_mode,
+    render_decision_header,
 )
 
 # ==================== LOGGING ====================
@@ -85,6 +95,7 @@ _perf: dict[str, float] = {}
 
 st.title("🚀 NSE Dashboard Launcher")
 st.caption("Advanced swing trading analysis for Indian markets - NIFTY 200 Coverage")
+render_decision_header(source="macro_ssot")
 
 if GIFT_NIFTY_DASHBOARD_CARD and is_gift_session_active(
     session_start_hour=GIFT_NIFTY_SESSION_START_IST_HOUR,
@@ -857,9 +868,37 @@ elif mode == "Full Analysis":
             avg_vol = df['Volume'].tail(20).mean()
             st.write(f"**Avg Volume (20D)**: {avg_vol/1000000:.2f}M")
 
+        with st.expander("🏛️ Fundamentals (EODHD/Finnhub)", expanded=False):
+            if not FINNHUB_API_KEY and not EODHD_API_KEY:
+                st.caption("No fundamentals provider configured (set EODHD_API_KEY and/or FINNHUB_API_KEY).")
+            elif FINNHUB_API_KEY and importlib.util.find_spec("finnhub") is None and not EODHD_API_KEY:
+                st.caption("finnhub-python not installed in active environment.")
+            else:
+                f = fetch_equity_fundamentals(
+                    selected_stock,
+                    finnhub_api_key=FINNHUB_API_KEY,
+                    eodhd_api_key=EODHD_API_KEY,
+                )
+                if not f:
+                    st.caption("Fundamentals unavailable for this symbol right now.")
+                else:
+                    fc1, fc2, fc3, fc4 = st.columns(4)
+                    with fc1:
+                        pe = f.get("peBasicExclExtraTTM")
+                        st.metric("P/E", "N/A" if pe is None else f"{float(pe):.2f}")
+                    with fc2:
+                        eps = f.get("epsBasicExclExtraItemsTTM")
+                        st.metric("EPS (TTM)", "N/A" if eps is None else f"{float(eps):.2f}")
+                    with fc3:
+                        beta = f.get("beta")
+                        st.metric("Beta", "N/A" if beta is None else f"{float(beta):.2f}")
+                    with fc4:
+                        de = f.get("debtEquityAnnual")
+                        st.metric("Debt/Equity", "N/A" if de is None else f"{float(de):.2f}")
+
         # Smart Trade Planner (moved below chart section)
         st.markdown("---")
-        with st.expander("🛡️ Smart Trade Planner (Risk/Reward Calculator)", expanded=True):
+        with st.expander("🛡️ Smart Trade Planner (Risk/Reward Calculator)", expanded=False):
             avg_range = calculate_atr(df, 14).iloc[-1]
 
             p_col1, p_col2, p_col3 = st.columns(3)
@@ -1722,7 +1761,7 @@ elif mode == "Swing Rankings":
         hist = pd.DataFrame(columns=snapshot_cols)
 
     def _is_trading_day(d: pd.Timestamp) -> bool:
-        return int(d.weekday()) < 5
+        return bool(is_nse_trading_day(d))
 
     def _calc_streak(date_set: set[pd.Timestamp], ordered_dates: list[pd.Timestamp], current_d: pd.Timestamp) -> int:
         if current_d not in date_set or current_d not in ordered_dates:
