@@ -1,6 +1,8 @@
+import math
 import streamlit as st
 
 from regime_model import load_regime_settings, save_regime_settings, reset_regime_settings
+from regime_state import load_regime_snapshot
 from utils import setup_page, get_ui_detail_mode
 
 
@@ -41,6 +43,50 @@ with col3:
     blend["risk_on_threshold"] = st.slider("Risk On Probability Threshold", 0.40, 0.90, float(blend["risk_on_threshold"]), 0.01)
 with col4:
     blend["risk_off_threshold"] = st.slider("Risk Off Probability Threshold", 0.40, 0.90, float(blend["risk_off_threshold"]), 0.01)
+
+st.subheader("SOFR/IORB Stress Penalty")
+col5, col6 = st.columns(2)
+with col5:
+    blend["sofr_iorb_penalty_enabled"] = st.checkbox(
+        "Enable SOFR/IORB penalty",
+        value=bool(blend.get("sofr_iorb_penalty_enabled", True)),
+    )
+    blend["sofr_iorb_warn_bps"] = st.slider(
+        "Penalty starts above (bps)",
+        1.0,
+        20.0,
+        float(blend.get("sofr_iorb_warn_bps", 5.0)),
+        0.5,
+    )
+    blend["sofr_iorb_full_penalty_bps"] = st.slider(
+        "Full penalty at (bps)",
+        5.0,
+        50.0,
+        float(blend.get("sofr_iorb_full_penalty_bps", 15.0)),
+        0.5,
+    )
+with col6:
+    blend["sofr_iorb_max_penalty"] = st.slider(
+        "Max Liquidity Penalty",
+        0.05,
+        0.50,
+        float(blend.get("sofr_iorb_max_penalty", 0.25)),
+        0.01,
+    )
+    blend["sofr_iorb_persistence_days"] = st.slider(
+        "Persistence Days (escalation)",
+        1,
+        10,
+        int(blend.get("sofr_iorb_persistence_days", 3)),
+        1,
+    )
+    blend["sofr_iorb_persisted_max_penalty"] = st.slider(
+        "Persisted Max Penalty",
+        0.05,
+        0.60,
+        float(blend.get("sofr_iorb_persisted_max_penalty", 0.35)),
+        0.01,
+    )
 
 st.subheader("Group Caps")
 gc1, gc2, gc3 = st.columns(3)
@@ -88,6 +134,41 @@ def render_factor_controls(domain_key: str, title: str):
 render_factor_controls("macro_factors", "Macro Factors")
 render_factor_controls("liquidity_factors", "Liquidity Factors")
 
+st.subheader("Live Preview")
+snapshot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
+if isinstance(snapshot, dict) and snapshot:
+    final_score = float(snapshot.get("final_score", 0.0) or 0.0)
+    k = 3.0
+    neutral_band = float(blend.get("neutral_band", 0.30))
+    risk_on_threshold = float(blend.get("risk_on_threshold", 0.60))
+    risk_off_threshold = float(blend.get("risk_off_threshold", 0.60))
+    risk_on_raw = math.exp(k * (final_score - neutral_band))
+    risk_off_raw = math.exp(k * (-final_score - neutral_band))
+    neutral_raw = math.exp(k * (neutral_band - abs(final_score)))
+    total = risk_on_raw + risk_off_raw + neutral_raw
+    p_on = risk_on_raw / total if total > 0 else 0.0
+    p_off = risk_off_raw / total if total > 0 else 0.0
+    p_neu = neutral_raw / total if total > 0 else 1.0
+
+    if p_on >= risk_on_threshold and p_on > p_off and p_on > p_neu:
+        preview_regime = "🟢 Risk On"
+    elif p_off >= risk_off_threshold and p_off > p_on and p_off > p_neu:
+        preview_regime = "🔴 Risk Off"
+    else:
+        preview_regime = "🟡 Neutral"
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Preview Regime", preview_regime)
+    p2.metric("Preview P(Risk On)", f"{p_on:.0%}")
+    p3.metric("Preview P(Neutral)", f"{p_neu:.0%}")
+    p4.metric("Preview P(Risk Off)", f"{p_off:.0%}")
+    st.caption(
+        f"Preview uses latest Macro SSOT score {final_score:+.3f} with current unsaved thresholds/band. "
+        "Weight changes require save + Macro Risk recompute for full effect."
+    )
+else:
+    st.info("No Macro SSOT snapshot found yet. Open Macro Risk page once, then return for live preview.")
+
 st.markdown("---")
 btn1, btn2, btn3 = st.columns(3)
 with btn1:
@@ -103,3 +184,5 @@ with btn3:
         st.rerun()
 
 st.caption("`On` = include factor, `Inv` = inverse logic (higher value treated bearish), `Group` = cap bucket for anti-bias constraints.")
+st.caption("SOFR/IORB penalty is applied to Liquidity directional/impulse (bounded; escalates only after configured persistence).")
+st.caption("Design note: SOFR/IORB currently contributes both as a continuous liquidity factor and as an explicit stress penalty layer (intentional dual-path).")

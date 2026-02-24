@@ -250,6 +250,7 @@ Reference settings source: `notes/regime_settings.json` (current values as of 20
 | `blend.neutral_band` | 0.35 | Avoids over-classification into Risk On/Risk Off when signal is weak. | Narrower band increases regime flips; wider band increases Neutral frequency. | If Neutral bucket underperforms directional buckets for 30+ matured predictions. |
 | `blend.risk_on_threshold` | 0.60 | Requires stronger posterior to classify pro-risk. | Lowering increases Risk On labels, potentially early entries. | If missed upside cycles dominate and Brier/log-loss improve after simulation. |
 | `blend.risk_off_threshold` | 0.60 | Symmetric confidence requirement for risk-off classification. | Lowering increases defensive labels and can reduce participation. | If drawdown protection is weak despite bearish macro/liquidity evidence. |
+| `blend.sofr_iorb_*` penalty controls | warn=5bps, full=15bps, max=0.25, persisted=0.35, days=3 | Adds interbank stress override to Liquidity directional/impulse when SOFR exceeds IORB. | Higher max/earlier trigger increases defensive tilt during funding stress. | If penalty causes false risk-off bias without drawdown benefit over 2+ calibration cycles. |
 | `blend.max_factor_weight` | 0.20 | Prevents one factor from dominating domain output. | Raising increases concentration risk; lowering can over-dilute high-quality signals. | If single-factor contribution repeatedly exceeds governance tolerance. |
 | `blend.fast_window` | 1 | Captures immediate move for impulse channel. | Increasing reduces sensitivity to daily shocks. | If daily impulse noise causes repeated false tactical calls. |
 | `blend.slow_window` | 10 | Balances trend responsiveness and stability. | Larger window smoother but slower; smaller window noisier. | If directional lag or whipsaw rises across 2 calibration cycles. |
@@ -259,6 +260,7 @@ Reference settings source: `notes/regime_settings.json` (current values as of 20
 
 Governance note:
 - Any parameter change should be proposal-driven via prediction calibration workflow and documented with pre/post evidence.
+- SOFR/IORB is an intentional dual-path signal today: it contributes as a continuous liquidity factor and can also trigger explicit stress penalty adjustments.
 
 ---
 
@@ -310,4 +312,3 @@ Block strategy-setting changes when any of the following is true:
 - If you change regime thresholds, review `0) Engine Join Map` first.
 - If you change gate thresholds, annotate rationale in calibration proposal comments.
 - If you change any judgment parameter without proposal flow, update this document in the same commit.
-

@@ -24,6 +24,7 @@ from data_fetch import batch_download, extract_price_data
 SNAPSHOT_DIR = Path("data/snapshots")
 JOURNAL_FILE = Path("notes/trading_journal.csv")
 ALERT_FILE = Path("logs/alerts.log")
+STATE_FILE = Path("logs/alert_engine_state.json")
 ALERT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -39,13 +40,54 @@ def append_alert(msg: str) -> None:
     print(msg)
 
 
+def load_state() -> dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def save_state(state: dict) -> None:
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def compact_alert_log() -> None:
+    if not ALERT_FILE.exists():
+        return
+    try:
+        lines = ALERT_FILE.read_text().splitlines()
+    except Exception:
+        return
+    deduped: dict[tuple[str, str], str] = {}
+    order: list[tuple[str, str]] = []
+    for line in lines:
+        if "] " not in line:
+            continue
+        left, msg = line.split("] ", 1)
+        ts = left.lstrip("[")
+        day = ts[:10] if len(ts) >= 10 else "unknown"
+        key = (day, msg.strip())
+        if key not in deduped:
+            order.append(key)
+        deduped[key] = line
+    rewritten = [deduped[k] for k in order]
+    ALERT_FILE.write_text("\n".join(rewritten) + ("\n" if rewritten else ""))
+
+
 def main() -> int:
+    compact_alert_log()
     snaps = load_snapshots()
     if len(snaps) < 1:
         print("No EOD snapshots found.")
         return 0
 
-    if len(snaps) >= 2:
+    state = load_state()
+    cur_snap = snaps[-1].name
+    snapshot_already_logged = state.get("last_snapshot_logged") == cur_snap
+
+    if len(snaps) >= 2 and not snapshot_already_logged:
         prev = json.loads(snaps[-2].read_text())
         cur = json.loads(snaps[-1].read_text())
         if prev.get("regime") != cur.get("regime"):
@@ -55,6 +97,9 @@ def main() -> int:
         if movers:
             top = movers[0]
             append_alert(f"Top setup trigger candidate: {top['symbol']} ({top['change_pct']:+.2f}%)")
+            for mover in movers[1:3]:
+                append_alert(f"Also flagged: {mover['symbol']} ({mover['change_pct']:+.2f}%)")
+        state["last_snapshot_logged"] = cur_snap
 
     # Invalidation breach checks
     if JOURNAL_FILE.exists():
@@ -79,6 +124,7 @@ def main() -> int:
                     breached = (side == "LONG" and ltp <= invalidation) or (side == "SHORT" and ltp >= invalidation)
                     if breached:
                         append_alert(f"Invalidation breach: {sym} LTP {ltp:.2f} vs invalidation {invalidation:.2f} ({side})")
+    save_state(state)
     return 0
 
 

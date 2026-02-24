@@ -74,11 +74,20 @@ project/
 │   ├── 1_Global_Markets.py
 │   ├── 2_Money_Supply.py
 │   ├── 3_Macro_Risk.py
-│   ├── 3_Macro_Risk.py
 │   ├── 4_Leading_Indicators.py
-│   └── 5_Trading_Journal.py
+│   ├── 5_Trading_Journal.py
+│   ├── 6_Regime_Settings.py
+│   ├── 7_Portfolio_Risk.py
+│   ├── 8_Ops_Automation.py
+│   ├── 9_Prediction_Integrity.py
+│   ├── 10_Scoring_Audit.py
+│   ├── 11_Tradable_Universe.py
+│   └── 12_Todo_Tracker.py
 │
 ├── requirements.txt
+├── .env.example
+├── docs/
+│   └── SCORING_LOGIC.md
 
 └── README.md
 ```
@@ -102,10 +111,10 @@ pip install -r requirements.txt
 
 ### 3. Set environment variables
 
-Create a `.env` file:
+Create a `.env` file from template:
 
 ```
-FRED_API_KEY=your_api_key_here
+cp .env.example .env
 ```
 
 ---
@@ -163,6 +172,10 @@ Not investment advice.
 
 Detailed scoring and governance logic:
 - `docs/SCORING_LOGIC.md`
+
+Recommended onboarding docs:
+- `docs/USER_GUIDE.md`
+- `docs/WORKFLOW.md`
 
 ---
 

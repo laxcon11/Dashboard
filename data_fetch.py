@@ -493,6 +493,18 @@ def _is_after_bhav_eod_cutoff_ist() -> bool:
         return False
 
 
+def _is_nse_market_hours_ist() -> bool:
+    """True during regular NSE cash session (Mon-Fri, 09:15-15:30 IST)."""
+    try:
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if now_ist.weekday() >= 5:
+            return False
+        mins = (now_ist.hour * 60) + now_ist.minute
+        return (9 * 60 + 15) <= mins <= (15 * 60 + 30)
+    except Exception:
+        return False
+
+
 def _business_day_age(last_date: Optional[pd.Timestamp], ref_date: Optional[pd.Timestamp] = None) -> Optional[int]:
     """Business-day gap between last_date and ref_date."""
     if last_date is None or pd.isna(last_date):
@@ -770,6 +782,13 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
                 source_map[symbol] = "LOCAL"
                 max_date = local_df.index.max().normalize()
                 if max_date < latest_bd:
+                    symbols_for_api.append(symbol)
+                elif (
+                    _is_nse_equity_symbol(symbol)
+                    and max_date == latest_bd
+                    and _is_nse_market_hours_ist()
+                ):
+                    # During live market hours, refresh today's bar from API every cache cycle.
                     symbols_for_api.append(symbol)
             else:
                 symbols_for_api.append(symbol)

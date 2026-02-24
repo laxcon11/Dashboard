@@ -126,8 +126,6 @@ TEXTILE_STOCKS = [
     'PAGEIND.NS',
 ]
 
-DIVERSIFIED_STOCKS = [] # Placeholder if needed
-
 # ==================== F&O EXPANSION ====================
 # Delta = symbols in currently traded F&O universe not yet part of the current core list
 FNO_DELTA_STOCKS = [
@@ -185,7 +183,7 @@ SECTOR_CATEGORIES = {
     '🏘️ Real Estate': REALTY_STOCKS,
     '💼 Services': SERVICES_STOCKS,
     '📱 Telecom': TELECOM_STOCKS,
-    '裙 Textiles': TEXTILE_STOCKS,
+    '🧵 Textiles': TEXTILE_STOCKS,
 }
 
 THEMATIC_CATEGORIES = {

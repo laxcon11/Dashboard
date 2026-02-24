@@ -12,6 +12,7 @@ import pandas as pd
 
 from config import FRED_SERIES, FRED_API_KEY, LIQUIDITY_THRESHOLDS
 from data_fetch import fetch_fred_series, batch_download
+from india_context import get_india_context_signals
 
 from utils import setup_page, render_key_observations, get_ui_detail_mode
 
@@ -236,9 +237,7 @@ with col_l:
 
 with col_r:
     if alerts:
-        st.subheader("🚨 Key Observations")
-        for alert in alerts:
-            st.info(alert)
+        render_key_observations(alerts, title="🔎 Key Observations")
     else:
         st.subheader("✅ Alert Status")
         st.write("Liquidity plumbing appears stable.")
@@ -319,6 +318,48 @@ if view_mode == "Detail":
     if meta_rows:
         st.markdown("#### Source & Freshness")
         st.dataframe(pd.DataFrame(meta_rows), width="stretch", hide_index=True)
+
+with st.expander("🇮🇳 India Domestic Cross-Check (Context Only - Not in Liquidity Score)", expanded=False):
+    ctx = get_india_context_signals()
+    flows = ctx.get("flows", {})
+    vix_ctx = ctx.get("vix", {})
+    breadth_ctx = ctx.get("breadth", {})
+    curve_ctx = ctx.get("curve", {})
+    gst_ctx = ctx.get("gst", {})
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        fii = flows.get("fii_net")
+        dii = flows.get("dii_net")
+        st.metric("FII / DII Net (Daily)", "N/A" if fii is None else f"{fii:,.0f} / {dii:,.0f} Cr")
+        st.caption(f"{flows.get('status', 'STALE')} | {flows.get('as_of', 'N/A')}")
+    with c2:
+        dom = flows.get("fii_dii_dominance")
+        st.metric("FII Dominance", "N/A" if dom is None else f"{dom:+.2f}")
+        st.caption("FII/(|FII|+|DII|)")
+    with c3:
+        vix_val = vix_ctx.get("value")
+        st.metric("India VIX", "N/A" if vix_val is None else f"{vix_val:.2f}")
+        st.caption(f"{vix_ctx.get('status', 'STALE')} | {vix_ctx.get('source', 'NSE')}")
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.metric(
+            "A/D Breadth",
+            f"{breadth_ctx.get('advances', 'N/A')}:{breadth_ctx.get('declines', 'N/A')}",
+            None if breadth_ctx.get("ratio") is None else f"{float(breadth_ctx.get('ratio')):.2f}",
+        )
+        st.caption(f"{breadth_ctx.get('status', 'STALE')} | {breadth_ctx.get('as_of', 'N/A')}")
+    with d2:
+        curve_value = curve_ctx.get("value")
+        st.metric("India Curve (10Y-3M)", "N/A" if curve_value is None else f"{float(curve_value):+.2f}")
+        st.caption(f"{curve_ctx.get('status', 'UNAVAILABLE')} | {curve_ctx.get('source', 'pending')}")
+    with d3:
+        gst_yoy = gst_ctx.get("gst_yoy")
+        st.metric("GST YoY", "N/A" if gst_yoy is None else f"{float(gst_yoy):+.1f}%")
+        st.caption(f"{gst_ctx.get('status', 'UNAVAILABLE')} | {gst_ctx.get('source', 'pending')}")
+
+    st.info("Cross-check only. These India-specific signals are not part of Liquidity score in Phase A.")
 
 st.markdown("---")
 st.caption("Data source: FRED for liquidity series; US 10Y synchronized to Yahoo ^TNX (same as other dashboards). Values: WALCL/TGA in $M, RRP in $B, SOFR/Rates in %. | Net Liquidity View.")

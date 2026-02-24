@@ -21,6 +21,7 @@ from prediction_integrity.store import (
     read_json,
     write_json,
 )
+from regime_state import load_regime_snapshot
 from utils import get_ui_detail_mode, setup_page
 
 MIN_SAMPLE_BY_HORIZON = {1: 20, 5: 12, 20: 8}
@@ -60,6 +61,18 @@ with m3:
 with m4:
     acc = float(pd.to_numeric(outs.get("regime_correct"), errors="coerce").mean()) if not outs.empty else float("nan")
     st.metric("Regime Hit Rate", "N/A" if pd.isna(acc) else f"{acc:.1%}")
+
+ssot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
+if isinstance(ssot, dict) and ssot:
+    probs = ssot.get("probabilities", {}) if isinstance(ssot.get("probabilities", {}), dict) else {}
+    st.caption(
+        f"Current Macro SSOT: {ssot.get('regime_label', 'Unknown')} | "
+        f"Confidence {float(ssot.get('confidence', 0.0) or 0.0):.0%} | "
+        f"Score {float(ssot.get('final_score', 0.0) or 0.0):+.2f} | "
+        f"P(On/N/Off): {float(probs.get('risk_on', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('neutral', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('risk_off', 0.0) or 0.0):.0%}"
+    )
 
 st.subheader("Sample Sufficiency")
 if outs.empty:

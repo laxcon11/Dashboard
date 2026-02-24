@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import logging
 import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from indicators import calculate_rsi, calculate_ema, calculate_atr
 from config import BREAKOUT_WINDOW
 
@@ -40,19 +42,57 @@ def detect_gap(df):
     return 0, 0
 
 
-def calculate_volume_ratio(df) -> float:
-    """Calculate volume ratio compared to 20-day average"""
+def _nse_market_progress_ist(now_ist: datetime | None = None) -> float:
+    """Return session progress fraction in [0,1] for NSE regular hours."""
+    if now_ist is None:
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    if now_ist.weekday() >= 5:
+        return 1.0
+    start = (9 * 60) + 15
+    end = (15 * 60) + 30
+    cur = (now_ist.hour * 60) + now_ist.minute
+    if cur <= start:
+        return 0.0
+    if cur >= end:
+        return 1.0
+    return (cur - start) / (end - start)
+
+
+def calculate_volume_ratio(df, adjust_live: bool = False) -> float:
+    """Calculate volume ratio vs prior 20 sessions. Optionally adjust for live session progress."""
     if df is None or len(df) < 20:
         return 0
 
     try:
-        avg_vol = df['Volume'].tail(20).mean()
+        vol = pd.to_numeric(df['Volume'], errors="coerce").dropna()
+        if vol.empty:
+            return 0
+        if len(vol) >= 21:
+            avg_vol = vol.iloc[-21:-1].mean()
+        else:
+            avg_vol = vol.tail(20).mean()
         latest_vol = df['Volume'].iloc[-1]
 
         if avg_vol == 0 or pd.isna(avg_vol):
             return 0
 
-        return latest_vol / avg_vol
+        raw_ratio = float(latest_vol / avg_vol)
+        if not adjust_live:
+            return raw_ratio
+
+        # Live-session adjustment: extrapolate today's partial volume by elapsed market time.
+        last_idx = pd.to_datetime(df.index[-1], errors="coerce")
+        if pd.isna(last_idx):
+            return raw_ratio
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if last_idx.date() != now_ist.date():
+            return raw_ratio
+
+        progress = _nse_market_progress_ist(now_ist)
+        if progress <= 0.05 or progress >= 1.0:
+            return raw_ratio
+        expected_eod_vol = float(latest_vol) / max(progress, 0.05)
+        return expected_eod_vol / float(avg_vol)
     except Exception as exc:
         logger.debug("calculate_volume_ratio failed: %s", exc)
         return 0

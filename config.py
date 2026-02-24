@@ -22,7 +22,6 @@ if not FRED_API_KEY:
 MAIN_INDICES = {
     '^NSEI': 'NIFTY 50',
     '^NSEBANK': 'BANK NIFTY',
-    'NIFTY_MIDCAP_100.NS': 'NIFTY MIDCAP',
     '^CNXSC': 'NIFTY SMALLCAP',
     '^CNXIT': 'NIFTY IT'
 }
@@ -265,6 +264,33 @@ BHAVCOPY_MAX_FILES_PER_DIR = int(os.getenv("BHAVCOPY_MAX_FILES_PER_DIR", "200"))
 # - After cutoff IST: overwrite latest NSE day from Bhavcopy for parity with exchange close
 BHAVCOPY_EOD_RECONCILE_ENABLED = os.getenv("BHAVCOPY_EOD_RECONCILE_ENABLED", "1") == "1"
 BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR = int(os.getenv("BHAVCOPY_EOD_RECONCILE_CUTOFF_IST_HOUR", "20"))
+
+# ==================== GIFT NIFTY OVERLAY (DISPLAY/ALERT ONLY) ====================
+
+# Feature flags (default ON for operational readiness)
+GIFT_NIFTY_DASHBOARD_CARD = os.getenv("GIFT_NIFTY_DASHBOARD_CARD", "1") == "1"
+GIFT_NIFTY_INV_PREFLAG = os.getenv("GIFT_NIFTY_INV_PREFLAG", "1") == "1"
+GIFT_NIFTY_MACRO_BADGE = os.getenv("GIFT_NIFTY_MACRO_BADGE", "1") == "1"
+
+# Data source options:
+# - API URL: optional endpoint returning JSON with price/timestamp fields.
+# - Local snapshot: optional broker-fed local JSON fallback.
+GIFT_NIFTY_API_URL = os.getenv("GIFT_NIFTY_API_URL", "").strip()
+GIFT_NIFTY_API_KEY = os.getenv("GIFT_NIFTY_API_KEY", "").strip()
+GIFT_NIFTY_LOCAL_SNAPSHOT = os.getenv("GIFT_NIFTY_LOCAL_SNAPSHOT", "./notes/gift_nifty_snapshot.json").strip()
+GIFT_NIFTY_GROWW_FALLBACK = os.getenv("GIFT_NIFTY_GROWW_FALLBACK", "1") == "1"
+GIFT_NIFTY_GROWW_URL = os.getenv(
+    "GIFT_NIFTY_GROWW_URL",
+    "https://groww.in/indices/global-indices/sgx-nifty",
+).strip()
+GIFT_NIFTY_MONEYCONTROL_FALLBACK = os.getenv("GIFT_NIFTY_MONEYCONTROL_FALLBACK", "0") == "1"
+GIFT_NIFTY_MONEYCONTROL_URL = os.getenv("GIFT_NIFTY_MONEYCONTROL_URL", "").strip()
+
+# Display behavior
+GIFT_NIFTY_SESSION_START_IST_HOUR = int(os.getenv("GIFT_NIFTY_SESSION_START_IST_HOUR", "16"))
+GIFT_NIFTY_COLLAPSE_IST_HOUR = int(os.getenv("GIFT_NIFTY_COLLAPSE_IST_HOUR", "10"))
+GIFT_NIFTY_FLAT_THRESHOLD_PCT = float(os.getenv("GIFT_NIFTY_FLAT_THRESHOLD_PCT", "0.5"))
+GIFT_NIFTY_STRESS_FLAG_PCT = float(os.getenv("GIFT_NIFTY_STRESS_FLAG_PCT", "1.0"))
 
 
 # ==================== VALIDATION ====================

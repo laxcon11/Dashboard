@@ -17,6 +17,7 @@ from datetime import datetime
 import numpy as np
 from pathlib import Path
 import logging
+import time
 
 # Import from shared modules
 from config import (
@@ -27,8 +28,12 @@ from config import (
     ATR_PERIOD,
     ATR_MULTIPLIER,
     BREAKOUT_WINDOW,
-    VOLUME_THRESHOLD
+    VOLUME_THRESHOLD,
+    GIFT_NIFTY_DASHBOARD_CARD,
+    GIFT_NIFTY_SESSION_START_IST_HOUR,
+    GIFT_NIFTY_COLLAPSE_IST_HOUR,
 )
+from gift_nifty import get_gift_nifty_snapshot, is_gift_session_active
 
 # Import NSE-specific config
 from NSE_Config import (
@@ -75,9 +80,58 @@ logger = logging.getLogger(__name__)
 # ==================== PAGE CONFIG ====================
 setup_page("NSE Dashboard")
 view_mode = get_ui_detail_mode("Summary")
+_page_t0 = time.perf_counter()
+_perf: dict[str, float] = {}
 
 st.title("🚀 NSE Dashboard Launcher")
 st.caption("Advanced swing trading analysis for Indian markets - NIFTY 200 Coverage")
+
+if GIFT_NIFTY_DASHBOARD_CARD and is_gift_session_active(
+    session_start_hour=GIFT_NIFTY_SESSION_START_IST_HOUR,
+    cutoff_hour=GIFT_NIFTY_COLLAPSE_IST_HOUR,
+):
+    prev_close = None
+    try:
+        pre_mkt = batch_download(["^NSEI"], period="5d")
+        nd = pre_mkt.get("^NSEI")
+        if nd is not None and not nd.empty and "Close" in nd.columns:
+            close = pd.to_numeric(nd["Close"], errors="coerce").dropna()
+            if len(close) >= 1:
+                prev_close = float(close.iloc[-1])
+    except Exception:
+        prev_close = None
+
+    gift = get_gift_nifty_snapshot(prev_nifty_close=prev_close)
+    with st.expander(
+        "🧭 GIFT NIFTY Pre-Open Context",
+        expanded=True,
+    ):
+        if not gift.get("available", False):
+            st.info("GIFT NIFTY feed unavailable. Configure API/local snapshot source first.")
+        else:
+            g1, g2, g3, g4 = st.columns(4)
+            with g1:
+                st.metric("GIFT NIFTY", f"{float(gift.get('price')):,.2f}", None if gift.get("change_pct") is None else f"{float(gift.get('change_pct')):+.2f}%")
+            with g2:
+                prem = gift.get("premium_pct_vs_prev_close")
+                st.metric("Premium/Discount vs Prev Close", "N/A" if prem is None else f"{float(prem):+.2f}%")
+            with g3:
+                st.metric("Implied Gap", str(gift.get("implied_label", "Unknown")))
+            with g4:
+                delay_min = gift.get("delay_min")
+                st.metric("Feed Delay", "N/A" if delay_min is None else f"{float(delay_min):.0f} min")
+            st.caption(
+                f"Source: {gift.get('source', 'N/A')} | As of: {gift.get('as_of_ist', 'N/A')} | "
+                f"Mode: {gift.get('delay_note', 'unknown')} | {gift.get('note', '')}"
+            )
+            if gift.get("unverified", False):
+                st.warning("GIFT source is scrape-based (unverified). Treat as directional context only.")
+            if gift.get("quality_note"):
+                st.caption(f"Normalization: {gift.get('quality_note')}")
+            st.caption(
+                f"Active window: {int(GIFT_NIFTY_SESSION_START_IST_HOUR):02d}:00 IST to "
+                f"{int(GIFT_NIFTY_COLLAPSE_IST_HOUR):02d}:00 IST (next day)."
+            )
 
 # Helper functions have been moved to analytics.py
 
@@ -92,6 +146,8 @@ selection_method = st.sidebar.radio(
 )
 
 selected_stocks = []
+preset = ""
+category = ""
 
 if selection_method == "Preset Watchlists":
     # Dynamic Watchlist Loading
@@ -198,19 +254,32 @@ vwap_map = {
 }
 vwap_days = vwap_map[vwap_period]
 
+st.sidebar.markdown("---")
+st.sidebar.header("📎 RS Benchmark")
+rs_benchmark_mode = st.sidebar.selectbox(
+    "Relative Strength vs",
+    ["NIFTY 50", "Sector Index (if mapped)"],
+    index=0,
+    help="Use sector benchmark when available; otherwise fallback to NIFTY 50.",
+)
+
 # ==================== FETCH DATA ====================
 if not selected_stocks:
     st.warning("⚠️ Please select at least one stock from the sidebar")
     st.stop()
 
 with st.spinner(f"📊 Fetching data for {len(selected_stocks)} stocks..."):
+    _t_fetch = time.perf_counter()
     index_symbols = list(MAIN_INDICES.keys())
-    index_data = batch_download(index_symbols, period="3mo")
-
     sector_symbols = list(NSE_SECTOR_INDICES.keys())
-    sector_data = batch_download(sector_symbols, period="1mo")
+    all_symbols = sorted(set(index_symbols + sector_symbols + selected_stocks))
 
-    watchlist_data = batch_download(selected_stocks, period="3mo")
+    # Single batched pull is faster than multiple overlapping network/cache calls.
+    merged_data = batch_download(all_symbols, period="3mo")
+    index_data = {s: merged_data.get(s) for s in index_symbols}
+    sector_data = {s: merged_data.get(s) for s in sector_symbols}
+    watchlist_data = {s: merged_data.get(s) for s in selected_stocks}
+    _perf["data_fetch_s"] = round(time.perf_counter() - _t_fetch, 3)
 
 # ==================== DATA SOURCE & FRESHNESS ====================
 telemetry_df = get_last_batch_telemetry()
@@ -291,6 +360,7 @@ if mode != "Swing Rankings":
         st.plotly_chart(fig, width='stretch')
 
 # ==================== MODE-SPECIFIC DISPLAYS ====================
+_t_mode = time.perf_counter()
 
 if mode == "Morning Review":
     st.subheader("🌅 Morning Review - Today's Opportunities")
@@ -332,7 +402,7 @@ if mode == "Morning Review":
         if df is not None and len(df) >= 2:
             gap, gap_pct = analytics.detect_gap(df)
             if abs(gap_pct) > 0.5:
-                vol_ratio = analytics.calculate_volume_ratio(df)
+                vol_ratio = analytics.calculate_volume_ratio(df, adjust_live=True)
                 price, change, change_pct = extract_price_data(df)
 
                 stock_info = {
@@ -397,7 +467,7 @@ if mode == "Morning Review":
         df = watchlist_data.get(symbol)
         if analytics.detect_nr7(df):
             price, change, change_pct = get_live_price_safe(symbol, df)
-            vol_ratio = analytics.calculate_volume_ratio(df)
+            vol_ratio = analytics.calculate_volume_ratio(df, adjust_live=True)
             
             nr7_stocks.append({
                 "Symbol": symbol.replace('.NS', ''),
@@ -651,7 +721,7 @@ elif mode == "Full Analysis":
                 st.metric("ATR Stop Loss", "N/A")
 
         with col5:
-            vol_ratio = analytics.calculate_volume_ratio(df)
+            vol_ratio = analytics.calculate_volume_ratio(df, adjust_live=True)
             vol_status = "High" if vol_ratio > 1.5 else ("Low" if vol_ratio < 0.8 else "Normal")
             st.metric("Volume", f"{vol_ratio:.2f}x", vol_status)
 
@@ -839,6 +909,7 @@ elif mode == "Swing Rankings":
             "tier_b": 7.2,
             "min_vol_ratio": 1.0,
             "min_rs": -1.0,
+            "rs_floor_penalty": 0.15,
             "risk_on_breadth": 1.2,
             "risk_off_breadth": 0.85,
             "risk_off_min_score": 9.4,
@@ -851,6 +922,7 @@ elif mode == "Swing Rankings":
             "tier_b": 6.5,
             "min_vol_ratio": 0.8,
             "min_rs": -3.0,
+            "rs_floor_penalty": 0.10,
             "risk_on_breadth": 1.1,
             "risk_off_breadth": 0.9,
             "risk_off_min_score": 9.0,
@@ -863,6 +935,7 @@ elif mode == "Swing Rankings":
             "tier_b": 6.0,
             "min_vol_ratio": 0.6,
             "min_rs": -5.0,
+            "rs_floor_penalty": 0.08,
             "risk_on_breadth": 1.0,
             "risk_off_breadth": 0.95,
             "risk_off_min_score": 8.6,
@@ -913,6 +986,29 @@ elif mode == "Swing Rankings":
         if current < ema20 < ema50:
             return -1
         return 0
+
+    def rs_spread_ema3(symbol_df, benchmark_df) -> float:
+        if symbol_df is None or benchmark_df is None:
+            return 0.0
+        if "Close" not in symbol_df.columns or "Close" not in benchmark_df.columns:
+            return 0.0
+        s_close = pd.to_numeric(symbol_df["Close"], errors="coerce").dropna()
+        b_close = pd.to_numeric(benchmark_df["Close"], errors="coerce").dropna()
+        merged = pd.concat([s_close.rename("s"), b_close.rename("b")], axis=1).dropna()
+        if len(merged) < 8:
+            return 0.0
+        spread = (merged["s"].pct_change() - merged["b"].pct_change()) * 100.0
+        spread = spread.dropna()
+        if spread.empty:
+            return 0.0
+        return float(spread.ewm(span=3, adjust=False).mean().iloc[-1])
+
+    sector_name_to_index = {v: k for k, v in NSE_SECTOR_INDICES.items()}
+    stock_to_sector = {}
+    for sector_label, members in SECTOR_CATEGORIES.items():
+        clean_sector = sector_label.split(" ", 1)[-1] if " " in sector_label else sector_label
+        for s in members:
+            stock_to_sector[s] = clean_sector
 
     regime_score = trend_signal(nifty_df) + trend_signal(bank_df)
     if regime_score >= 1 and breadth_ratio >= cfg["risk_on_breadth"]:
@@ -979,6 +1075,69 @@ elif mode == "Swing Rankings":
     def clip01(v):
         return max(0.0, min(1.0, v))
 
+    def recent_swing_low(series_low, lookback=20):
+        if series_low is None:
+            return np.nan
+        s = pd.to_numeric(series_low, errors="coerce").dropna()
+        if s.empty:
+            return np.nan
+        return float(s.tail(lookback).min())
+
+    def momentum_leg_low(close_series, ema_series, low_series, fallback_lookback=20):
+        c = pd.to_numeric(close_series, errors="coerce")
+        e = pd.to_numeric(ema_series, errors="coerce")
+        l = pd.to_numeric(low_series, errors="coerce")
+        df_leg = pd.concat([c.rename("c"), e.rename("e"), l.rename("l")], axis=1).dropna()
+        if len(df_leg) < 5:
+            return recent_swing_low(low_series, lookback=fallback_lookback)
+        start_idx = None
+        vals_c = df_leg["c"].values
+        vals_e = df_leg["e"].values
+        for i in range(len(df_leg) - 2, 2, -1):
+            # Start leg on EMA20 reclaim only after at least 2 bars below EMA20.
+            if (vals_c[i - 2] <= vals_e[i - 2]) and (vals_c[i - 1] <= vals_e[i - 1]) and (vals_c[i] > vals_e[i]):
+                start_idx = i
+                break
+        if start_idx is None:
+            return recent_swing_low(low_series, lookback=fallback_lookback)
+        leg_low = df_leg["l"].iloc[start_idx:].min()
+        if pd.isna(leg_low):
+            return recent_swing_low(low_series, lookback=fallback_lookback)
+        return float(leg_low)
+
+    def pullback_leg_low(df_local):
+        if df_local is None or df_local.empty or "High" not in df_local.columns or "Low" not in df_local.columns:
+            return np.nan
+        highs = pd.to_numeric(df_local["High"], errors="coerce")
+        lows = pd.to_numeric(df_local["Low"], errors="coerce")
+        w = min(25, len(df_local))
+        if w < 5:
+            return float(lows.dropna().tail(10).min()) if not lows.dropna().empty else np.nan
+        high_window = highs.tail(w)
+        if high_window.dropna().empty:
+            return float(lows.dropna().tail(10).min()) if not lows.dropna().empty else np.nan
+        high_idx = high_window.idxmax()
+        leg_lows = lows.loc[high_idx:]
+        leg_lows = leg_lows.dropna()
+        if leg_lows.empty:
+            return float(lows.dropna().tail(10).min()) if not lows.dropna().empty else np.nan
+        return float(leg_lows.min())
+
+    def prior_support_below(series_low, anchor, bars=60):
+        s = pd.to_numeric(series_low, errors="coerce").dropna().tail(bars)
+        if len(s) < 7 or pd.isna(anchor):
+            return np.nan
+        candidates = []
+        vals = s.values
+        for i in range(2, len(vals) - 2):
+            v = vals[i]
+            if v < vals[i - 1] and v < vals[i + 1] and v < vals[i - 2] and v < vals[i + 2]:
+                if v < anchor:
+                    candidates.append(v)
+        if not candidates:
+            return np.nan
+        return float(max(candidates))
+
     liq_score = 0
     liq_score += 1 if breadth_ratio >= 1.05 else -1
     liq_score += 1 if advances > declines else -1
@@ -1016,6 +1175,16 @@ elif mode == "Swing Rankings":
         f"NIFTY {n_change:+.2f}% | BANKNIFTY {b_change:+.2f}% | Breadth {advances}:{declines} ({breadth_ratio:.2f}).",
     ]
     render_key_observations(swing_observations)
+    with st.expander("📐 Invalidation v2.2 Assumption Spec", expanded=False):
+        st.markdown(
+            "- Momentum leg starts at latest close reclaim above EMA20 after at least 2 bars below EMA20.\n"
+            "- Momentum consolidation does not reset anchor unless a close below EMA20 occurs.\n"
+            "- Prior support uses 2-left/2-right pivot lows from last 60 bars; highest pivot below pullback anchor (conservative).\n"
+            "- Pivot lag: 2-right confirmation means the newest confirmed pivot is at least 2 bars old.\n"
+            "- ATR regime is per-symbol: current ATR14 versus the same symbol's last 60 ATR14 values, computed on latest daily snapshot.\n"
+            "- Gap trigger buffers are setup-specific: Momentum 0.25 ATR, Pullback 0.20 ATR, Volatility 0.10 ATR.\n"
+            "- Time-stop clock starts on the next trading bar after entry."
+        )
 
     raw_rows = []
     with st.spinner("Scoring candidates with setup-family and hard gates..."):
@@ -1029,12 +1198,24 @@ elif mode == "Swing Rankings":
                 if price is None:
                     continue
 
-                vol_ratio = analytics.calculate_volume_ratio(df)
-                rs = analytics.calculate_relative_strength(df, nifty_df)
+                vol_ratio = analytics.calculate_volume_ratio(df, adjust_live=True)
+                benchmark_df = nifty_df
+                benchmark_label = "NIFTY 50"
+                if rs_benchmark_mode == "Sector Index (if mapped)":
+                    sector_name = stock_to_sector.get(symbol)
+                    sector_idx_symbol = sector_name_to_index.get(sector_name, "") if sector_name else ""
+                    sector_idx_df = sector_data.get(sector_idx_symbol) if sector_idx_symbol else None
+                    if sector_idx_df is not None and not sector_idx_df.empty:
+                        benchmark_df = sector_idx_df
+                        benchmark_label = sector_name
+                rs = analytics.calculate_relative_strength(df, benchmark_df, period=20)
+                rs_ema3 = rs_spread_ema3(df, benchmark_df)
                 rsi = calculate_rsi(df).iloc[-1] if len(df) > 14 else np.nan
-                ema20 = calculate_ema(df, 20).iloc[-1]
+                ema20_series = calculate_ema(df, 20)
+                ema20 = ema20_series.iloc[-1]
                 ema50 = calculate_ema(df, 50).iloc[-1]
-                atr14 = calculate_atr(df, ATR_PERIOD).iloc[-1] if len(df) > ATR_PERIOD else np.nan
+                atr_series = calculate_atr(df, ATR_PERIOD) if len(df) > ATR_PERIOD else pd.Series(dtype=float)
+                atr14 = atr_series.iloc[-1] if len(atr_series) > 0 else np.nan
                 atr_pct = ((atr14 / price) * 100.0) if (price and pd.notna(atr14) and atr14 > 0) else np.nan
                 trend_bull = bool(price > ema20 > ema50)
                 breakout = analytics.detect_breakout(df)
@@ -1050,49 +1231,85 @@ elif mode == "Swing Rankings":
                     continue
                 low10 = df["Low"].tail(10).min() if "Low" in df.columns else close.tail(10).min()
                 low20 = df["Low"].tail(20).min() if "Low" in df.columns else close.tail(20).min()
+                low_series = df["Low"] if "Low" in df.columns else close
+                mom_leg_low = momentum_leg_low(close, ema20_series, low_series, fallback_lookback=20)
+                pb_leg_low = pullback_leg_low(df)
+                prior_support = prior_support_below(low_series, pb_leg_low, bars=60)
+                range_series = (pd.to_numeric(df["High"], errors="coerce") - pd.to_numeric(df["Low"], errors="coerce")).dropna() if {"High", "Low"}.issubset(df.columns) else pd.Series(dtype=float)
+                if not range_series.empty:
+                    tight_idx = range_series.tail(10).idxmin()
+                    tight_bar_low = pd.to_numeric(df.loc[tight_idx, "Low"], errors="coerce")
+                else:
+                    tight_bar_low = np.nan
+                contraction_range_low = pd.to_numeric(low_series, errors="coerce").tail(7).min() if len(low_series) >= 7 else np.nan
+                atr_buffer_q = (0.25 * atr14) if pd.notna(atr14) and atr14 > 0 else 0.0
+                atr_buffer_h = (0.50 * atr14) if pd.notna(atr14) and atr14 > 0 else 0.0
+                atr_buffer_m = (0.75 * atr14) if pd.notna(atr14) and atr14 > 0 else 0.0
+                atr_recent = pd.to_numeric(atr_series, errors="coerce").dropna().tail(60) if len(atr_series) > 0 else pd.Series(dtype=float)
+                atr_adj = 0
+                if len(atr_recent) >= 20:
+                    q25 = float(atr_recent.quantile(0.25))
+                    q75 = float(atr_recent.quantile(0.75))
+                    if atr14 >= q75:
+                        atr_adj = -1
+                    elif atr14 <= q25:
+                        atr_adj = 1
 
-                rs_stability = 0.5
-                if nifty_df is not None and "Close" in nifty_df.columns:
+                inv_momentum = max(
+                    [x for x in [mom_leg_low, (ema20 - atr_buffer_m)] if pd.notna(x)]
+                ) if (pd.notna(mom_leg_low) or pd.notna(ema20)) else low10
+
+                pb_anchor = pb_leg_low if pd.notna(pb_leg_low) else low10
+                pb_candidate = pb_anchor - atr_buffer_q
+                ps_candidate = (prior_support - atr_buffer_q) if pd.notna(prior_support) else np.nan
+                inv_pullback = max([x for x in [pb_candidate, ps_candidate] if pd.notna(x)]) if pd.notna(ps_candidate) else pb_candidate
+
+                contraction_anchor_candidates = [x for x in [contraction_range_low, tight_bar_low] if pd.notna(x)]
+                if contraction_anchor_candidates:
+                    inv_volatility = min(contraction_anchor_candidates) - atr_buffer_h
+                else:
+                    inv_volatility = (low20 - atr_buffer_h) if pd.notna(low20) else low20
+
+                mom_time_stop = max(2, 5 + atr_adj)
+                pb_time_stop = max(3, 7 + atr_adj)
+                vol_time_stop = max(2, 4 + atr_adj)
+
+                rel_std = np.nan
+                if benchmark_df is not None and "Close" in benchmark_df.columns:
                     merged = pd.concat(
-                        [close.rename("s"), nifty_df["Close"].dropna().rename("b")],
+                        [close.rename("s"), benchmark_df["Close"].dropna().rename("b")],
                         axis=1
                     ).dropna()
                     if len(merged) >= 30:
                         rel_ret = merged["s"].pct_change() - merged["b"].pct_change()
                         rel_std = rel_ret.tail(20).std()
-                        if pd.notna(rel_std):
-                            rs_stability = clip01(1.0 - (rel_std * 35.0))
 
                 trend_align = 1.0 if trend_bull else 0.0
                 vol_quality = clip01(vol_ratio / 2.0)
-                rs_quality = clip01((rs + 10.0) / 20.0)
-                quality_score = (0.40 * vol_quality) + (0.30 * rs_quality) + (0.30 * rs_stability)
-                quality_gate_pass = bool(
-                    (vol_ratio >= cfg["min_vol_ratio"]) and
-                    (rs >= cfg["min_rs"]) and
-                    (quality_score >= 0.45)
-                )
+                rs_blend = (0.7 * rs) + (0.3 * rs_ema3)
+                if rs >= 2.0 and rs_ema3 >= 0:
+                    rs_tier = "Strong"
+                elif rs <= -1.0 or rs_ema3 < -0.2:
+                    rs_tier = "Weak"
+                else:
+                    rs_tier = "Neutral"
 
                 # Strict setup families
                 momentum_pass = bool(trend_bull and breakout and (vol_ratio >= 1.0) and (rsi >= 52) and (rsi <= 78))
                 pullback_pass = bool(trend_bull and (-2.5 <= dist_ema20 <= 1.5) and (40 <= rsi <= 58) and (not breakout))
                 vol_contract_pass = bool(nr7 and inside_day and (abs(dist_ema20) <= 4.0) and (pd.isna(atr_pct) or atr_pct <= 4.0))
 
-                hard_gate_pass = bool(regime_gate_pass and liquidity_gate_pass and quality_gate_pass)
-                gate_reasons = []
-                if not regime_gate_pass:
-                    gate_reasons.append("Regime")
-                if not liquidity_gate_pass:
-                    gate_reasons.append("Liquidity")
-                if not quality_gate_pass:
-                    gate_reasons.append("Quality")
-                gate_reason = "OK" if not gate_reasons else ", ".join(gate_reasons)
+                hard_gate_pass = bool(regime_gate_pass and liquidity_gate_pass)
+                gate_reason = "OK" if hard_gate_pass else ("Regime" if not regime_gate_pass else "Liquidity")
 
                 raw_rows.append({
                     "Symbol": symbol.replace('.NS', ''),
                     "Price": price,
                     "Change %": change_pct,
                     "RS": rs,
+                    "RS EMA3": rs_ema3,
+                    "RS Tier": rs_tier,
+                    "RS Benchmark": benchmark_label,
                     "Vol Ratio": vol_ratio,
                     "RSI": rsi,
                     "dist_ema20": dist_ema20,
@@ -1103,9 +1320,15 @@ elif mode == "Swing Rankings":
                     "ATR%": atr_pct,
                     "Trend Align": trend_align,
                     "Vol Quality": vol_quality,
-                    "RS Stability": rs_stability,
-                    "Quality Score": quality_score,
-                    "Quality Gate": quality_gate_pass,
+                    "RS RelStd": rel_std,
+                    "RS Blend": rs_blend,
+                    "RS Stability": 0.5,
+                    "RS Quality": 0.5,
+                    "RS Floor Penalty": 0.0,
+                    "Quality Score Base": 0.0,
+                    "Quality Score": 0.0,
+                    "Quality Band": "Blocked",
+                    "Quality Gate": False,
                     "Regime Gate": regime_gate_pass,
                     "Liquidity Gate": liquidity_gate_pass,
                     "Hard Gate": hard_gate_pass,
@@ -1115,9 +1338,26 @@ elif mode == "Swing Rankings":
                     "Volatility Pass": vol_contract_pass,
                     "Mom Base": analytics.calculate_momentum_score(df, nifty_df),
                     "PB Base": analytics.calculate_pullback_score(df, nifty_df),
-                    "Inv Momentum": max(low10, ema20 - (atr14 if pd.notna(atr14) else 0.0)),
-                    "Inv Pullback": low10,
-                    "Inv Volatility": df["Low"].iloc[-1] if "Low" in df.columns else low20,
+                    "Inv Momentum": inv_momentum,
+                    "Inv Pullback": inv_pullback,
+                    "Inv Volatility": inv_volatility,
+                    "Inv Rule Momentum": "max(momentum_leg_low, ema20 - 0.75*ATR14)",
+                    "Inv Rule Pullback": "max(pullback_leg_low - 0.25*ATR14, prior_support - 0.25*ATR14)",
+                    "Inv Rule Volatility": "contraction_low - 0.50*ATR14",
+                    "Inv Detail Momentum": f"max(ML {mom_leg_low:.2f}, EMA20 {ema20:.2f} - 0.75*ATR {atr14:.2f})",
+                    "Inv Detail Pullback": (
+                        f"max(PL {pb_anchor:.2f} - 0.25*ATR {atr14:.2f}, "
+                        + (f"PS {prior_support:.2f} - 0.25*ATR {atr14:.2f})" if pd.notna(prior_support) else "PS n/a)")
+                    ),
+                    "Inv Detail Volatility": (
+                        f"min(CR {contraction_range_low:.2f}, TB {tight_bar_low:.2f}) - 0.50*ATR {atr14:.2f}"
+                        if contraction_anchor_candidates else f"L20 {low20:.2f} - 0.50*ATR {atr14:.2f}"
+                    ),
+                    "ML": mom_leg_low,
+                    "LTP vs ML %": (((price - mom_leg_low) / mom_leg_low) * 100.0) if pd.notna(mom_leg_low) and mom_leg_low > 0 else np.nan,
+                    "Time Stop Momentum": mom_time_stop,
+                    "Time Stop Pullback": pb_time_stop,
+                    "Time Stop Volatility": vol_time_stop,
                 })
             except Exception as e:
                 logger.error(f"Error scoring {symbol}: {e}")
@@ -1127,6 +1367,96 @@ elif mode == "Swing Rankings":
         st.stop()
 
     score_df = pd.DataFrame(raw_rows)
+    rel_std_series = pd.to_numeric(score_df.get("RS RelStd"), errors="coerce").dropna()
+    if len(rel_std_series) >= 20:
+        q10 = float(rel_std_series.quantile(0.10))
+        q50 = float(rel_std_series.quantile(0.50))
+        q90 = float(rel_std_series.quantile(0.90))
+        denom = max(q90 - q10, 1e-6)
+        rs_stab_slope = 0.8 / denom
+        rs_stab_intercept = 0.9 + (rs_stab_slope * q10)
+    else:
+        q10, q50, q90 = np.nan, np.nan, np.nan
+        rs_stab_slope = 35.0
+        rs_stab_intercept = 1.0
+
+    score_df["RS Stability"] = (
+        rs_stab_intercept - (rs_stab_slope * pd.to_numeric(score_df["RS RelStd"], errors="coerce"))
+    ).clip(lower=0.0, upper=1.0).fillna(0.5)
+    score_df["RS Quality"] = ((
+        pd.to_numeric(score_df["RS Blend"], errors="coerce").fillna(0.0) + 10.0
+    ) / 20.0).clip(lower=0.0, upper=1.0)
+    score_df["Quality Score Base"] = (
+        (0.40 * pd.to_numeric(score_df["Vol Quality"], errors="coerce").fillna(0.0)) +
+        (0.30 * score_df["RS Quality"]) +
+        (0.30 * score_df["RS Stability"])
+    )
+    rs_floor_penalty = float(cfg.get("rs_floor_penalty", 0.10))
+    score_df["RS Floor Penalty"] = np.where(
+        pd.to_numeric(score_df["RS Blend"], errors="coerce").fillna(0.0) < float(cfg.get("min_rs", -3.0)),
+        rs_floor_penalty,
+        0.0,
+    )
+    score_df["Quality Score"] = (score_df["Quality Score Base"] - score_df["RS Floor Penalty"]).clip(lower=0.0, upper=1.0)
+    score_df["Quality Band"] = np.where(
+        score_df["Quality Score"] >= 0.65,
+        "Strong",
+        np.where(score_df["Quality Score"] >= 0.45, "Pass-Caution", "Blocked"),
+    )
+    score_df["Quality Gate"] = (
+        (pd.to_numeric(score_df["Vol Ratio"], errors="coerce").fillna(0.0) >= float(cfg["min_vol_ratio"])) &
+        (score_df["Quality Score"] >= 0.45)
+    )
+    score_df["Setup Any Pass"] = (
+        score_df["Momentum Pass"].astype(bool) |
+        score_df["Pullback Pass"].astype(bool) |
+        score_df["Volatility Pass"].astype(bool)
+    )
+    score_df["Hard Gate"] = (
+        score_df["Regime Gate"].astype(bool) &
+        score_df["Liquidity Gate"].astype(bool) &
+        score_df["Quality Gate"].astype(bool)
+    )
+    def _gate_reason(row):
+        reasons = []
+        if not bool(row.get("Regime Gate", False)):
+            reasons.append("Regime")
+        if not bool(row.get("Liquidity Gate", False)):
+            reasons.append("Liquidity")
+        if not bool(row.get("Quality Gate", False)):
+            reasons.append("Quality")
+        return "OK" if not reasons else ", ".join(reasons)
+    score_df["Gate Reason"] = score_df.apply(_gate_reason, axis=1)
+    def _near_miss_reason(row):
+        dist = float(row.get("dist_ema20", 0.0))
+        if bool(row.get("Trend") == "Bullish") and (not bool(row.get("Breakout"))):
+            return "Momentum not confirmed (no breakout)"
+        if dist > 1.5:
+            return f"Pullback not ready (too extended: {dist:.2f}% above EMA20)"
+        if dist < -2.5:
+            return f"Pullback not ready (too deep: {dist:.2f}% below EMA20)"
+        if (not bool(row.get("NR7"))) or (not bool(row.get("Inside Day"))):
+            return "Contraction pattern not formed (NR7/Inside Day missing)"
+        return "Setup conditions not aligned yet"
+    score_df["Near Miss Reason"] = score_df.apply(_near_miss_reason, axis=1)
+
+    with st.expander("🧪 Quality Diagnostics (RS Stability Calibration)", expanded=False):
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("rel_std p10", f"{q10:.4f}" if pd.notna(q10) else "n/a")
+        d2.metric("rel_std p50", f"{q50:.4f}" if pd.notna(q50) else "n/a")
+        d3.metric("rel_std p90", f"{q90:.4f}" if pd.notna(q90) else "n/a")
+        d4.metric("Stability Slope", f"{rs_stab_slope:.2f}")
+        band_counts = score_df["Quality Band"].value_counts()
+        st.caption(
+            f"Bands → Strong: {int(band_counts.get('Strong', 0))} | "
+            f"Pass-Caution: {int(band_counts.get('Pass-Caution', 0))} | "
+            f"Blocked: {int(band_counts.get('Blocked', 0))}"
+        )
+        st.caption(
+            f"Soft RS floor: min_rs={cfg.get('min_rs')} | penalty={rs_floor_penalty:.2f} "
+            f"(applied when RS blend < min_rs)."
+        )
+
     score_df["RS Pct"] = score_df["RS"].rank(pct=True).fillna(0.5)
     score_df["Vol Pct"] = score_df["Vol Ratio"].rank(pct=True).fillna(0.5)
 
@@ -1169,11 +1499,34 @@ elif mode == "Swing Rankings":
         temp["Setup Type"] = setup_name
         temp["Tier"] = temp["Score"].apply(setup_tier)
         temp["Invalidation"] = temp[inv_col]
+        if setup_name.startswith("Momentum"):
+            temp["Invalidation Rule"] = temp["Inv Rule Momentum"]
+            temp["Time Stop (bars)"] = temp["Time Stop Momentum"]
+            temp["Invalidation Detail"] = temp["Inv Detail Momentum"]
+            temp["Gap Buffer (ATR)"] = 0.25
+        elif setup_name.startswith("Pullback"):
+            temp["Invalidation Rule"] = temp["Inv Rule Pullback"]
+            temp["Time Stop (bars)"] = temp["Time Stop Pullback"]
+            temp["Invalidation Detail"] = temp["Inv Detail Pullback"]
+            temp["Gap Buffer (ATR)"] = 0.20
+        else:
+            temp["Invalidation Rule"] = temp["Inv Rule Volatility"]
+            temp["Time Stop (bars)"] = temp["Time Stop Volatility"]
+            temp["Invalidation Detail"] = temp["Inv Detail Volatility"]
+            temp["Gap Buffer (ATR)"] = 0.10
+        temp["Trigger Type"] = temp["Gap Buffer (ATR)"].map(
+            lambda b: f"Close < Invalidation | Gap Open < Inv - {b:.2f}*ATR => Immediate"
+        )
         temp["Invalidation %"] = ((temp["Price"] - temp["Invalidation"]) / temp["Price"] * 100).round(2)
+        temp["Risk (ATR)"] = np.where(
+            pd.to_numeric(temp["ATR%"], errors="coerce") > 0,
+            ((temp["Price"] - temp["Invalidation"]) / ((temp["ATR%"] / 100.0) * temp["Price"])).round(2),
+            np.nan
+        )
         temp["Gate Status"] = np.where(temp["Hard Gate"], "Pass", "Blocked")
         return temp.sort_values(
-            ["Score", "Trend Align", "Vol Quality", "RS Stability", "RS"],
-            ascending=[False, False, False, False, False]
+            ["Score", "Quality Score", "Trend Align", "Vol Quality", "RS Stability", "RS"],
+            ascending=[False, False, False, False, False, False]
         )
 
     momentum_df = build_family(score_df, "Momentum Score", "Momentum 🚀", "Momentum Pass", "Inv Momentum")
@@ -1190,8 +1543,8 @@ elif mode == "Swing Rankings":
 
     # Tier buckets (familiar A+/A/B/C view)
     tier_best = combined.sort_values(
-        ["Score", "Trend Align", "Vol Quality", "RS Stability"],
-        ascending=[False, False, False, False]
+        ["Score", "Quality Score", "Trend Align", "Vol Quality", "RS Stability"],
+        ascending=[False, False, False, False, False]
     ).drop_duplicates(subset=["Symbol"])
     tier_counts = tier_best["Tier"].value_counts()
     t1, t2, t3, t4 = st.columns(4)
@@ -1232,14 +1585,53 @@ elif mode == "Swing Rankings":
                         st.metric("Score", f"{row['Score']:.2f}/10")
                         st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
                         st.caption(f"Entry Gate: {row['Gate Status']} ({row['Gate Reason']})")
-                        st.caption(f"Invalidation: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% risk)")
+                        risk_atr_txt = f"{row['Risk (ATR)']:.2f} ATR" if pd.notna(row.get("Risk (ATR)")) else "ATR n/a"
+                        st.caption(
+                            f"Invalidation: {format_price(row['Invalidation'])} "
+                            f"({row['Invalidation %']:.2f}% | {risk_atr_txt})"
+                        )
+                        st.caption(str(row.get("Invalidation Detail", row.get("Invalidation Rule", ""))))
+                        st.caption(f"Trigger: {row.get('Trigger Type', 'Close < Invalidation')} | Time Stop: {int(row.get('Time Stop (bars)', 0))} bars")
+                        st.caption(
+                            f"RS20: {float(row.get('RS', 0.0)):+.2f} | "
+                            f"RS EMA3: {float(row.get('RS EMA3', 0.0)):+.2f} | "
+                            f"Tier: {row.get('RS Tier', 'Neutral')} vs {row.get('RS Benchmark', 'NIFTY 50')}"
+                        )
+                        st.caption(
+                            f"Quality: {float(row.get('Quality Score', 0.0)):.2f} "
+                            f"({row.get('Quality Band', 'Blocked')}) | RS floor penalty: {float(row.get('RS Floor Penalty', 0.0)):.2f}"
+                        )
+                        if pd.notna(row.get("ML")) and row.get("ML", 0) > 0:
+                            run_abs = float(row["Price"]) - float(row["ML"])
+                            st.caption(f"Run-up from ML: {run_abs:+.2f} ({float(row.get('LTP vs ML %', 0.0)):+.2f}%)")
                         sym = row['Symbol']
                         prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
+                        setup_label = str(row.get("Setup Type", "Swing Ranking"))
+                        if setup_label.startswith("Momentum"):
+                            pre_setup_family = "Momentum"
+                        elif setup_label.startswith("Pullback"):
+                            pre_setup_family = "Pullback"
+                        elif setup_label.startswith("Volatility"):
+                            pre_setup_family = "Volatility Contraction"
+                        else:
+                            pre_setup_family = "Other"
                         if st.button("Log Setup", key=f"log_setup_toprank_{i}_{sym}", width='stretch'):
                             st.session_state["journal_prefill"] = {
                                 "symbol": prefill_symbol,
-                                "strategy": "Top Ranked Pick",
+                                "strategy": "Swing Ranking",
                                 "side": "LONG",
+                                "setup_family": pre_setup_family,
+                                "entry_price": float(row.get("Price", 0.0) or 0.0),
+                                "stop_loss": float(row.get("Invalidation", 0.0) or 0.0),
+                                "invalidation": float(row.get("Invalidation", 0.0) or 0.0),
+                                "entry_risk_atr": float(row.get("Risk (ATR)", 0.0) or 0.0),
+                                "target_price": 0.0,
+                                "trigger_policy": str(row.get("Trigger Type", "")),
+                                "notes": (
+                                    f"Auto from Swing: {setup_label} | "
+                                    f"Score {float(row.get('Score', 0.0)):.2f} | "
+                                    f"Trigger: {row.get('Trigger Type', '')}"
+                                ),
                             }
                             st.switch_page("pages/5_Trading_Journal.py")
 
@@ -1247,17 +1639,248 @@ elif mode == "Swing Rankings":
         (combined["Tier"].isin(["A+", "A"])) &
         (combined["Hard Gate"])
     ].drop_duplicates(subset=["Symbol", "Setup Type"]).sort_values(
-        ["Score", "Trend Align", "Vol Quality", "RS Stability"],
-        ascending=[False, False, False, False]
+        ["Score", "Quality Score", "Trend Align", "Vol Quality", "RS Stability"],
+        ascending=[False, False, False, False, False]
     ).head(cfg["top_n"])
 
     monitor = combined[
         (combined["Tier"].isin(["A+", "A", "B"])) &
         (~combined["Hard Gate"] | combined["Tier"].eq("B"))
     ].drop_duplicates(subset=["Symbol", "Setup Type"]).sort_values(
-        ["Score", "Trend Align", "Vol Quality", "RS Stability"],
-        ascending=[False, False, False, False]
+        ["Score", "Quality Score", "Trend Align", "Vol Quality", "RS Stability"],
+        ascending=[False, False, False, False, False]
     ).head(cfg["watchlist_n"])
+
+    # -------------------- Tradable Lookback (20D) --------------------
+    tradable_today = combined[
+        (combined["Tier"].isin(["A+", "A"])) & (combined["Hard Gate"])
+    ].drop_duplicates(subset=["Symbol", "Setup Type"]).copy()
+    source_category_label = "Sector: Unassigned"
+    if selection_method == "Custom Selection":
+        source_category_label = "Custom Selection"
+    elif selection_method == "Preset Watchlists" and preset:
+        source_category_label = f"Preset: {preset}"
+    elif selection_method == "By Category" and category:
+        source_category_label = f"Sector: {category}"
+
+    snapshot_cols = [
+        "date", "symbol", "setup_type", "tier", "score", "quality_score",
+        "quality_band", "regime", "liquidity", "category_label"
+    ]
+    snapshot_path = Path("data/snapshots/tradable_signals.parquet")
+    snapshot_meta_path = Path("data/snapshots/tradable_signals_meta.json")
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    run_date = pd.Timestamp.now(tz="Asia/Kolkata").normalize().tz_localize(None)
+    # Always persist run heartbeat, even when no A+/A hard-gate pass rows exist.
+    try:
+        snapshot_meta_path.write_text(
+            json.dumps(
+                {
+                    "last_run_date": str(run_date.date()),
+                    "rows_written_today": int(len(tradable_today)),
+                    "updated_at": pd.Timestamp.now(tz="Asia/Kolkata").isoformat(),
+                },
+                indent=2,
+            )
+        )
+    except Exception:
+        pass
+    if not tradable_today.empty:
+        snap = pd.DataFrame({
+            "date": run_date,
+            "symbol": tradable_today["Symbol"].astype(str),
+            "setup_type": tradable_today["Setup Type"].astype(str),
+            "tier": tradable_today["Tier"].astype(str),
+            "score": pd.to_numeric(tradable_today["Score"], errors="coerce").fillna(0.0),
+            "quality_score": pd.to_numeric(tradable_today["Quality Score"], errors="coerce").fillna(0.0),
+            "quality_band": tradable_today["Quality Band"].astype(str),
+            "regime": regime_label,
+            "liquidity": liquidity_label,
+            "category_label": source_category_label,
+        })[snapshot_cols]
+        if snapshot_path.exists():
+            try:
+                hist_all = pd.read_parquet(snapshot_path)
+            except Exception:
+                hist_all = pd.DataFrame(columns=snapshot_cols)
+        else:
+            hist_all = pd.DataFrame(columns=snapshot_cols)
+        hist_all = pd.concat([hist_all, snap], ignore_index=True)
+        hist_all["date"] = pd.to_datetime(hist_all["date"], errors="coerce").dt.normalize()
+        hist_all = hist_all.dropna(subset=["date", "symbol", "setup_type"])
+        hist_all = hist_all.drop_duplicates(subset=["date", "symbol", "setup_type"], keep="last")
+        hist_all = hist_all[hist_all["date"] >= (run_date - pd.Timedelta(days=600))]
+        hist_all = hist_all.sort_values(["date", "symbol", "setup_type"])
+        hist_all.to_parquet(snapshot_path, index=False)
+
+    if snapshot_path.exists():
+        try:
+            hist = pd.read_parquet(snapshot_path)
+        except Exception:
+            hist = pd.DataFrame(columns=snapshot_cols)
+    else:
+        hist = pd.DataFrame(columns=snapshot_cols)
+
+    def _is_trading_day(d: pd.Timestamp) -> bool:
+        return int(d.weekday()) < 5
+
+    def _calc_streak(date_set: set[pd.Timestamp], ordered_dates: list[pd.Timestamp], current_d: pd.Timestamp) -> int:
+        if current_d not in date_set or current_d not in ordered_dates:
+            return 0
+        idx = ordered_dates.index(current_d)
+        count = 0
+        for j in range(idx, -1, -1):
+            if ordered_dates[j] in date_set:
+                count += 1
+            else:
+                break
+        return count
+
+    def _strip_ns(sym: str) -> str:
+        s = str(sym or "").strip().upper()
+        return s[:-3] if s.endswith(".NS") else s
+
+    if not hist.empty:
+        hist["date"] = pd.to_datetime(hist["date"], errors="coerce").dt.normalize()
+        hist = hist.dropna(subset=["date"])
+        all_dates = sorted(hist["date"].unique().tolist())
+        latest_snapshot_date = all_dates[-1] if all_dates else run_date
+        latest_run_date = latest_snapshot_date
+        if snapshot_meta_path.exists():
+            try:
+                meta_obj = json.loads(snapshot_meta_path.read_text())
+                meta_d = pd.to_datetime(meta_obj.get("last_run_date"), errors="coerce")
+                if not pd.isna(meta_d):
+                    latest_run_date = meta_d.normalize()
+            except Exception:
+                pass
+        lookback_dates = all_dates[-20:] if len(all_dates) >= 20 else all_dates
+        hist20 = hist[hist["date"].isin(lookback_dates)].copy()
+
+        master_universe = {_strip_ns(s) for s in NIFTY_200}
+        current_scan_universe = {_strip_ns(s) for s in selected_stocks}
+        hist20["symbol"] = hist20["symbol"].astype(str).map(_strip_ns)
+        orphan_master = sorted(set(hist20["symbol"].unique()) - master_universe)
+        scan_miss = sorted(
+            (set(hist20["symbol"].unique()) - set(orphan_master)) - current_scan_universe
+        )
+        # Exclude hard-orphans from all downstream streak/day calculations.
+        if orphan_master:
+            hist20 = hist20[~hist20["symbol"].isin(orphan_master)].copy()
+
+        today_rows = hist[hist["date"] == latest_snapshot_date].copy()
+        today_rows["symbol"] = today_rows["symbol"].astype(str).map(_strip_ns)
+        if orphan_master:
+            today_rows = today_rows[~today_rows["symbol"].isin(orphan_master)].copy()
+        prev_date = all_dates[-2] if len(all_dates) >= 2 else None
+        prev_rows = hist[hist["date"] == prev_date].copy() if prev_date is not None else pd.DataFrame(columns=hist.columns)
+        if not prev_rows.empty:
+            prev_rows["symbol"] = prev_rows["symbol"].astype(str).map(_strip_ns)
+            if orphan_master:
+                prev_rows = prev_rows[~prev_rows["symbol"].isin(orphan_master)].copy()
+
+        today_keys = set(zip(today_rows["symbol"], today_rows["setup_type"]))
+        prev_keys = set(zip(prev_rows.get("symbol", pd.Series(dtype=str)), prev_rows.get("setup_type", pd.Series(dtype=str))))
+        dropped_keys = sorted(list(prev_keys - today_keys))
+
+        ctx_rows = []
+        for _, r in today_rows.iterrows():
+            sym = str(r["symbol"])
+            stype = str(r["setup_type"])
+            h_setup = hist20[(hist20["symbol"] == sym) & (hist20["setup_type"] == stype)]
+            h_sym = hist20[hist20["symbol"] == sym]
+            setup_dates = sorted(h_setup["date"].unique().tolist())
+            sym_dates = sorted(h_sym["date"].unique().tolist())
+            setup_days = len(setup_dates)
+            sym_days = len(sym_dates)
+            setup_streak = _calc_streak(set(setup_dates), lookback_dates, latest_snapshot_date)
+            sym_streak = _calc_streak(set(sym_dates), lookback_dates, latest_snapshot_date)
+            qhist = pd.to_numeric(h_setup["quality_score"], errors="coerce").dropna().tail(5)
+            qtrend = (float(qhist.iloc[-1] - qhist.iloc[0]) if len(qhist) >= 3 else 0.0)
+            is_new = setup_days == 1
+            is_fading = (setup_days >= 8 and qtrend <= -0.06)
+            tags = []
+            if is_new:
+                tags.append("NEW")
+            if is_fading:
+                tags.append("FADING")
+            ctx_rows.append({
+                "Tag": ("🆕" if is_new else "") + (" ⚠️" if is_fading else ""),
+                "Symbol": sym,
+                "Setup": stype,
+                "Tier": r.get("tier", ""),
+                "Score": float(r.get("score", 0.0)),
+                "Quality": float(r.get("quality_score", 0.0)),
+                "Quality Band": str(r.get("quality_band", "")),
+                "Category": str(r.get("category_label", "")),
+                "Setup Streak": setup_streak,
+                "Symbol Streak": sym_streak,
+                "Days in 20D": setup_days,
+                "Symbol Days 20D": sym_days,
+                "Quality Trend(5)": qtrend,
+                "Status Tag": ", ".join(tags) if tags else "ACTIVE",
+            })
+
+        dropped_rows = []
+        for sym, stype in dropped_keys:
+            h_setup = hist20[(hist20["symbol"] == sym) & (hist20["setup_type"] == stype)]
+            setup_days = int(h_setup["date"].nunique())
+            label = "PAUSED" if setup_days >= 8 else "DROPPED"
+            dropped_rows.append({
+                "Tag": "🔁" if label == "PAUSED" else "🔻",
+                "Symbol": sym,
+                "Setup": stype,
+                "Days in 20D": setup_days,
+                "Status Tag": label,
+            })
+
+        tradable_ctx_df = pd.DataFrame(ctx_rows).sort_values(
+            ["Score", "Quality", "Setup Streak"], ascending=[False, False, False]
+        ) if ctx_rows else pd.DataFrame()
+        dropped_df = pd.DataFrame(dropped_rows).sort_values(
+            ["Days in 20D", "Symbol"], ascending=[False, True]
+        ) if dropped_rows else pd.DataFrame()
+
+        today_ist = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).normalize()
+        stale_today = _is_trading_day(today_ist) and (latest_run_date != today_ist)
+
+        with st.expander("✅ Tradable Across Categories (20D Context)", expanded=False):
+            with st.expander("ℹ️ How to Use", expanded=False):
+                st.markdown(
+                    "- Tradable Today: names passing all gates now.\n"
+                    "- Setup Streak: consecutive trading-day streak for same setup.\n"
+                    "- Days in 20D: total setup appearances in last 20 trading days.\n"
+                    "- 🆕 New: first appearance in current 20D window (alert state; trigger may still take 1-2 sessions).\n"
+                    "- 🔻 Dropped: tradable yesterday, not today. If holding: reassess risk. If watching: remove from active list.\n"
+                    "- 🔁 Paused Leader: strong 20D presence but currently off-list; watch for re-entry.\n"
+                    "- ⚠️ Fading: still tradable but quality trend has declined; monitor closely before fresh sizing."
+                )
+            if orphan_master:
+                show = ", ".join(orphan_master[:12])
+                suffix = "" if len(orphan_master) <= 12 else f" +{len(orphan_master)-12} more"
+                st.warning(
+                    f"⚠️ Not in current master universe (excluded from streak math): {show}{suffix}"
+                )
+            if scan_miss:
+                show = ", ".join(scan_miss[:12])
+                suffix = "" if len(scan_miss) <= 12 else f" +{len(scan_miss)-12} more"
+                st.info(
+                    f"ℹ️ Not in current scan universe (historical context only): {show}{suffix}"
+                )
+            if stale_today:
+                st.warning(f"Snapshot is stale for trading day {today_ist.date()} (latest run: {latest_run_date.date()}).")
+            st.caption(f"Latest run: {latest_run_date.date()} | Lookback days loaded: {len(lookback_dates)}")
+            if not tradable_ctx_df.empty:
+                tview = tradable_ctx_df.copy()
+                tview["Score"] = tview["Score"].map(lambda x: f"{x:.2f}")
+                tview["Quality"] = tview["Quality"].map(lambda x: f"{x:.2f}")
+                tview["Quality Trend(5)"] = tview["Quality Trend(5)"].map(lambda x: f"{x:+.2f}")
+                st.dataframe(tview, width="stretch", hide_index=True)
+            else:
+                st.info("No tradable rows found in latest snapshot.")
+            if not dropped_df.empty:
+                st.markdown("**Dropped / Paused Since Previous Trading Day**")
+                st.dataframe(dropped_df, width="stretch", hide_index=True)
 
     if not actionable.empty:
         st.markdown("### 🏆 Tradable Now (A+/A + Entry Gate Pass)")
@@ -1269,16 +1892,55 @@ elif mode == "Swing Rankings":
                     st.caption(f"{row['Setup Type']} • Tier {row['Tier']}")
                     st.metric("Score", f"{row['Score']:.2f}/10")
                     st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
-                    st.caption(f"Invalidation: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% risk)")
+                    risk_atr_txt = f"{row['Risk (ATR)']:.2f} ATR" if pd.notna(row.get("Risk (ATR)")) else "ATR n/a"
+                    st.caption(
+                        f"Invalidation: {format_price(row['Invalidation'])} "
+                        f"({row['Invalidation %']:.2f}% | {risk_atr_txt})"
+                    )
+                    st.caption(str(row.get("Invalidation Detail", row.get("Invalidation Rule", ""))))
+                    st.caption(f"Trigger: {row.get('Trigger Type', 'Close < Invalidation')} | Time Stop: {int(row.get('Time Stop (bars)', 0))} bars")
+                    st.caption(
+                        f"RS20: {float(row.get('RS', 0.0)):+.2f} | "
+                        f"RS EMA3: {float(row.get('RS EMA3', 0.0)):+.2f} | "
+                        f"Tier: {row.get('RS Tier', 'Neutral')} vs {row.get('RS Benchmark', 'NIFTY 50')}"
+                    )
+                    st.caption(
+                        f"Quality: {float(row.get('Quality Score', 0.0)):.2f} "
+                        f"({row.get('Quality Band', 'Blocked')}) | RS floor penalty: {float(row.get('RS Floor Penalty', 0.0)):.2f}"
+                    )
+                    if pd.notna(row.get("ML")) and row.get("ML", 0) > 0:
+                        run_abs = float(row["Price"]) - float(row["ML"])
+                        st.caption(f"Run-up from ML: {run_abs:+.2f} ({float(row.get('LTP vs ML %', 0.0)):+.2f}%)")
                     st.caption(f"Trend:{row['Trend']} | Vol:{row['Vol Ratio']:.2f}x | RSI:{row['RSI']:.1f}")
 
                     sym = row['Symbol']
                     prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
+                    setup_label = str(row.get("Setup Type", "Swing Ranking"))
+                    if setup_label.startswith("Momentum"):
+                        pre_setup_family = "Momentum"
+                    elif setup_label.startswith("Pullback"):
+                        pre_setup_family = "Pullback"
+                    elif setup_label.startswith("Volatility"):
+                        pre_setup_family = "Volatility Contraction"
+                    else:
+                        pre_setup_family = "Other"
                     if st.button("Log Setup", key=f"log_setup_phase2_{i}_{sym}", width='stretch'):
                         st.session_state["journal_prefill"] = {
                             "symbol": prefill_symbol,
-                            "strategy": "Swing Family v2",
+                            "strategy": "Swing Ranking",
                             "side": "LONG",
+                            "setup_family": pre_setup_family,
+                            "entry_price": float(row.get("Price", 0.0) or 0.0),
+                            "stop_loss": float(row.get("Invalidation", 0.0) or 0.0),
+                            "invalidation": float(row.get("Invalidation", 0.0) or 0.0),
+                            "entry_risk_atr": float(row.get("Risk (ATR)", 0.0) or 0.0),
+                            "target_price": 0.0,
+                            "trigger_policy": str(row.get("Trigger Type", "")),
+                            "notes": (
+                                f"Auto from Swing: {setup_label} | "
+                                f"Score {float(row.get('Score', 0.0)):.2f} | "
+                                f"Trigger: {row.get('Trigger Type', '')}"
+                            ),
                         }
                         st.switch_page("pages/5_Trading_Journal.py")
     else:
@@ -1293,7 +1955,9 @@ elif mode == "Swing Rankings":
         st.markdown("### 👀 Watch / Improve (A+/A Blocked + B Tier)")
         mon = monitor[[
             "Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Price", "Change %",
-            "Invalidation", "Invalidation %", "RS", "Vol Ratio", "RSI", "Quality Score", "Gate Reason"
+            "Invalidation", "Invalidation %", "Risk (ATR)", "Trigger Type", "Time Stop (bars)",
+            "ML", "LTP vs ML %", "RS", "RS EMA3", "RS Tier", "RS Benchmark",
+            "Vol Ratio", "RSI", "Quality Score", "Quality Band", "RS Floor Penalty", "Gate Reason", "Invalidation Rule", "Invalidation Detail"
         ]].copy()
         mon = mon.rename(columns={"Gate Status": "Entry Gate", "Gate Reason": "Block Reason"})
         mon["Price"] = mon["Price"].apply(format_price)
@@ -1302,7 +1966,12 @@ elif mode == "Swing Rankings":
         mon["Vol Ratio"] = mon["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
         mon["RSI"] = mon["RSI"].apply(lambda x: f"{x:.1f}")
         mon["Quality Score"] = mon["Quality Score"].apply(lambda x: f"{x:.2f}")
+        mon["RS Floor Penalty"] = mon["RS Floor Penalty"].apply(lambda x: f"{x:.2f}")
         mon["Invalidation %"] = mon["Invalidation %"].apply(lambda x: f"{x:.2f}%")
+        mon["ML"] = mon["ML"].apply(lambda x: format_price(x) if pd.notna(x) and x > 0 else "-")
+        mon["LTP vs ML %"] = mon["LTP vs ML %"].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
+        mon["RS"] = mon["RS"].apply(lambda x: f"{x:+.2f}")
+        mon["RS EMA3"] = mon["RS EMA3"].apply(lambda x: f"{x:+.2f}")
         st.dataframe(mon, width='stretch', hide_index=True)
 
         blocked_a = monitor[(monitor["Tier"].isin(["A+", "A"])) & (~monitor["Hard Gate"])].shape[0]
@@ -1328,6 +1997,33 @@ elif mode == "Swing Rankings":
                     }
                 )
             st.dataframe(pd.DataFrame(diag_rows), width="stretch", hide_index=True)
+
+    near_miss_df = score_df[
+        score_df["Hard Gate"].astype(bool) &
+        score_df["Quality Gate"].astype(bool) &
+        (~score_df["Setup Any Pass"].astype(bool))
+    ].copy()
+    if not near_miss_df.empty:
+        near_miss_df = near_miss_df.sort_values(
+            ["Quality Score", "RS", "Vol Ratio"],
+            ascending=[False, False, False]
+        )
+        with st.expander(
+            f"👀 Near Miss Watch Queue ({len(near_miss_df)} symbols passed hard+quality, setup pending)",
+            expanded=False,
+        ):
+            nview = near_miss_df[[
+                "Symbol", "Trend", "Price", "RS", "RS EMA3", "Vol Ratio", "RSI",
+                "Quality Score", "Quality Band", "dist_ema20", "Near Miss Reason"
+            ]].copy()
+            nview["Price"] = nview["Price"].apply(format_price)
+            nview["RS"] = nview["RS"].apply(lambda x: f"{x:+.2f}")
+            nview["RS EMA3"] = nview["RS EMA3"].apply(lambda x: f"{x:+.2f}")
+            nview["Vol Ratio"] = nview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
+            nview["RSI"] = nview["RSI"].apply(lambda x: f"{x:.1f}")
+            nview["Quality Score"] = nview["Quality Score"].apply(lambda x: f"{x:.2f}")
+            nview["dist_ema20"] = nview["dist_ema20"].apply(lambda x: f"{x:+.2f}%")
+            st.dataframe(nview.head(25 if view_mode == "Summary" else 100), width="stretch", hide_index=True)
 
     if (not execution_mode) and (view_mode == "Detail"):
         with st.expander("🏷️ Tier Buckets (A+ / A / B / C)", expanded=False):
@@ -1396,6 +2092,15 @@ elif mode == "Swing Rankings":
                 dview["RS Pct"] = dview["RS Pct"].apply(lambda x: f"{x:.2f}")
                 dview["Vol Pct"] = dview["Vol Pct"].apply(lambda x: f"{x:.2f}")
                 st.dataframe(dview, width='stretch', hide_index=True)
+
+_perf["mode_render_s"] = round(time.perf_counter() - _t_mode, 3)
+_perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)
+if st.sidebar.checkbox("Show Performance Diagnostics", value=False):
+    st.sidebar.dataframe(
+        pd.DataFrame([{"Step": k, "Seconds": v} for k, v in _perf.items()]),
+        width="stretch",
+        hide_index=True,
+    )
 
 # ==================== FOOTER ====================
 st.markdown("---")

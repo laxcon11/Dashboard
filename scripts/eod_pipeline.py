@@ -81,7 +81,7 @@ def main() -> int:
 
     # Simple trigger list: biggest daily movers
     movers = []
-    for s in symbols[:200]:
+    for s in symbols:
         df = data.get(s)
         if df is None or df.empty or "Close" not in df.columns:
             continue

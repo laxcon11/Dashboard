@@ -1,15 +1,26 @@
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 from pathlib import Path
+import time
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from config import FRED_API_KEY
+from config import (
+    FRED_API_KEY,
+    GIFT_NIFTY_MACRO_BADGE,
+    GIFT_NIFTY_STRESS_FLAG_PCT,
+    GIFT_NIFTY_SESSION_START_IST_HOUR,
+    GIFT_NIFTY_COLLAPSE_IST_HOUR,
+)
 from data_fetch import batch_download, fetch_fred_series, fetch_india_vix, prepare_timeseries_for_chart
+from gift_nifty import get_gift_nifty_snapshot, is_gift_session_active
+from india_context import get_india_context_signals
 from regime_model import load_regime_settings
+from regime_state import save_regime_snapshot
 from utils import (
     setup_page,
     render_key_observations,
@@ -24,6 +35,8 @@ setup_page("Macro Risk")
 view_mode = get_ui_detail_mode("Summary")
 st.title("🌍 India Macro Risk Dashboard")
 st.caption("Configurable regime model combining Macro and Liquidity factors.")
+_page_t0 = time.perf_counter()
+_perf: dict[str, float] = {}
 
 settings = load_regime_settings()
 blend = settings["blend"]
@@ -117,6 +130,19 @@ max_factor_weight = float(blend.get("max_factor_weight", 0.2))
 neutral_band = float(blend.get("neutral_band", 0.35))
 risk_on_threshold = float(blend.get("risk_on_threshold", 0.6))
 risk_off_threshold = float(blend.get("risk_off_threshold", 0.6))
+sofr_iorb_penalty_enabled = bool(blend.get("sofr_iorb_penalty_enabled", True))
+sofr_iorb_warn_bps = max(0.0, float(blend.get("sofr_iorb_warn_bps", 5.0)))
+sofr_iorb_full_penalty_bps = max(
+    sofr_iorb_warn_bps + 0.1,
+    float(blend.get("sofr_iorb_full_penalty_bps", 15.0)),
+)
+sofr_iorb_max_penalty = clip(float(blend.get("sofr_iorb_max_penalty", 0.25)), 0.0, 0.8)
+sofr_iorb_persistence_days = max(1, int(blend.get("sofr_iorb_persistence_days", 3)))
+sofr_iorb_persisted_max_penalty = clip(
+    max(sofr_iorb_max_penalty, float(blend.get("sofr_iorb_persisted_max_penalty", 0.35))),
+    0.0,
+    0.9,
+)
 group_caps_cfg = blend.get("group_caps", {})
 group_caps = {
     "Macro": clip(float(group_caps_cfg.get("Macro", 0.30)), 0.01, 1.0),
@@ -143,7 +169,9 @@ for factor in enabled_macro.values():
         required_symbols.update(factor["ratio"])
 
 with st.spinner("Fetching market data..."):
+    _t_market = time.perf_counter()
     market_data = batch_download(sorted(required_symbols), period="6mo")
+    _perf["market_fetch_s"] = round(time.perf_counter() - _t_market, 3)
 
 vix_price, vix_change = fetch_india_vix()
 
@@ -157,8 +185,19 @@ if FRED_API_KEY:
             required_fred.update(factor["fred_spread"])
 
     with st.spinner("Fetching liquidity data..."):
-        for sid in sorted(required_fred):
-            fred_raw[sid] = fetch_fred_series(sid, FRED_API_KEY, days=365)
+        _t_fred = time.perf_counter()
+        fred_ids = sorted(required_fred)
+        if fred_ids:
+            workers = min(8, max(1, len(fred_ids)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(fetch_fred_series, sid, FRED_API_KEY, 365): sid for sid in fred_ids}
+                for future in as_completed(futures):
+                    sid = futures[future]
+                    try:
+                        fred_raw[sid] = future.result()
+                    except Exception:
+                        fred_raw[sid] = None
+        _perf["fred_fetch_s"] = round(time.perf_counter() - _t_fred, 3)
 else:
     st.warning("FRED API key not found. Liquidity factors may be unavailable.")
 
@@ -213,6 +252,83 @@ def resolve_liquidity_series(factor: dict, offset: int = 0) -> pd.Series:
         return with_offset(spread, offset)
 
     return pd.Series(dtype=float)
+
+
+def compute_sofr_iorb_penalty(offset: int = 0) -> dict:
+    if not sofr_iorb_penalty_enabled:
+        return {
+            "enabled": False,
+            "applied": 0.0,
+            "spread_bps": None,
+            "base_penalty": 0.0,
+            "penalty_cap": 0.0,
+            "persist_count": 0,
+            "persist_active": False,
+        }
+
+    sofr = fred_series_cache.get("SOFR", pd.Series(dtype=float))
+    iorb = fred_series_cache.get("IORB", pd.Series(dtype=float))
+    spread_df = pd.concat([sofr.rename("sofr"), iorb.rename("iorb")], axis=1).ffill().dropna()
+    if spread_df.empty:
+        return {
+            "enabled": True,
+            "applied": 0.0,
+            "spread_bps": None,
+            "base_penalty": 0.0,
+            "penalty_cap": sofr_iorb_max_penalty,
+            "persist_count": 0,
+            "persist_active": False,
+        }
+
+    spread = with_offset((spread_df["sofr"] - spread_df["iorb"]), offset)
+    spread = spread.dropna()
+    if spread.empty:
+        return {
+            "enabled": True,
+            "applied": 0.0,
+            "spread_bps": None,
+            "base_penalty": 0.0,
+            "penalty_cap": sofr_iorb_max_penalty,
+            "persist_count": 0,
+            "persist_active": False,
+        }
+
+    spread_bps = float(spread.iloc[-1] * 100.0)
+    if spread_bps <= sofr_iorb_warn_bps:
+        base_penalty = 0.0
+    elif spread_bps >= sofr_iorb_full_penalty_bps:
+        base_penalty = sofr_iorb_max_penalty
+    else:
+        ramp = (spread_bps - sofr_iorb_warn_bps) / (sofr_iorb_full_penalty_bps - sofr_iorb_warn_bps)
+        base_penalty = sofr_iorb_max_penalty * clip(ramp, 0.0, 1.0)
+
+    persist_count = 0
+    for val in reversed((spread * 100.0).tolist()):
+        if float(val) > sofr_iorb_warn_bps:
+            persist_count += 1
+        else:
+            break
+
+    persist_active = persist_count >= sofr_iorb_persistence_days
+    penalty_cap = sofr_iorb_persisted_max_penalty if persist_active else sofr_iorb_max_penalty
+
+    if spread_bps <= sofr_iorb_warn_bps:
+        applied = 0.0
+    elif spread_bps >= sofr_iorb_full_penalty_bps:
+        applied = penalty_cap
+    else:
+        ramp = (spread_bps - sofr_iorb_warn_bps) / (sofr_iorb_full_penalty_bps - sofr_iorb_warn_bps)
+        applied = penalty_cap * clip(ramp, 0.0, 1.0)
+
+    return {
+        "enabled": True,
+        "applied": clip(float(applied), 0.0, 1.0),
+        "spread_bps": spread_bps,
+        "base_penalty": clip(float(base_penalty), 0.0, 1.0),
+        "penalty_cap": float(penalty_cap),
+        "persist_count": int(persist_count),
+        "persist_active": bool(persist_active),
+    }
 
 
 def default_group(domain_name: str, factor_id: str) -> str:
@@ -434,6 +550,14 @@ macro_weight, liquidity_weight = normalize_weights(
 
 has_macro = macro_result["has_signal"]
 has_liquidity = liquidity_result["has_signal"]
+sofr_penalty = compute_sofr_iorb_penalty(offset=0)
+
+liq_directional_pre_penalty = float(liquidity_result.get("directional_norm", 0.0))
+liq_impulse_pre_penalty = float(liquidity_result.get("impulse_norm", 0.0))
+if has_liquidity and sofr_penalty.get("applied", 0.0) > 0:
+    penalty = float(sofr_penalty["applied"])
+    liquidity_result["directional_norm"] = clip(liq_directional_pre_penalty - penalty, -1.0, 1.0)
+    liquidity_result["impulse_norm"] = clip(liq_impulse_pre_penalty - penalty, -1.0, 1.0)
 
 if not has_macro and not has_liquidity:
     st.error("No valid factor signals. Check data availability or enable valid factors in Regime Settings.")
@@ -495,7 +619,13 @@ with col1:
     st.caption(f"Impulse: {macro_result['impulse_norm']:+.2f} | Valid: {macro_result['valid']}/{macro_result['enabled']}")
 with col2:
     st.metric("Liquidity Directional", f"{liquidity_result['directional_norm']:+.2f}")
-    st.caption(f"Impulse: {liquidity_result['impulse_norm']:+.2f} | Valid: {liquidity_result['valid']}/{liquidity_result['enabled']}")
+    liq_caption = f"Impulse: {liquidity_result['impulse_norm']:+.2f} | Valid: {liquidity_result['valid']}/{liquidity_result['enabled']}"
+    if sofr_penalty.get("applied", 0.0) > 0 and sofr_penalty.get("spread_bps") is not None:
+        liq_caption += (
+            f" | SOFR-IORB: {sofr_penalty['spread_bps']:+.1f} bps | "
+            f"Penalty: -{sofr_penalty['applied']:.2f}"
+        )
+    st.caption(liq_caption)
 with col3:
     st.metric("Final Directional", f"{final_directional:+.2f}")
     st.caption(f"Final Impulse: {final_impulse:+.2f} | Confidence: {confidence:.0%}")
@@ -512,20 +642,138 @@ else:
     st.warning(f"### {regime}")
 
 st.info(f"Actionable Bias: **{bias}**")
+gift_observations = []
+if GIFT_NIFTY_MACRO_BADGE and is_gift_session_active(
+    session_start_hour=GIFT_NIFTY_SESSION_START_IST_HOUR,
+    cutoff_hour=GIFT_NIFTY_COLLAPSE_IST_HOUR,
+):
+    try:
+        nd = market_data.get("^NSEI")
+        prev_close = None
+        if nd is not None and not nd.empty and "Close" in nd.columns:
+            c = pd.to_numeric(nd["Close"], errors="coerce").dropna()
+            if len(c) >= 1:
+                prev_close = float(c.iloc[-1])
+        gift = get_gift_nifty_snapshot(prev_nifty_close=prev_close)
+        if gift.get("available", False):
+            prem = gift.get("premium_pct_vs_prev_close")
+            badge = "N/A" if prem is None else f"{float(prem):+.2f}%"
+            gift_label = str(gift.get("implied_label", "Unknown"))
+            if gift_label == "Gap Up":
+                gift_tag = "🟢 Green"
+            elif gift_label == "Gap Down":
+                gift_tag = "🔴 Red"
+            else:
+                gift_tag = "🟠 Orange"
+            gift_price = gift.get("price")
+            price_txt = "N/A" if gift_price is None else f"{float(gift_price):,.2f}"
+            gift_observations.append(f"{gift_tag} GIFT NIFTY {price_txt} | {badge} ({gift_label}).")
+            if gift.get("quality_note"):
+                st.caption(f"Normalization: {gift.get('quality_note')}")
+    except Exception:
+        pass
+if sofr_penalty.get("applied", 0.0) > 0 and sofr_penalty.get("spread_bps") is not None:
+    persist_tag = (
+        f" (persistent {sofr_penalty['persist_count']}d)"
+        if sofr_penalty.get("persist_active", False)
+        else ""
+    )
+    st.warning(
+        "SOFR/IORB liquidity stress penalty active: "
+        f"{sofr_penalty['spread_bps']:+.1f} bps -> -{sofr_penalty['applied']:.2f} on Liquidity score{persist_tag}."
+    )
 st.caption(
     f"Agreement: {agreement:.0%} | Data quality: {data_quality:.0%} | "
     f"Final blend: {(1.0 - impulse_influence):.0%} directional + {impulse_influence:.0%} impulse"
 )
 
+ctx = get_india_context_signals()
+flows = ctx.get("flows", {})
+vix_ctx = ctx.get("vix", {})
+breadth_ctx = ctx.get("breadth", {})
+curve_ctx = ctx.get("curve", {})
+gst_ctx = ctx.get("gst", {})
+history_rows = flows.get("history_rows", [])
+monthly_rows = flows.get("monthly_history_rows", [])
+as_of = pd.to_datetime(flows.get("as_of"), errors="coerce")
+
 observations = [
-    f"Regime: {regime} with {confidence:.0%} confidence.",
-    f"Macro directional {macro_result['directional_norm']:+.2f} vs Liquidity directional {liquidity_result['directional_norm']:+.2f}.",
+    f"{regime.split(' ')[0]} Regime {regime.split(' ', 1)[1]} with {confidence:.0%} confidence.",
 ]
 if abs(macro_result["directional_norm"] - liquidity_result["directional_norm"]) >= 0.4:
     observations.append("Macro and Liquidity are diverging materially; reduce position size.")
 if abs(final_impulse) > abs(final_directional) + 0.2:
     observations.append("Short-term impulse is dominating trend; expect higher noise.")
-render_key_observations(observations)
+if sofr_penalty.get("applied", 0.0) > 0 and sofr_penalty.get("spread_bps") is not None:
+    observations.append(
+        f"Interbank stress: SOFR-IORB {sofr_penalty['spread_bps']:+.1f} bps, "
+        f"Liquidity penalty -{sofr_penalty['applied']:.2f} applied."
+    )
+observations.extend(gift_observations)
+
+# India flow context in key observations (daily + current month + streak flips).
+if history_rows:
+    hist_df = pd.DataFrame(history_rows)
+    hist_df["date"] = pd.to_datetime(hist_df["date"], errors="coerce")
+    hist_df["fii_net"] = pd.to_numeric(hist_df["fii_net"], errors="coerce")
+    hist_df = hist_df.dropna(subset=["date"]).sort_values("date")
+    if not hist_df.empty:
+        last = hist_df.iloc[-1]
+        daily_net = float(last["fii_net"])
+        daily_tag = "🟢" if daily_net > 0 else ("🔴" if daily_net < 0 else "🟠")
+        observations.append(f"{daily_tag} FII Daily: ₹{daily_net:,.0f} Cr.")
+
+        ref_as_of = as_of if not pd.isna(as_of) else pd.to_datetime(last["date"], errors="coerce")
+        if not pd.isna(ref_as_of):
+            cur_month = ref_as_of.to_period("M")
+            cur_daily = hist_df[hist_df["date"].dt.to_period("M") == cur_month].copy()
+            if not cur_daily.empty:
+                mtd_net = float(cur_daily["fii_net"].sum())
+                mtd_tag = "🟢" if mtd_net > 0 else ("🔴" if mtd_net < 0 else "🟠")
+                observations.append(f"{mtd_tag} FII {cur_month.strftime('%b %Y')} MTD: ₹{mtd_net:,.0f} Cr.")
+
+                # If a red streak flips green today, call it out explicitly.
+                signs = cur_daily["fii_net"].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0)).tolist()
+                if len(signs) >= 2 and signs[-1] == 1 and signs[-2] == -1:
+                    streak = 1
+                    idx = len(signs) - 2
+                    while idx >= 0 and signs[idx] == -1:
+                        streak += 1
+                        idx -= 1
+                    observations.append(f"🟢 FII regime flip: {streak} negative days turned positive today.")
+render_key_observations(observations, max_items=8)
+
+with st.expander("🇮🇳 India Domestic Risk (Context Only - Not Scored Yet)", expanded=False):
+    c1, c2 = st.columns(2)
+    with c1:
+        vix_val = vix_ctx.get("value")
+        vix_chg = vix_ctx.get("change_pct")
+        st.metric("India VIX", "N/A" if vix_val is None else f"{vix_val:.2f}", None if vix_chg is None else f"{vix_chg:+.2f}%")
+        st.caption(f"{vix_ctx.get('status', 'STALE')} | {vix_ctx.get('source', 'NSE')}")
+    with c2:
+        adv = breadth_ctx.get("advances")
+        dec = breadth_ctx.get("declines")
+        ratio = breadth_ctx.get("ratio")
+        val = "N/A"
+        if adv is not None and dec is not None:
+            val = f"{int(adv)}:{int(dec)}"
+        st.metric("A/D Breadth", val, None if ratio is None else f"{float(ratio):.2f}")
+        st.caption(f"{breadth_ctx.get('status', 'STALE')} | {breadth_ctx.get('as_of', 'N/A')}")
+
+    d1, d2 = st.columns(2)
+    with d1:
+        curve_value = curve_ctx.get("value")
+        st.metric("India Curve (10Y-3M)", "N/A" if curve_value is None else f"{float(curve_value):+.2f}")
+        st.caption(f"{curve_ctx.get('status', 'UNAVAILABLE')} | {curve_ctx.get('source', 'pending')}")
+    with d2:
+        gst_yoy = gst_ctx.get("gst_yoy")
+        st.metric("GST YoY", "N/A" if gst_yoy is None else f"{float(gst_yoy):+.1f}%")
+        st.caption(f"{gst_ctx.get('status', 'UNAVAILABLE')} | {gst_ctx.get('source', 'pending')}")
+
+    st.info(
+        "Phase A visibility mode: domestic context signals are shown for monitoring only. "
+        "They are not included in regime score yet."
+    )
 
 st.subheader("🎯 Regime Probabilities")
 p1, p2, p3 = st.columns(3)
@@ -536,11 +784,46 @@ p1.metric("Risk On", f"{disp_risk_on}%")
 p2.metric("Neutral", f"{disp_neutral}%")
 p3.metric("Risk Off", f"{disp_risk_off}%")
 
+# Publish canonical regime payload for cross-page consistency.
+regime_payload = {
+    "regime_label": regime,
+    "confidence": round(float(confidence), 4),
+    "final_score": round(float(final_score), 4),
+    "final_directional": round(float(final_directional), 4),
+    "final_impulse": round(float(final_impulse), 4),
+    "macro_directional": round(float(macro_result.get("directional_norm", 0.0)), 4),
+    "liquidity_directional": round(float(liquidity_result.get("directional_norm", 0.0)), 4),
+    "bias": bias,
+    "probabilities": {
+        "risk_on": round(float(p_risk_on), 6),
+        "neutral": round(float(p_neutral), 6),
+        "risk_off": round(float(p_risk_off), 6),
+    },
+    "sofr_iorb_penalty": {
+        "applied": round(float(sofr_penalty.get("applied", 0.0) or 0.0), 4),
+        "spread_bps": (
+            round(float(sofr_penalty.get("spread_bps")), 3)
+            if sofr_penalty.get("spread_bps") is not None
+            else None
+        ),
+        "persist_count": int(sofr_penalty.get("persist_count", 0) or 0),
+        "persist_active": bool(sofr_penalty.get("persist_active", False)),
+    },
+    "source": "macro_risk_page",
+}
+save_regime_snapshot(regime_payload)
+st.session_state["macro_regime_snapshot"] = regime_payload
+
 # 90-day pulse-tape timeline (bottom of overview panel)
 timeline_rows = []
 for offset in range(89, -1, -1):
     macro_day = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=offset)
     liquidity_day = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=offset)
+    sofr_penalty_day = compute_sofr_iorb_penalty(offset=offset)
+    if liquidity_day["has_signal"] and sofr_penalty_day.get("applied", 0.0) > 0:
+        penalty_day = float(sofr_penalty_day["applied"])
+        liquidity_day["directional_norm"] = clip(float(liquidity_day["directional_norm"]) - penalty_day, -1.0, 1.0)
+        liquidity_day["impulse_norm"] = clip(float(liquidity_day["impulse_norm"]) - penalty_day, -1.0, 1.0)
 
     if macro_day["has_signal"] and liquidity_day["has_signal"]:
         impulse_day = (macro_day["impulse_norm"] * macro_weight) + (liquidity_day["impulse_norm"] * liquidity_weight)
@@ -643,6 +926,13 @@ if not factor_df.empty:
 
     with st.expander("🧮 Score Formula", expanded=(view_mode == "Detail")):
         st.caption(f"Macro Directional = {macro_formula_terms} = {macro_result['directional_norm']:+.3f}")
+        if sofr_penalty.get("applied", 0.0) > 0 and sofr_penalty.get("spread_bps") is not None:
+            st.caption(
+                "Liquidity penalty: "
+                f"{liq_directional_pre_penalty:+.3f} -> {liquidity_result['directional_norm']:+.3f} "
+                f"(SOFR-IORB {sofr_penalty['spread_bps']:+.1f} bps, penalty -{sofr_penalty['applied']:.3f}, "
+                f"warn>{sofr_iorb_warn_bps:.1f}, full@{sofr_iorb_full_penalty_bps:.1f} bps)"
+            )
         st.caption(
             f"Final Directional = ({macro_weight:.2f} x {macro_result['directional_norm']:+.3f}) + "
             f"({liquidity_weight:.2f} x {liquidity_result['directional_norm']:+.3f}) = {final_directional:+.3f}"
@@ -714,6 +1004,16 @@ if not factor_df.empty:
                     st.markdown(f"<span style='color:#f9a825'>- {item}</span>", unsafe_allow_html=True)
             else:
                 st.write("- None")
+            if sofr_penalty.get("applied", 0.0) > 0 and sofr_penalty.get("spread_bps") is not None:
+                st.markdown(
+                    "<span style='color:#c62828;font-weight:700'>Liquidity Stress Override</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<span style='color:#c62828'>- SOFR-IORB {sofr_penalty['spread_bps']:+.1f} bps "
+                    f"-> Liquidity penalty -{sofr_penalty['applied']:.2f}</span>",
+                    unsafe_allow_html=True,
+                )
 
 with st.expander("📉 Regime Trend & Diagnostics (Expand)", expanded=(view_mode == "Detail")):
     trend_scores = []
@@ -728,6 +1028,11 @@ with st.expander("📉 Regime Trend & Diagnostics (Expand)", expanded=(view_mode
         day_key = str(day.date())
         macro_day = score_domain(enabled_macro, resolve_macro_series, "Macro", offset=offset)
         liquidity_day = score_domain(enabled_liquidity, resolve_liquidity_series, "Liquidity", offset=offset)
+        sofr_penalty_day = compute_sofr_iorb_penalty(offset=offset)
+        if liquidity_day["has_signal"] and sofr_penalty_day.get("applied", 0.0) > 0:
+            penalty_day = float(sofr_penalty_day["applied"])
+            liquidity_day["directional_norm"] = clip(float(liquidity_day["directional_norm"]) - penalty_day, -1.0, 1.0)
+            liquidity_day["impulse_norm"] = clip(float(liquidity_day["impulse_norm"]) - penalty_day, -1.0, 1.0)
 
         if macro_day["has_signal"] and liquidity_day["has_signal"]:
             impulse_day = (macro_day["impulse_norm"] * macro_weight) + (liquidity_day["impulse_norm"] * liquidity_weight)
@@ -837,5 +1142,95 @@ with st.expander("📉 Regime Trend & Diagnostics (Expand)", expanded=(view_mode
         with st.expander(label):
             st.line_chart(series)
 
+with st.expander("💼 FII / DII Flows", expanded=False):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        fii = flows.get("fii_net")
+        st.metric("FII Net (Daily)", "N/A" if fii is None else f"₹{fii:,.0f} Cr")
+        st.caption(f"{flows.get('status', 'STALE')} | {flows.get('as_of', 'N/A')}")
+    with c2:
+        fii20 = flows.get("fii_20d")
+        st.metric("FII Net (20D)", "N/A" if fii20 is None else f"₹{fii20:,.0f} Cr")
+        st.caption(f"Rows: {flows.get('rows', 0)} | Source: {flows.get('source', 'N/A')}")
+    with c3:
+        dom = flows.get("fii_dii_dominance")
+        st.metric("FII Dominance", "N/A" if dom is None else f"{dom:+.2f}")
+        st.caption("FII/(|FII|+|DII|)")
+
+    if flows.get("note"):
+        st.caption(str(flows.get("note")))
+
+    if history_rows:
+        hist_df = pd.DataFrame(history_rows)
+        hist_df["date"] = pd.to_datetime(hist_df["date"], errors="coerce")
+        hist_df["fii_net"] = pd.to_numeric(hist_df["fii_net"], errors="coerce")
+        hist_df["dii_net"] = pd.to_numeric(hist_df["dii_net"], errors="coerce")
+        hist_df = hist_df.dropna(subset=["date"]).sort_values("date")
+        if not hist_df.empty and not pd.isna(as_of):
+            cur_month = as_of.to_period("M")
+            cur_daily = hist_df[hist_df["date"].dt.to_period("M") == cur_month].copy()
+            if not cur_daily.empty:
+                st.markdown("#### 📆 Current Month (Daily FII/DII Net)")
+                cur_view = cur_daily.copy()
+                cur_view["Date"] = cur_view["date"].dt.strftime("%Y-%m-%d")
+                cur_view["FII Net"] = cur_view["fii_net"].map(lambda x: f"₹{x:,.0f}")
+                cur_view["DII Net"] = cur_view["dii_net"].map(lambda x: f"₹{x:,.0f}")
+                cur_view["FII Bias"] = cur_daily["fii_net"].apply(
+                    lambda x: "Buy" if x > 0 else ("Sell" if x < 0 else "Flat")
+                )
+                st.dataframe(cur_view[["Date", "FII Net", "DII Net", "FII Bias"]], width="stretch", hide_index=True)
+                st.caption("Daily values are live/cache based and update with each data refresh.")
+
+    if monthly_rows:
+        mdf = pd.DataFrame(monthly_rows)
+        mdf["month_start"] = pd.to_datetime(mdf["month_start"], errors="coerce")
+        mdf["fii_net"] = pd.to_numeric(mdf["fii_net"], errors="coerce")
+        mdf["dii_net"] = pd.to_numeric(mdf["dii_net"], errors="coerce")
+        mdf = mdf.dropna(subset=["month_start"]).sort_values("month_start")
+        if not mdf.empty:
+            if not pd.isna(as_of):
+                mdf = mdf[mdf["month_start"] < as_of.normalize().replace(day=1)]
+            if not mdf.empty:
+                st.markdown("#### 📅 Prior Months (Monthly FII Net)")
+                m1, m2 = st.columns(2)
+                latest_month = mdf.iloc[-1]
+                prev_month_val = mdf.iloc[-2]["fii_net"] if len(mdf) >= 2 else None
+                with m1:
+                    st.metric(
+                        "Latest Prior Month FII Net",
+                        f"₹{latest_month['fii_net']:,.0f} Cr",
+                        None if prev_month_val is None else f"{(latest_month['fii_net'] - prev_month_val):+,.0f} vs prior",
+                    )
+                with m2:
+                    st.metric("Latest Prior Month", latest_month["month_start"].strftime("%Y-%m"))
+                mshow = mdf.copy()
+                mshow["Month"] = mshow["month_start"].dt.strftime("%Y-%m")
+                mshow["NetValue"] = mshow["fii_net"]
+                mshow["Net"] = mshow["NetValue"].map(lambda x: f"₹{x:,.0f}")
+                mshow["Regime"] = mshow["NetValue"].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+                mshow["RegimeChange"] = mshow["Regime"].ne(mshow["Regime"].shift(1)).fillna(False)
+                out = mshow[["Month", "Net", "RegimeChange"]].copy()
+
+                def _style_regime_change(row):
+                    if bool(row["RegimeChange"]):
+                        return ["", "color: #2e7d32; font-weight: 700;", ""]
+                    return ["", "", ""]
+
+                st.dataframe(
+                    out.style.apply(_style_regime_change, axis=1).hide(axis="columns", subset=["RegimeChange"]),
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption("Prior month history sourced from imported FIIDII workbook.")
+    elif not history_rows:
+        st.caption("FII/DII history not available yet.")
+
 st.markdown("---")
 st.caption("Configure factor weights and enabled factors from the Regime Settings page.")
+_perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)
+if st.sidebar.checkbox("Show Performance Diagnostics", value=False):
+    st.sidebar.dataframe(
+        pd.DataFrame([{"Step": k, "Seconds": v} for k, v in _perf.items()]),
+        width="stretch",
+        hide_index=True,
+    )

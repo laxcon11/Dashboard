@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-02-23T20:48:43.414600",
+  "regime": "\ud83d\udfe2 Risk On",
+  "regime_score": 1,
+  "breadth": {
+    "advances": 63,
+    "declines": 29,
+    "ratio": 2.1724137931034484
+  },
+  "top_movers": [
+    {
+      "symbol": "IDFCFIRSTB.NS",
+      "change_pct": -16.129804813794753
+    },
+    {
+      "symbol": "UPL.NS",
+      "change_pct": -14.295208347178848
+    },
+    {
+      "symbol": "GODFRYPHLP.NS",
+      "change_pct": -11.041884395851767
+    },
+    {
+      "symbol": "AUBANK.NS",
+      "change_pct": -5.3950371485456285
+    },
+    {
+      "symbol": "DIXON.NS",
+      "change_pct": -4.272037572254335
+    },
+    {
+      "symbol": "COFORGE.NS",
+      "change_pct": -3.8490228256004713
+    },
+    {
+      "symbol": "INDIANB.NS",
+      "change_pct": 3.807964508291956
+    },
+    {
+      "symbol": "HAL.NS",
+      "change_pct": -3.4676258992805735
+    },
+    {
+      "symbol": "MAZDOCK.NS",
+      "change_pct": -3.3641216846029844
+    },
+    {
+      "symbol": "CUMMINSIND.NS",
+      "change_pct": 3.177084433553741
+    },
+    {
+      "symbol": "SIEMENS.NS",
+      "change_pct": 2.9941987399413637
+    },
+    {
+      "symbol": "TATAELXSI.NS",
+      "change_pct": -2.984153117925499
+    },
+    {
+      "symbol": "ADANIPORTS.NS",
+      "change_pct": 2.930863380747599
+    },
+    {
+      "symbol": "VMM.NS",
+      "change_pct": 2.92557741659537
+    },
+    {
+      "symbol": "BHARATFORG.NS",
+      "change_pct": 2.9213483146067416
+    }
+  ],
+  "watchlists_scanned": 10,
+  "symbols_scanned": 229
+}

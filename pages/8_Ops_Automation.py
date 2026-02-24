@@ -7,6 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 from utils import setup_page, get_ui_detail_mode
+from regime_state import load_regime_snapshot
 
 
 setup_page("Ops & Automation")
@@ -17,6 +18,19 @@ st.caption("Phase 5 operations center: EOD refresh, alerts, and recovery utiliti
 BASE_DIR = Path(__file__).resolve().parents[1]
 SNAPSHOT_DIR = BASE_DIR / "data" / "snapshots"
 ALERT_FILE = BASE_DIR / "logs" / "alerts.log"
+
+ssot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
+if isinstance(ssot, dict) and ssot:
+    probs = ssot.get("probabilities", {}) if isinstance(ssot.get("probabilities", {}), dict) else {}
+    st.info(
+        "Macro SSOT: "
+        f"{ssot.get('regime_label', 'Unknown')} | "
+        f"Conf {float(ssot.get('confidence', 0.0) or 0.0):.0%} | "
+        f"Score {float(ssot.get('final_score', 0.0) or 0.0):+.2f} | "
+        f"P(On/N/Off) {float(probs.get('risk_on', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('neutral', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('risk_off', 0.0) or 0.0):.0%}"
+    )
 
 
 def run_script(script_name: str, args: list[str] | None = None) -> tuple[int, str]:
@@ -84,6 +98,24 @@ with right:
             st.write(f"- {ln}")
     else:
         st.info("No alerts log yet.")
+
+st.markdown("---")
+st.subheader("🕒 GIFT NIFTY Poller")
+g1, g2 = st.columns([1, 1])
+with g1:
+    if st.button("Run GIFT Poll (Once)", width="stretch"):
+        rc, out = run_script("poll_gift_nifty.py", ["--once"])
+        if rc == 0:
+            st.success("GIFT poll completed.")
+        else:
+            st.error(f"GIFT poll failed (code {rc}).")
+        st.code(out[-4000:] if out else "(no output)", language="text")
+with g2:
+    st.caption("Continuous polling command (run in terminal):")
+    st.code(
+        ".venv/bin/python scripts/poll_gift_nifty.py --interval-sec 180 --start-hour 17 --cutoff-hour 10",
+        language="bash",
+    )
 
 st.markdown("---")
 st.subheader("🧰 Recovery Tools")

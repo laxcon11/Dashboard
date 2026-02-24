@@ -19,6 +19,53 @@ logger = logging.getLogger(__name__)
 
 # ==================== PAGE SETUP ====================
 
+def _render_grouped_sidebar_nav() -> None:
+    """Custom grouped sidebar navigation for faster scanning."""
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Navigation")
+
+    groups = {
+        "Core": [
+            ("Launcher", "app.py"),
+            ("NSE Dashboard", "pages/0_NSE_Dashboard.py"),
+            ("Tradable Universe", "pages/11_Tradable_Universe.py"),
+            ("Macro Risk", "pages/3_Macro_Risk.py"),
+        ],
+        "Market": [
+            ("Global Markets", "pages/1_Global_Markets.py"),
+            ("Liquidity & Money Supply", "pages/2_Money_Supply.py"),
+            ("Leading Indicators", "pages/4_Leading_Indicators.py"),
+        ],
+        "Journal": [
+            ("Trading Journal", "pages/5_Trading_Journal.py"),
+            ("Portfolio Risk", "pages/7_Portfolio_Risk.py"),
+            ("Prediction Integrity", "pages/9_Prediction_Integrity.py"),
+        ],
+        "Admin / Ops": [
+            ("Regime Settings", "pages/6_Regime_Settings.py"),
+            ("Ops & Automation", "pages/8_Ops_Automation.py"),
+            ("Scoring Audit", "pages/10_Scoring_Audit.py"),
+            ("Roadmap TODO", "pages/12_Todo_Tracker.py"),
+        ],
+    }
+
+    page_link_fn = getattr(st.sidebar, "page_link", None)
+    if not callable(page_link_fn):
+        # Fallback for older Streamlit builds.
+        st.sidebar.caption("Grouped navigation unavailable on this Streamlit version.")
+        return
+
+    for section, links in groups.items():
+        st.sidebar.markdown(f"**{section}**")
+        for label, path in links:
+            try:
+                st.sidebar.page_link(path, label=label)
+            except Exception:
+                # Do not break pages if a target file is missing/renamed.
+                continue
+        st.sidebar.caption("")
+
+
 def setup_page(title: str, layout: str = "wide"):
     """Standardized page configuration and styling"""
     st.set_page_config(
@@ -44,6 +91,7 @@ def setup_page(title: str, layout: str = "wide"):
         }
     </style>
     """, unsafe_allow_html=True)
+    _render_grouped_sidebar_nav()
 
 
 def get_ui_detail_mode(default: str = "Summary") -> str:

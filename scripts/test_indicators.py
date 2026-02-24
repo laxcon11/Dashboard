@@ -12,6 +12,7 @@ import sys
 # Adjust path to import from parent directory
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from indicators import calculate_rsi, calculate_ema, calculate_atr
 import analytics
 
 class TestIndicatorCalculations(unittest.TestCase):
@@ -56,32 +57,32 @@ class TestIndicatorCalculations(unittest.TestCase):
     
     def test_rsi_calculation_range(self):
         """Test RSI is within 0-100 range"""
-        rsi = analytics.calculate_rsi(self.sample_data, period=14)
+        rsi = calculate_rsi(self.sample_data, period=14)
         valid_rsi = rsi.dropna()
         self.assertTrue((valid_rsi >= 0).all())
         self.assertTrue((valid_rsi <= 100).all())
     
     def test_rsi_uptrend(self):
         """Test RSI in strong uptrend (should be > 50)"""
-        rsi = analytics.calculate_rsi(self.sample_data, period=14)
+        rsi = calculate_rsi(self.sample_data, period=14)
         recent_rsi = rsi.tail(10).mean()
         self.assertGreater(recent_rsi, 50, "RSI should be > 50 in uptrend")
     
     def test_ema_calculation(self):
         """Test EMA is calculated correctly"""
-        ema_20 = analytics.calculate_ema(self.sample_data, 20)
+        ema_20 = calculate_ema(self.sample_data, 20)
         self.assertFalse(ema_20.isnull().all())
         self.assertGreater(ema_20.iloc[-1], ema_20.iloc[-10])
     
     def test_ema_ordering(self):
         """Test EMA ordering in uptrend (shorter EMA > longer EMA)"""
-        ema_20 = analytics.calculate_ema(self.sample_data, 20)
-        ema_50 = analytics.calculate_ema(self.sample_data, 50)
+        ema_20 = calculate_ema(self.sample_data, 20)
+        ema_50 = calculate_ema(self.sample_data, 50)
         self.assertGreater(ema_20.iloc[-1], ema_50.iloc[-1])
     
     def test_atr_positive(self):
         """Test ATR is always positive"""
-        atr = analytics.calculate_atr(self.sample_data, period=14)
+        atr = calculate_atr(self.sample_data, period=14)
         valid_atr = atr.dropna()
         self.assertTrue((valid_atr > 0).all(), "ATR should always be positive")
     

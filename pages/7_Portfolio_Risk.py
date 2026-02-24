@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
+import time
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,7 @@ import streamlit as st
 
 from NSE_Config import SECTOR_CATEGORIES, FNO_DELTA_STOCKS, FNO_MOST_TRADED_30
 from data_fetch import batch_download, extract_price_data
+from regime_state import load_regime_snapshot
 from utils import setup_page, get_ui_detail_mode
 
 
@@ -15,6 +17,8 @@ setup_page("Portfolio Risk")
 view_mode = get_ui_detail_mode("Summary")
 st.title("🛡 Portfolio Risk & Execution Control")
 st.caption("Position-taking discipline: concentration, correlation, exposure, and pre-trade checklist.")
+_page_t0 = time.perf_counter()
+_perf: dict[str, float] = {}
 
 JOURNAL_FILE = Path("notes/trading_journal.csv")
 RULES_FILE = Path("notes/portfolio_rules.json")
@@ -52,6 +56,12 @@ def default_qty_for_symbol(symbol: str) -> int:
     if lot is not None and lot > 0:
         return int(lot)
     return 1 if sym in FNO_TRACKED_SYMBOLS else 100
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_cached_ltp(symbol: str) -> Optional[float]:
+    data = batch_download([symbol], period="1mo")
+    return extract_price_data(data.get(symbol))[0]
 
 
 def load_fno_lot_map() -> dict[str, int]:
@@ -158,7 +168,9 @@ symbols = sorted(open_trades["Symbol"].dropna().unique().tolist())
 open_trades["Symbol_Norm"] = open_trades["Symbol"].map(normalize_symbol)
 symbols_norm = sorted(open_trades["Symbol_Norm"].dropna().unique().tolist())
 with st.spinner("Fetching live values and risk inputs..."):
+    _t_fetch = time.perf_counter()
     mkt = batch_download(symbols_norm, period="6mo")
+    _perf["data_fetch_s"] = round(time.perf_counter() - _t_fetch, 3)
 
 prices = {}
 for sym in symbols_norm:
@@ -255,24 +267,45 @@ if view_mode == "Detail":
 
 st.markdown("### ✅ Trade Checklist Engine")
 candidate_options = sorted(set(symbols_norm + list(sector_map.keys())))
-candidate_symbol = st.selectbox("Candidate Symbol", options=candidate_options)
-candidate_side = st.selectbox("Candidate Side", options=["LONG", "SHORT"])
-candidate_regime = st.selectbox("Current Regime", options=["🟢 Risk On", "🟡 Neutral", "🔴 Risk Off", "Unknown"])
-portfolio_equity = st.number_input("Portfolio Equity (₹)", min_value=100000.0, value=1000000.0, step=50000.0)
-candidate_ltp = prices.get(candidate_symbol)
-if candidate_ltp is None:
-    with st.spinner("Fetching selected candidate LTP..."):
-        single = batch_download([candidate_symbol], period="3mo")
-    candidate_ltp = extract_price_data(single.get(candidate_symbol))[0]
-entry_default = float(candidate_ltp) if candidate_ltp is not None and not pd.isna(candidate_ltp) else 100.0
-c_ltp_col, c_entry_col, c_stop_col = st.columns(3)
-with c_ltp_col:
-    st.metric("LTP", f"₹{entry_default:,.2f}" if entry_default > 0 else "N/A")
-with c_entry_col:
-    entry = st.number_input("Candidate Entry Price", min_value=0.0, value=float(entry_default), step=0.5)
-with c_stop_col:
-    stop_default = (entry * 0.975) if candidate_side == "LONG" else (entry * 1.025)
-    stop = st.number_input("Candidate Stop Price", min_value=0.0, value=float(stop_default), step=0.5)
+regime_snapshot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
+regime_options = ["🟢 Risk On", "🟡 Neutral", "🔴 Risk Off", "Unknown"]
+regime_default = str(regime_snapshot.get("regime_label", "Unknown")) if isinstance(regime_snapshot, dict) else "Unknown"
+if regime_default not in regime_options:
+    regime_default = "Unknown"
+
+if isinstance(regime_snapshot, dict) and regime_snapshot:
+    prob = regime_snapshot.get("probabilities", {}) if isinstance(regime_snapshot.get("probabilities", {}), dict) else {}
+    st.caption(
+        f"Macro SSOT: {regime_default} | "
+        f"Confidence: {float(regime_snapshot.get('confidence', 0.0) or 0.0):.0%} | "
+        f"Score: {float(regime_snapshot.get('final_score', 0.0) or 0.0):+.2f} | "
+        f"P(On/N/Off): {float(prob.get('risk_on', 0.0) or 0.0):.0%}/"
+        f"{float(prob.get('neutral', 0.0) or 0.0):.0%}/"
+        f"{float(prob.get('risk_off', 0.0) or 0.0):.0%}"
+    )
+
+with st.form("trade_checklist_form", clear_on_submit=False):
+    candidate_symbol = st.selectbox("Candidate Symbol", options=candidate_options)
+    candidate_side = st.selectbox("Candidate Side", options=["LONG", "SHORT"])
+    candidate_regime = st.selectbox(
+        "Current Regime",
+        options=regime_options,
+        index=regime_options.index(regime_default),
+    )
+    portfolio_equity = st.number_input("Portfolio Equity (₹)", min_value=100000.0, value=1000000.0, step=50000.0)
+    candidate_ltp = prices.get(candidate_symbol)
+    if candidate_ltp is None:
+        candidate_ltp = fetch_cached_ltp(candidate_symbol)
+    entry_default = float(candidate_ltp) if candidate_ltp is not None and not pd.isna(candidate_ltp) else 100.0
+    c_ltp_col, c_entry_col, c_stop_col = st.columns(3)
+    with c_ltp_col:
+        st.metric("LTP", f"₹{entry_default:,.2f}" if entry_default > 0 else "N/A")
+    with c_entry_col:
+        entry = st.number_input("Candidate Entry Price", min_value=0.0, value=float(entry_default), step=0.5)
+    with c_stop_col:
+        stop_default = (entry * 0.975) if candidate_side == "LONG" else (entry * 1.025)
+        stop = st.number_input("Candidate Stop Price", min_value=0.0, value=float(stop_default), step=0.5)
+    submitted = st.form_submit_button("Run Checklist", use_container_width=True)
 
 qty_key = "trade_checklist_qty"
 sym_key = "trade_checklist_last_symbol"
@@ -294,6 +327,27 @@ if norm_candidate_symbol in FNO_TRACKED_SYMBOLS:
         st.caption("F&O symbol detected: lot size cache missing for this symbol, defaulting to 1.")
 else:
     st.caption("Non-F&O symbol: default quantity set to 100.")
+
+check_state_key = "trade_checklist_last_run"
+if submitted or check_state_key not in st.session_state:
+    st.session_state[check_state_key] = {
+        "candidate_symbol": candidate_symbol,
+        "candidate_side": candidate_side,
+        "candidate_regime": candidate_regime,
+        "portfolio_equity": float(portfolio_equity),
+        "entry": float(entry),
+        "stop": float(stop),
+        "qty": int(qty),
+    }
+
+check_state = st.session_state.get(check_state_key, {})
+candidate_symbol = check_state.get("candidate_symbol", candidate_symbol)
+candidate_side = check_state.get("candidate_side", candidate_side)
+candidate_regime = check_state.get("candidate_regime", candidate_regime)
+portfolio_equity = float(check_state.get("portfolio_equity", portfolio_equity))
+entry = float(check_state.get("entry", entry))
+stop = float(check_state.get("stop", stop))
+qty = int(check_state.get("qty", qty))
 
 candidate_notional = entry * qty
 candidate_sector = sector_map.get(normalize_symbol(candidate_symbol), "Other")
@@ -380,4 +434,13 @@ if symbol_independent_fails:
     st.info(
         "Status may not change across symbols because these blockers are symbol-independent: "
         + ", ".join(symbol_independent_fails)
+    )
+
+_perf["checklist_eval_s"] = round(time.perf_counter() - _page_t0 - _perf.get("data_fetch_s", 0.0), 3)
+_perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)
+if st.sidebar.checkbox("Show Performance Diagnostics", value=False):
+    st.sidebar.dataframe(
+        pd.DataFrame([{"Step": k, "Seconds": v} for k, v in _perf.items()]),
+        width="stretch",
+        hide_index=True,
     )

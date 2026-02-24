@@ -7,7 +7,7 @@ import json
 
 setup_page("Dashboard Launcher")
 view_mode = get_ui_detail_mode("Summary")
-st.sidebar.success("Select a dashboard above")
+st.sidebar.success("Use grouped navigation below")
 
 st.title("🚀 Dashboard Launcher")
 st.caption("Decision-first macro-to-execution workflow for disciplined swing trading.")

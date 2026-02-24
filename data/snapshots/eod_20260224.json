@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-02-24T11:27:53.412803",
+  "regime": "\ud83d\udfe1 Neutral",
+  "regime_score": 0,
+  "breadth": {
+    "advances": 29,
+    "declines": 59,
+    "ratio": 0.4915254237288136
+  },
+  "top_movers": [
+    {
+      "symbol": "PERSISTENT.NS",
+      "change_pct": -5.7559015570065295
+    },
+    {
+      "symbol": "LTTS.NS",
+      "change_pct": -5.216023359816329
+    },
+    {
+      "symbol": "COFORGE.NS",
+      "change_pct": -5.050424793323312
+    },
+    {
+      "symbol": "HCLTECH.NS",
+      "change_pct": -4.52951744479147
+    },
+    {
+      "symbol": "TECHM.NS",
+      "change_pct": -4.5110693940359985
+    },
+    {
+      "symbol": "M&MFIN.NS",
+      "change_pct": -4.168859967023037
+    },
+    {
+      "symbol": "ETERNAL.NS",
+      "change_pct": -4.141793322207323
+    },
+    {
+      "symbol": "HYUNDAI.NS",
+      "change_pct": -4.026610558205601
+    },
+    {
+      "symbol": "LTIM.NS",
+      "change_pct": -3.963572389527062
+    },
+    {
+      "symbol": "TATAELXSI.NS",
+      "change_pct": -3.532032244378447
+    },
+    {
+      "symbol": "INFY.NS",
+      "change_pct": -3.5254274070150657
+    },
+    {
+      "symbol": "KPITTECH.NS",
+      "change_pct": -3.4699165477368585
+    },
+    {
+      "symbol": "VMM.NS",
+      "change_pct": 3.4158914733843386
+    },
+    {
+      "symbol": "NAUKRI.NS",
+      "change_pct": -3.3093300887757158
+    },
+    {
+      "symbol": "TATACOMM.NS",
+      "change_pct": -2.98524928048856
+    }
+  ],
+  "watchlists_scanned": 10,
+  "symbols_scanned": 229
+}
