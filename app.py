@@ -1,5 +1,5 @@
 import streamlit as st
-from utils import setup_page, get_ui_detail_mode
+from utils import setup_page, get_ui_detail_mode, get_ui_device_mode
 from data_fetch import quick_data_health_summary
 from factor_registry import FACTOR_REGISTRY
 from config import RSS_FEEDS
@@ -9,11 +9,14 @@ import json
 
 setup_page("Dashboard Launcher")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
 st.sidebar.success("Use grouped navigation below")
 
 st.title("🚀 Dashboard Launcher")
 st.caption("Decision-first macro-to-execution workflow for disciplined swing trading.")
 st.caption(f"UI mode: **{view_mode}**")
+st.caption(f"Device mode: **{device_mode}**")
 
 health = quick_data_health_summary()
 if health.get("ok"):
@@ -39,21 +42,21 @@ else:
     st.info("Data Trust: not generated yet.")
 
 st.subheader("🎯 Recommended Flow")
-f1, f2, f3, f4, f5, f6, f7 = st.columns(7)
-with f1:
-    st.info("1) Global + Liquidity\n\nRead risk backdrop")
-with f2:
-    st.info("2) Macro Risk\n\nSet bias: Risk On / Neutral / Risk Off")
-with f3:
-    st.info("3) NSE Dashboard\n\nPick setups with gates")
-with f4:
-    st.info("4) Portfolio Risk\n\nCheck concentration/exposure")
-with f5:
-    st.info("5) Journal\n\nLog and review execution")
-with f6:
-    st.info("6) Ops\n\nRun EOD + alerts")
-with f7:
-    st.info("7) Prediction Integrity\n\nReview calibration + approvals")
+flow_items = [
+    "1) Global + Liquidity\n\nRead risk backdrop",
+    "2) Macro Risk\n\nSet bias: Risk On / Neutral / Risk Off",
+    "3) NSE Dashboard\n\nPick setups with gates",
+    "4) Portfolio Risk\n\nCheck concentration/exposure",
+    "5) Journal\n\nLog and review execution",
+    "6) Ops\n\nRun EOD + alerts",
+    "7) Prediction Integrity\n\nReview calibration + approvals",
+]
+flow_cols = 1 if is_mobile else 7
+for i in range(0, len(flow_items), flow_cols):
+    cols = st.columns(flow_cols)
+    for col, text in zip(cols, flow_items[i:i + flow_cols]):
+        with col:
+            st.info(text)
 
 with st.expander("🗂 Pages & Configuration", expanded=False):
     st.markdown("""
@@ -84,13 +87,18 @@ with st.expander("🗂 Pages & Configuration", expanded=False):
     """)
 
 st.subheader("Additional Modules")
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.info("India Macro Context\n\nGlobal headwinds/tailwinds for Indian equities via FRED")
-with c2:
-    st.info("News Feed\n\nLive RSS headlines from Indian & global sources")
-with c3:
-    st.info("Stock EOD Profile\n\nEOD snapshot first; fundamentals only when provider allows")
+module_items = [
+    ("pages/13_India_Macro_Context.py", "🇮🇳 India Macro Context", "Global headwinds/tailwinds for Indian equities via FRED"),
+    ("pages/14_News_Feed.py", "📰 News Feed", "Live RSS headlines from Indian & global sources"),
+    ("pages/15_Stock_Fundamentals.py", "📊 Stock EOD Profile", "EOD snapshot first; fundamentals only when provider allows"),
+]
+module_cols = 1 if is_mobile else 3
+for i in range(0, len(module_items), module_cols):
+    cols = st.columns(module_cols)
+    for col, (path, label, text) in zip(cols, module_items[i:i + module_cols]):
+        with col:
+            st.page_link(path, label=label, icon="🔗")
+            st.caption(text)
 
 with st.expander("📰 Today's Headlines", expanded=False):
     try:
@@ -159,22 +167,24 @@ st.markdown("- **Tradable Now**: Only candidates with **A+/A** and **Entry Safet
 st.markdown("- **Watch / Improve**: Gate-blocked names or lower tiers stay visible with block reason/invalidation for monitoring.")
 
 # Status indicators
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.info("💡 **Tip of the Day**\n\nStart with macro regime before scanning setups")
-
-with col2:
-    # Check if FRED key is set
-    from config import FRED_API_KEY
-
-    if FRED_API_KEY:
-        st.success("✅ FRED API: Connected")
-    else:
-        st.warning("⚠️ FRED API: Not configured")
-
-with col3:
-    st.info("📚 **Pro Tip**\n\nUse Sector-wise categories first, then thematic overlays")
+status_cards = [
+    ("info", "💡 **Tip of the Day**\n\nStart with macro regime before scanning setups"),
+    ("fred", ""),
+    ("info", "📚 **Pro Tip**\n\nUse Sector-wise categories first, then thematic overlays"),
+]
+status_cols = 1 if is_mobile else 3
+for i in range(0, len(status_cards), status_cols):
+    cols = st.columns(status_cols)
+    for col, (kind, text) in zip(cols, status_cards[i:i + status_cols]):
+        with col:
+            if kind == "fred":
+                from config import FRED_API_KEY
+                if FRED_API_KEY:
+                    st.success("✅ FRED API: Connected")
+                else:
+                    st.warning("⚠️ FRED API: Not configured")
+            else:
+                st.info(text)
 
 st.markdown("---")
 st.caption("Dashboard Launcher | Feb 2026 Build")

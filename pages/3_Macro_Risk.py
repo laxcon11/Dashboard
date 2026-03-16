@@ -18,13 +18,14 @@ from config import (
 )
 from data_fetch import batch_download, fetch_fred_series, fetch_india_vix, prepare_timeseries_for_chart
 from gift_nifty import get_gift_nifty_snapshot, is_gift_session_active
-from india_context import get_india_context_signals
+from india_context import get_india_macro_signals_v1
 from regime_model import load_regime_settings
 from regime_state import save_regime_snapshot
 from utils import (
     setup_page,
     render_key_observations,
     get_ui_detail_mode,
+    get_ui_device_mode,
     render_source_freshness,
     render_regime_timeline_strip,
     render_decision_header,
@@ -34,8 +35,11 @@ from analytics import round_percentages_sum_to_100
 
 setup_page("Macro Risk")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
 st.title("🌍 India Macro Risk Dashboard")
 st.caption("Configurable regime model combining Macro and Liquidity factors.")
+st.caption(f"Device mode: **{device_mode}**")
 _page_t0 = time.perf_counter()
 _perf: dict[str, float] = {}
 
@@ -120,6 +124,12 @@ def compute_series_signal(series: pd.Series, inverse: bool, fast_window: int, sl
         "sentiment": sentiment,
         "points": int(len(s)),
     }
+
+
+def _responsive_cols(n: int, spec=None):
+    if is_mobile:
+        return [st.container() for _ in range(n)]
+    return st.columns(spec if spec is not None else n)
 
 
 fast_weight = float(blend.get("fast_weight", 0.4))
@@ -597,10 +607,14 @@ if p_risk_on >= risk_on_threshold and p_risk_on > p_risk_off and p_risk_on > p_n
     regime = "🟢 Risk On"
     regime_color = "success"
 elif p_risk_off >= risk_off_threshold and p_risk_off > p_risk_on and p_risk_off > p_neutral:
-    regime = "🔴 Risk Off"
+    # High-intensity Risk Off is classified as Crisis
+    if final_score <= -0.65:
+        regime = "💀 Crisis"
+    else:
+        regime = "🔴 Defensive"
     regime_color = "error"
 else:
-    regime = "🟡 Neutral"
+    regime = "🟡 Selective"
     regime_color = "warning"
 
 max_prob = max(p_risk_on, p_risk_off, p_neutral)
@@ -608,7 +622,7 @@ confidence = clip(max_prob * agreement * data_quality * (0.6 + 0.4 * abs(final_d
 
 if regime == "🟢 Risk On" and confidence >= 0.65:
     bias = "Long Bias Allowed"
-elif regime == "🔴 Risk Off" and confidence >= 0.65:
+elif ("Defensive" in regime or "Crisis" in regime) and confidence >= 0.65:
     bias = "Short Bias Allowed"
 else:
     bias = "Selective / Reduced Risk"
@@ -622,7 +636,7 @@ render_decision_header(
 )
 
 with st.expander("📊 Regime Overview (Details)", expanded=False):
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = _responsive_cols(3)
     with col1:
         st.metric("Macro Directional", f"{macro_result['directional_norm']:+.2f}")
         st.caption(f"Impulse: {macro_result['impulse_norm']:+.2f} | Valid: {macro_result['valid']}/{macro_result['enabled']}")
@@ -696,7 +710,7 @@ st.caption(
     f"Final blend: {(1.0 - impulse_influence):.0%} directional + {impulse_influence:.0%} impulse"
 )
 
-ctx = get_india_context_signals()
+ctx = get_india_macro_signals_v1()
 flows = ctx.get("flows", {})
 vix_ctx = ctx.get("vix", {})
 breadth_ctx = ctx.get("breadth", {})
@@ -753,7 +767,7 @@ if history_rows:
 render_key_observations(observations, max_items=8)
 
 with st.expander("🇮🇳 India Domestic Risk (Context Only - Not Scored Yet)", expanded=False):
-    c1, c2 = st.columns(2)
+    c1, c2 = _responsive_cols(2)
     with c1:
         vix_val = vix_ctx.get("value")
         vix_chg = vix_ctx.get("change_pct")
@@ -769,7 +783,7 @@ with st.expander("🇮🇳 India Domestic Risk (Context Only - Not Scored Yet)",
         st.metric("A/D Breadth", val, None if ratio is None else f"{float(ratio):.2f}")
         st.caption(f"{breadth_ctx.get('status', 'STALE')} | {breadth_ctx.get('as_of', 'N/A')}")
 
-    d1, d2 = st.columns(2)
+    d1, d2 = _responsive_cols(2)
     with d1:
         curve_value = curve_ctx.get("value")
         st.metric("India Curve (10Y-3M)", "N/A" if curve_value is None else f"{float(curve_value):+.2f}")
@@ -779,13 +793,14 @@ with st.expander("🇮🇳 India Domestic Risk (Context Only - Not Scored Yet)",
         st.metric("GST YoY", "N/A" if gst_yoy is None else f"{float(gst_yoy):+.1f}%")
         st.caption(f"{gst_ctx.get('status', 'UNAVAILABLE')} | {gst_ctx.get('source', 'pending')}")
 
+    st.page_link("pages/13_India_Macro_Context.py", label="View Detailed India Macro Context", icon="🇮🇳")
     st.info(
         "Phase A visibility mode: domestic context signals are shown for monitoring only. "
         "They are not included in regime score yet."
     )
 
 with st.expander("🎯 Regime Probabilities", expanded=False):
-    p1, p2, p3 = st.columns(3)
+    p1, p2, p3 = _responsive_cols(3)
     disp_risk_on, disp_neutral, disp_risk_off = round_percentages_sum_to_100(
         [p_risk_on, p_neutral, p_risk_off]
     )
@@ -983,7 +998,7 @@ if not factor_df.empty:
         explain_df = explain_df.sort_values("Abs Contribution", ascending=False)
         top_df = explain_df.head(8)
 
-        c1, c2 = st.columns([2, 1])
+        c1, c2 = _responsive_cols(2, [2, 1])
         with c1:
             st.dataframe(
                 top_df[["Domain", "Group", "Factor", "Eff W", "Impulse C", "Directional C", "Contribution", "Sentiment"]],
@@ -1118,7 +1133,7 @@ with st.expander("📉 Regime Trend & Diagnostics (Expand)", expanded=(view_mode
             macro_chart_items.append((factor["label"], factor["symbol"]))
 
     for idx in range(0, len(macro_chart_items), 2):
-        c1, c2 = st.columns(2)
+        c1, c2 = _responsive_cols(2)
         label1, symbol1 = macro_chart_items[idx]
         with c1:
             df1 = market_data.get(symbol1)
@@ -1152,7 +1167,7 @@ with st.expander("📉 Regime Trend & Diagnostics (Expand)", expanded=(view_mode
             st.line_chart(series)
 
 with st.expander("💼 FII / DII Flows", expanded=False):
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = _responsive_cols(3)
     with c1:
         fii = flows.get("fii_net")
         st.metric("FII Net (Daily)", "N/A" if fii is None else f"₹{fii:,.0f} Cr")
@@ -1176,7 +1191,7 @@ with st.expander("💼 FII / DII Flows", expanded=False):
         hist_df["dii_net"] = pd.to_numeric(hist_df["dii_net"], errors="coerce")
         hist_df = hist_df.dropna(subset=["date"]).sort_values("date")
         if not hist_df.empty and not pd.isna(as_of):
-            cur_month = as_of.to_period("M")
+            cur_month = pd.Timestamp.now().to_period("M")
             cur_daily = hist_df[hist_df["date"].dt.to_period("M") == cur_month].copy()
             if not cur_daily.empty:
                 cur_daily = cur_daily.sort_values("date", ascending=False)
@@ -1199,10 +1214,10 @@ with st.expander("💼 FII / DII Flows", expanded=False):
         mdf = mdf.dropna(subset=["month_start"]).sort_values("month_start")
         if not mdf.empty:
             if not pd.isna(as_of):
-                mdf = mdf[mdf["month_start"] < as_of.normalize().replace(day=1)]
+                mdf = mdf[mdf["month_start"] < pd.Timestamp.now().normalize().replace(day=1)]
             if not mdf.empty:
                 st.markdown("#### 📅 Prior Months (Monthly FII Net)")
-                m1, m2 = st.columns(2)
+                m1, m2 = _responsive_cols(2)
                 latest_month = mdf.iloc[-1]
                 prev_month_val = mdf.iloc[-2]["fii_net"] if len(mdf) >= 2 else None
                 with m1:

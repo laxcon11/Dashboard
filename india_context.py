@@ -287,6 +287,41 @@ def _load_cache() -> Optional[dict]:
         return None
 
 
+def _reconcile_monthly_with_daily(monthly_rows: list[dict], daily_df: pd.DataFrame) -> list[dict]:
+    if daily_df.empty:
+        return monthly_rows
+
+    # Ensure month_start is a date string "YYYY-MM-01"
+    out = {str(r["month_start"]): r for r in monthly_rows}
+    
+    # Current month start
+    now = pd.Timestamp.now().normalize()
+    current_month_start = now.replace(day=1)
+    
+    # Group daily by month
+    daily = daily_df.copy()
+    daily["month_period"] = daily["date"].dt.to_period("M")
+    
+    monthly_groups = daily.groupby("month_period")
+    for period, group in monthly_groups:
+        m_start = period.to_timestamp()
+        key = str(m_start.date())
+        
+        # Only add complete months (before current month) or if it's the current month but not already in 'out'
+        # Actually, if it's in daily, it's more "live" than the xlsx import.
+        # But we only want to ADD missing months to the 'Prior Months' list.
+        if m_start < current_month_start:
+            if key not in out:
+                out[key] = {
+                    "month_start": key,
+                    "fii_net": float(group["fii_net"].sum()),
+                    "dii_net": float(group["dii_net"].sum()),
+                    "source": "derived_from_daily_cache"
+                }
+    
+    return [out[k] for k in sorted(out.keys())]
+
+
 def _load_monthly_history() -> list[dict]:
     if not MONTHLY_FILE.exists():
         return []
@@ -340,7 +375,7 @@ def _latest_breadth_from_snapshot() -> dict:
         return {}
 
 
-def get_india_context_signals() -> Dict[str, Any]:
+def get_india_macro_signals_v1() -> Dict[str, Any]:
     now = datetime.now().isoformat(timespec="seconds")
     fetched = _fetch_nse_fii_dii()
     if fetched is None:
@@ -370,17 +405,59 @@ def get_india_context_signals() -> Dict[str, Any]:
         denom = abs(float(df["fii_net"].iloc[-1])) + abs(float(df["dii_net"].iloc[-1]))
         dominance = (float(df["fii_net"].iloc[-1]) / denom) if denom > 0 else 0.0
 
-    vix_price, vix_change = fetch_india_vix()
-    breadth = _latest_breadth_from_snapshot()
-    gst_file = Path("notes/gst_context.json")
-    curve_file = Path("notes/india_curve_context.json")
-    gst = None
-    curve = None
+    # GST Processing Logic
+    gst_file = Path("data/gst_monthly.csv")
+    gst_data = {"status": "UNAVAILABLE", "source": "pending"}
+    gst_df_full = pd.DataFrame()
+
     if gst_file.exists():
         try:
-            gst = json.loads(gst_file.read_text())
+            gst_df_full = pd.read_csv(gst_file)
+            gst_df_full["gst_collection_lakh_cr"] = pd.to_numeric(gst_df_full["gst_collection_lakh_cr"])
+            gst_df_full["mom_growth"] = gst_df_full["gst_collection_lakh_cr"].pct_change() * 100
+            gst_df_full["yoy_growth"] = gst_df_full["gst_collection_lakh_cr"].pct_change(12) * 100
+            gst_df_full["gst_3m_avg"] = gst_df_full["gst_collection_lakh_cr"].rolling(3).mean()
+
+            latest_gst = gst_df_full.iloc[-1]
+            gst_yoy = latest_gst["yoy_growth"]
+
+            if pd.notna(gst_yoy):
+                if gst_yoy > 10:
+                    demand_signal = "Strong Demand"
+                elif gst_yoy > 5:
+                    demand_signal = "Stable Demand"
+                else:
+                    demand_signal = "Demand Weakening"
+            else:
+                demand_signal = "Insufficient History"
+
+            is_ath = latest_gst["gst_collection_lakh_cr"] >= gst_df_full["gst_collection_lakh_cr"].max()
+
+            gst_data = {
+                "latest_collection": float(latest_gst["gst_collection_lakh_cr"]),
+                "mom_growth": float(latest_gst["mom_growth"]),
+                "gst_yoy": float(latest_gst["yoy_growth"]),
+                "three_month_avg": float(latest_gst["gst_3m_avg"]),
+                "demand_signal": demand_signal,
+                "is_all_time_high": bool(is_ath),
+                "status": "PROVISIONAL" if str(latest_gst["month"]) >= datetime.now().strftime("%Y-%m") else "FINAL",
+                "source": "PIB/GSTN",
+                "as_of": str(latest_gst["month"])
+            }
+        except Exception as e:
+            gst_data["error"] = str(e)
+
+    vix_price, vix_change = fetch_india_vix()
+    breadth = _latest_breadth_from_snapshot()
+    gst_context_file = Path("notes/gst_context.json")
+    curve_file = Path("notes/india_curve_context.json")
+    gst_context = None
+    curve = None
+    if gst_context_file.exists():
+        try:
+            gst_context = json.loads(gst_context_file.read_text())
         except Exception:
-            gst = None
+            gst_context = None
     if curve_file.exists():
         try:
             curve = json.loads(curve_file.read_text())
@@ -404,7 +481,7 @@ def get_india_context_signals() -> Dict[str, Any]:
                 if not df.empty
                 else []
             ),
-            "monthly_history_rows": _load_monthly_history(),
+            "monthly_history_rows": _reconcile_monthly_with_daily(_load_monthly_history(), df),
             "note": "PROVISIONAL if same latest business day; FINAL if T-1 business day; else STALE.",
         },
         "vix": {
@@ -421,7 +498,25 @@ def get_india_context_signals() -> Dict[str, Any]:
             "status": _freshness_state(breadth.get("as_of")),
             "source": breadth.get("source", "snapshot"),
         },
-        "curve": curve or {"status": "UNAVAILABLE", "source": "pending"},
-        "gst": gst or {"status": "UNAVAILABLE", "source": "pending"},
+        "curve": (
+            {
+                **curve,
+                "value": (curve.get("ten_year_yield", 0) - curve.get("three_month_yield", 0)),
+                "status": "FINAL",
+            }
+            if curve
+            else {"status": "UNAVAILABLE", "source": "pending"}
+        ),
+        "gst": {
+            **gst_data,
+            "listed_contribution": gst_context.get("listed_revenue_contribution_pct") if gst_context else None,
+            "portal_links": gst_context.get("sources") if gst_context else []
+        },
+        "gst_history": gst_df_full.to_dict(orient="records") if not gst_df_full.empty else [],
         "updated_at": now,
     }
+
+
+def get_india_context_signals() -> Dict[str, Any]:
+    """Alias for backward compatibility."""
+    return get_india_macro_signals_v1()

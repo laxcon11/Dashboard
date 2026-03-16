@@ -12,12 +12,18 @@ import pandas as pd
 
 from config import FRED_SERIES, FRED_API_KEY, LIQUIDITY_THRESHOLDS
 from data_fetch import fetch_fred_series, batch_download
-from india_context import get_india_context_signals
+from india_context import get_india_macro_signals_v1
+# ... other imports
 
-from utils import setup_page, render_key_observations, get_ui_detail_mode
+from utils import setup_page, render_key_observations, get_ui_detail_mode, get_ui_device_mode, responsive_cols as _responsive_cols
 
 setup_page("Liquidity & Money Supply")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
+
+
+# _responsive_cols imported from utils
 
 # ==================== EDUCATIONAL GUIDE ====================
 
@@ -81,6 +87,7 @@ INDICATOR_GUIDE = {
 }
 
 st.title("💰 Liquidity & Money Supply Dashboard")
+st.caption(f"Device mode: **{device_mode}**")
 
 with st.expander("📖 Financial Plumbing Guide (How to read this)", expanded=False):
     st.markdown("""
@@ -92,7 +99,7 @@ with st.expander("📖 Financial Plumbing Guide (How to read this)", expanded=Fa
     """)
     
     st.markdown("#### Primary Indicators")
-    cols = st.columns(4)
+    cols = _responsive_cols(4)
     primary = ["WALCL", "RRPONTSYD", "WTREGEN", "SOFR"]
     for i, key in enumerate(primary):
         info = INDICATOR_GUIDE[key]
@@ -219,7 +226,7 @@ regime, color, decision_msg = analytics.get_liquidity_stance(liq_dfs, sofr_sprea
 
 # ==================== SUMMARY & ALERTS ====================
 
-col_l, col_r = st.columns([1, 1])
+col_l, col_r = _responsive_cols(2, [1, 1])
 
 with col_l:
     st.subheader("🏁 Automated Market Stance")
@@ -252,12 +259,13 @@ for alert in alerts[:3]:
 if "DGS10" in series_data:
     dgs = series_data["DGS10"]
     observations.append(f"US 10Y daily move: {dgs['change_pct']:+.2f}%")
-render_key_observations(observations)
+if view_mode == "Detail":
+    render_key_observations(observations, title="🔎 Summary Tape")
 
 # ==================== METRICS GRID ====================
 
 with st.expander("📊 Full Liquidity Pulse (Expand)", expanded=False):
-    grid_cols = st.columns(4)
+    grid_cols = _responsive_cols(4)
     for i, (sid, data) in enumerate(series_data.items()):
         info = INDICATOR_GUIDE.get(sid, {"desc": "Federal Reserve Data", "title": data["name"]})
 
@@ -287,7 +295,7 @@ with st.expander("📊 Full Liquidity Pulse (Expand)", expanded=False):
 st.markdown("---")
 with st.expander("📈 Historical Trends (90 Days) (Expand)", expanded=(view_mode == "Detail")):
     if series_data:
-        chart_cols = st.columns(2)
+        chart_cols = _responsive_cols(2)
         display_charts = ["WALCL", "RRPONTSYD", "WTREGEN", "SOFR", "M2SL", "DFF"]
 
         chart_idx = 0
@@ -320,14 +328,14 @@ if view_mode == "Detail":
         st.dataframe(pd.DataFrame(meta_rows), width="stretch", hide_index=True)
 
 with st.expander("🇮🇳 India Domestic Cross-Check (Context Only - Not in Liquidity Score)", expanded=False):
-    ctx = get_india_context_signals()
+    ctx = get_india_macro_signals_v1()
     flows = ctx.get("flows", {})
     vix_ctx = ctx.get("vix", {})
     breadth_ctx = ctx.get("breadth", {})
     curve_ctx = ctx.get("curve", {})
     gst_ctx = ctx.get("gst", {})
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = _responsive_cols(3)
     with c1:
         fii = flows.get("fii_net")
         dii = flows.get("dii_net")
@@ -342,7 +350,7 @@ with st.expander("🇮🇳 India Domestic Cross-Check (Context Only - Not in Liq
         st.metric("India VIX", "N/A" if vix_val is None else f"{vix_val:.2f}")
         st.caption(f"{vix_ctx.get('status', 'STALE')} | {vix_ctx.get('source', 'NSE')}")
 
-    d1, d2, d3 = st.columns(3)
+    d1, d2, d3 = _responsive_cols(3)
     with d1:
         st.metric(
             "A/D Breadth",
@@ -359,6 +367,7 @@ with st.expander("🇮🇳 India Domestic Cross-Check (Context Only - Not in Liq
         st.metric("GST YoY", "N/A" if gst_yoy is None else f"{float(gst_yoy):+.1f}%")
         st.caption(f"{gst_ctx.get('status', 'UNAVAILABLE')} | {gst_ctx.get('source', 'pending')}")
 
+    st.page_link("pages/13_India_Macro_Context.py", label="View Detailed India Macro Context", icon="🇮🇳")
     st.info("Cross-check only. These India-specific signals are not part of Liquidity score in Phase A.")
 
 st.markdown("---")
