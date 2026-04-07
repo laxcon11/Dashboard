@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 import logging
+from contextlib import contextmanager
 import json
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ==================== PAGE SETUP ====================
 
 def _render_grouped_sidebar_nav() -> None:
-    """Custom grouped sidebar navigation for faster scanning."""
+    """Clear, non-toggle sidebar navigation."""
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Navigation")
 
@@ -30,7 +31,9 @@ def _render_grouped_sidebar_nav() -> None:
             ("Launcher", "app.py"),
             ("NSE Dashboard", "pages/0_NSE_Dashboard.py"),
             ("Tradable Universe", "pages/11_Tradable_Universe.py"),
-            ("Macro Risk", "pages/3_Macro_Risk.py"),
+            ("Macro & Regime Decision", "pages/3_Macro_Risk.py"),
+            ("Nifty Strategy Engine", "pages/17_NIFTY_Strategy_Engine.py"),
+            ("NSE Monthly Engine", "pages/18_NSE_Monthly_Engine.py"),
         ],
         "Market": [
             ("Global Markets", "pages/1_Global_Markets.py"),
@@ -50,6 +53,10 @@ def _render_grouped_sidebar_nav() -> None:
             ("Ops & Automation", "pages/8_Ops_Automation.py"),
             ("Scoring Audit", "pages/10_Scoring_Audit.py"),
             ("Roadmap TODO", "pages/12_Todo_Tracker.py"),
+            ("NDE Automation", "pages/16_NDE_Automation.py"),
+        ],
+        "Documentation": [
+            ("📖 NDE Usage Guide", "docs/NDE_USAGE_GUIDE.md"),
         ],
     }
 
@@ -59,13 +66,13 @@ def _render_grouped_sidebar_nav() -> None:
         st.sidebar.caption("Grouped navigation unavailable on this Streamlit version.")
         return
 
+    # Full visible navigation: all sections + all pages, no toggles/dropdowns.
     for section, links in groups.items():
         st.sidebar.markdown(f"**{section}**")
         for label, path in links:
             try:
                 st.sidebar.page_link(path, label=label)
             except Exception:
-                # Do not break pages if a target file is missing/renamed.
                 continue
         st.sidebar.caption("")
 
@@ -93,6 +100,14 @@ def setup_page(title: str, layout: str = "wide"):
             border-radius: 5px;
             border-left: 3px solid #1f77b4;
         }
+        section[data-testid="stSidebar"] .stMarkdown p,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] .stButton button {
+            font-size: 0.82rem !important;
+        }
+        section[data-testid="stSidebar"] h3 {
+            font-size: 0.95rem !important;
+        }
     </style>
     """, unsafe_allow_html=True)
     _render_grouped_sidebar_nav()
@@ -110,6 +125,82 @@ def get_ui_detail_mode(default: str = "Summary") -> str:
         key="ui_detail_mode",
     )
     return mode
+
+
+def get_ui_device_mode(default: str = "Desktop") -> str:
+    """Global device density control for responsive rendering."""
+    if "ui_device_mode" not in st.session_state:
+        st.session_state["ui_device_mode"] = default
+    mode = st.sidebar.radio(
+        "Device Mode",
+        options=["Desktop", "Mobile"],
+        index=0 if st.session_state["ui_device_mode"] == "Desktop" else 1,
+        help="Desktop: wider card grids and denser panels. Mobile: compact cards and reduced columns.",
+        key="ui_device_mode",
+    )
+    return mode
+
+
+def is_mobile_mode() -> bool:
+    return st.session_state.get("ui_device_mode", "Desktop") == "Mobile"
+
+
+def responsive_cols(n: int, spec=None):
+    """
+    Canonical responsive column helper.
+
+    Returns st.columns on Desktop; returns a list of st.container on Mobile.
+    Pages should import this instead of defining their own _responsive_cols.
+
+    Args:
+        n: Number of columns (used for both Desktop and Mobile container count).
+        spec: Optional column spec passed to st.columns (e.g., [1, 2, 1]).
+    """
+    if is_mobile_mode():
+        return [st.container() for _ in range(n)]
+    return st.columns(spec if spec is not None else n)
+
+
+def compact_table(df, preferred_cols: list[str]):
+    """
+    Canonical compact table helper for mobile-friendly column filtering.
+
+    Returns the DataFrame unchanged on Desktop; on Mobile, filters to
+    preferred_cols only.  Pages with row-truncation or view-mode-dependent
+    logic should keep their own variant and note it in CODE_MANIFEST.md.
+    """
+    if not is_mobile_mode() or df is None or df.empty:
+        return df
+    keep = [c for c in preferred_cols if c in df.columns]
+    return df[keep] if keep else df
+
+
+def make_page_diag_block(view_mode: str, summary_container):
+    """
+    Factory that returns a ``page_diag_block`` context manager.
+
+    In *Detail* mode each block becomes its own st.expander.
+    In *Summary* mode blocks are appended inside a shared container
+    (typically an st.expander("Open Diagnostics")).
+
+    Usage (in page top-level)::
+
+        page_diag_block = make_page_diag_block(view_mode, _summary_diag)
+
+        with page_diag_block("Section Title"):
+            st.write("...")
+    """
+    @contextmanager
+    def _block(title: str, expanded: bool = False):
+        if view_mode == "Detail":
+            with st.expander(title, expanded=expanded):
+                yield
+        else:
+            with summary_container:
+                st.markdown(f"#### {title}")
+                yield
+                st.markdown("---")
+    return _block
 
 
 # ==================== UI COMPONENTS ====================
@@ -182,14 +273,33 @@ def render_decision_header(
             return "N/A"
 
     c1, c2, c3, c4 = st.columns(4)
+    
+    is_weak = False
+    try:
+        if conf is not None and float(conf) < 0.3:
+            is_weak = True
+    except Exception:
+        pass
+
     with c1:
-        st.metric("Regime", str(regime))
+        label_text = str(regime)
+        if is_weak:
+            label_text = f"⚠️ {label_text} (WEAK)"
+        st.metric("Regime", label_text)
     with c2:
         st.metric("Score", _fmt_score(score))
     with c3:
-        st.metric("Confidence", _fmt_conf(conf))
+        conf_val = _fmt_conf(conf)
+        st.metric("Confidence", conf_val, delta="LOW" if is_weak else None, delta_color="inverse" if is_weak else "normal")
     with c4:
         st.metric("Bias", str(decision_bias or "N/A"))
+        
+    if is_weak:
+        st.warning(
+            "⚠️ **Low Confidence Signal** ( < 30% ): Current regime is near a boundary or experiencing high intraday volatility. \n\n"
+            "**Trading Guidance**: Favor defensive positioning, reduced initial sizing (0.25R - 0.5R), and tighter trailing stops until signal stabilizes."
+        )
+
     if src:
         st.caption(f"SSOT source: {src}")
 
@@ -334,6 +444,9 @@ def get_live_price_safe(
     from data_fetch import get_ticker_price, extract_price_data
 
     fetch_mode = (mode or PRICE_FETCH_MODE or "close_only").strip().lower()
+    
+    # Use the requested or global default mode.
+        
     if fetch_mode not in {"close_only", "live_first"}:
         fetch_mode = "close_only"
 
@@ -531,6 +644,44 @@ def render_source_freshness(symbols_dict: Dict[str, str], data: Dict[str, pd.Dat
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
+def render_manual_data_staleness_alerts(india_ctx: Dict[str, Any]) -> None:
+    """
+    Renders prominent warnings if manual data sources (GST/Yield Curve) are stale.
+    Thresholds: 35 days for GST (Monthly), 3 Business Days for Yield Curve.
+    """
+    gst = india_ctx.get("gst", {})
+    curve = india_ctx.get("curve", {})
+    
+    warnings = []
+    
+    # GST Check (Manual CSV/JSON)
+    gst_age = gst.get("age_days")
+    if gst_age is not None and gst_age > 35:
+        warnings.append(f"🔴 **GST Data Stale**: Last updated {gst_age:.1f} days ago. (Threshold: 35 days)")
+    elif gst.get("status") == "UNAVAILABLE":
+        warnings.append("🔴 **GST Data Unavailable**: Manual file missing or corrupted.")
+        
+    # Curve Check (Manual JSON)
+    curve_age = curve.get("age_days")
+    if curve_age is not None and curve_age > 3:
+        # Note: Ideally this would be Business Days, but 3 calendar days is a good proxy for manual checks.
+        warnings.append(f"🔴 **Yield Curve Stale**: Last updated {curve_age:.1f} days ago. (Threshold: 3 days)")
+    elif curve.get("status") == "UNAVAILABLE":
+        warnings.append("🔴 **Yield Curve Unavailable**: Manual file missing or corrupted.")
+        
+    if warnings:
+        with st.container():
+            for w in warnings:
+                st.warning(w)
+            
+            if st.session_state.get("ui_detail_mode") == "Detail":
+                st.info(
+                    "**Action Required**: Please update the manual context files in `notes/` "
+                    "or `data/gst_monthly.csv` to ensure accurate macro scoring. "
+                    "Regime classification depends heavily on these leading indicators."
+                )
+
+
 def render_regime_timeline_strip(timeline: list[Dict[str, Any]], key: str = "regime_timeline") -> None:
     """
     Render a 90-day pulse-tape regime timeline with transition markers.
@@ -658,11 +809,21 @@ def render_regime_timeline_strip(timeline: list[Dict[str, Any]], key: str = "reg
         track.appendChild(base);
         function showTip(evt, row, isTransition) {{
           const score = Number(row.score || 0);
+          const rawConf = Number(row.confidence_val || (row.confidence === "HIGH" ? 0.9 : (row.confidence === "MEDIUM" ? 0.6 : 0.3)));
+          const confPct = Math.round(rawConf * 100);
+          const strengthColor = rawConf < 0.3 ? "#ef4444" : (rawConf < 0.6 ? "#f59e0b" : "#10b981");
+          
           tip.innerHTML = `
             <div class="d">${{row.ts || ""}}</div>
             <div class="r">Regime: <b>${{row.regime || "N/A"}}</b>${{isTransition ? " • Transition Day" : ""}}</div>
             <div class="r">Score: <b>${{score > 0 ? "+" : ""}}${{score.toFixed(2)}}</b></div>
-            <div class="r">Confidence: <b>${{row.confidence || "N/A"}}</b></div>`;
+            <div class="r" style="margin-top:6px; display:flex; align-items:center; gap:8px;">
+               <span>Strength:</span>
+               <div style="flex:1; height:4px; background:#23303d; border-radius:2px; overflow:hidden;">
+                 <div style="width:${{confPct}}%; height:100%; background:${{strengthColor}};"></div>
+               </div>
+               <b style="color:${{strengthColor}}">${{confPct}}%</b>
+            </div>`;
           tip.style.display = "block";
           const margin = 10;
           const maxX = window.innerWidth - tip.offsetWidth - margin;
@@ -805,3 +966,23 @@ def get_momentum(series: pd.Series, periods: int = 5) -> float:
         return 0.0
 
     return ((current - previous) / previous) * 100
+# ==================== DATA HELPERS ====================
+
+def get_fno_lot_size(symbol: str) -> int:
+    """Fetch F&O lot size for a symbol from the JSON database."""
+    try:
+        LOT_FILE = Path(__file__).parent / "notes" / "fno_lot_sizes.json"
+        if not LOT_FILE.exists():
+            return 100 # Safe default for cash
+        
+        payload = json.loads(LOT_FILE.read_text())
+        lots = payload.get("lot_sizes", {})
+        
+        # Normalize symbol
+        s = str(symbol or "").strip().upper()
+        if s.endswith(".NS"):
+            s = s[:-3]
+            
+        return int(lots.get(s, 100))
+    except Exception:
+        return 100

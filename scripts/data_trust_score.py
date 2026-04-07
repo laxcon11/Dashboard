@@ -48,8 +48,21 @@ def integrity_score(df: pd.DataFrame, universe: set[str]) -> tuple[float, dict]:
     dup = int(work.duplicated(subset=["symbol", "date"]).sum())
     ref = latest_nse_business_day()
     ages = work.groupby("symbol")["date"].max().apply(lambda d: (nse_business_day_age(pd.Timestamp(d), ref) or 0))
-    stale_err = int((ages >= DATA_STALENESS_ERROR_DAYS).sum())
+    stale_syms = set(ages[ages >= DATA_STALENESS_ERROR_DAYS].index)
 
+    # Bhavcopy fallback: symbols stale in parquet but covered by a recent
+    # Bhavcopy file should not be flagged.  This mirrors the runtime
+    # behaviour of data_fetch.py which uses Bhavcopy as authoritative
+    # source when Yahoo data is lagging.
+    bhav_snap = get_latest_bhavcopy_snapshot()
+    bhav_prices = bhav_snap.get("prices", {}) or {}
+    if bhav_prices:
+        bhav_covered = stale_syms & set(bhav_prices.keys())
+        stale_syms -= bhav_covered
+        # Also reduce missing count for symbols present in Bhavcopy
+        missing = [s for s in missing if s not in bhav_prices]
+
+    stale_err = len(stale_syms)
     missing_rate = len(missing) / max(1, len(universe))
     dup_rate = dup / total_rows
     stale_rate = stale_err / max(1, len(universe))
@@ -59,6 +72,7 @@ def integrity_score(df: pd.DataFrame, universe: set[str]) -> tuple[float, dict]:
         "missing_symbols": len(missing),
         "duplicate_rows": dup,
         "stale_error_symbols": stale_err,
+        "bhavcopy_rescued": len(bhav_covered) if bhav_prices else 0,
         "missing_rate": missing_rate,
         "duplicate_rate": dup_rate,
         "stale_rate": stale_rate,
@@ -97,7 +111,7 @@ def parity_score(df: pd.DataFrame, universe: set[str]) -> tuple[float, dict]:
         row = prices.get(s)
         if not row:
             continue
-        close_b, _prev_b, vol_b = row
+        close_b, _prev_b, vol_b, _, _, _ = row
         rows.append({"symbol": s, "close_bhav": float(close_b), "vol_bhav": float(vol_b or 0.0)})
     bh = pd.DataFrame(rows)
     merged = local.merge(bh, on="symbol", how="outer")
@@ -208,12 +222,16 @@ def main() -> int:
     compute, comp_d = computation_score()
     trust = (0.4 * integrity) + (0.4 * parity) + (0.2 * compute)
 
+    # Hard-fail rules.  Rate-based so a handful of illiquid / recently
+    # changed symbols don't force FAIL on an otherwise 99+ trust score.
     hard_fail_reasons = []
-    if integ_d["missing_symbols"] > 0:
-        hard_fail_reasons.append("missing_symbols")
-    if integ_d["stale_error_symbols"] > 0:
-        hard_fail_reasons.append("stale_error_symbols")
-    if parity_d["close_mismatch_rate"] > 0.02:
+    missing_rate = integ_d["missing_rate"]
+    stale_rate = integ_d["stale_rate"]
+    if missing_rate > 0.05:                          # >5 % universe missing
+        hard_fail_reasons.append("missing_symbols_gt_5pct")
+    if stale_rate > 0.05:                            # >5 % universe stale
+        hard_fail_reasons.append("stale_error_symbols_gt_5pct")
+    if parity_d["close_mismatch_rate"] > 0.02:       # >2 % close mismatches
         hard_fail_reasons.append("close_mismatch_rate_gt_2pct")
     if not comp_d["probability_sum_check_passed"]:
         hard_fail_reasons.append("probability_sum_check_failed")

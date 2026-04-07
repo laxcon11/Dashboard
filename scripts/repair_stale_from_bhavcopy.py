@@ -100,7 +100,7 @@ def main() -> int:
         row = bhav.get(sym)
         if not row:
             continue
-        close, prev_close, vol = row
+        close, prev_close, vol, o, h, l = row
         prev_close = prev_close if prev_close is not None and prev_close > 0 else close
         prev_day = latest_bd - pd.offsets.BDay(1)
         # two-row shape keeps downstream delta logic safe
@@ -119,9 +119,9 @@ def main() -> int:
             {
                 "date": pd.to_datetime(latest_bd).normalize(),
                 "symbol": sym,
-                "open": float(close),
-                "high": float(close),
-                "low": float(close),
+                "open": float(o if o is not None else close),
+                "high": float(h if h is not None else close),
+                "low": float(l if l is not None else close),
                 "close": float(close),
                 "volume": int(max(0, vol or 0)),
             }

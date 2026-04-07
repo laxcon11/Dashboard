@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -53,13 +53,16 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def compact_alert_log() -> None:
+def compact_alert_log(keep_days: int = 7) -> None:
+    """Deduplicate and prune alerts older than *keep_days*."""
     if not ALERT_FILE.exists():
         return
     try:
         lines = ALERT_FILE.read_text().splitlines()
     except Exception:
         return
+
+    cutoff = (datetime.now() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
     deduped: dict[tuple[str, str], str] = {}
     order: list[tuple[str, str]] = []
     for line in lines:
@@ -68,6 +71,8 @@ def compact_alert_log() -> None:
         left, msg = line.split("] ", 1)
         ts = left.lstrip("[")
         day = ts[:10] if len(ts) >= 10 else "unknown"
+        if day < cutoff:
+            continue  # drop entries older than keep_days
         key = (day, msg.strip())
         if key not in deduped:
             order.append(key)

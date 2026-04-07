@@ -6,18 +6,24 @@ from pathlib import Path
 
 import streamlit as st
 
-from utils import setup_page, get_ui_detail_mode
+from utils import setup_page, get_ui_detail_mode, get_ui_device_mode, responsive_cols as _responsive_cols
 from regime_state import load_regime_snapshot
 
 
 setup_page("Ops & Automation")
 _ = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
 st.title("🛠 Ops & Automation")
 st.caption("Phase 5 operations center: EOD refresh, alerts, and recovery utilities.")
+st.caption(f"Device mode: **{device_mode}**")
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 SNAPSHOT_DIR = BASE_DIR / "data" / "snapshots"
 ALERT_FILE = BASE_DIR / "logs" / "alerts.log"
+
+
+# _responsive_cols imported from utils
 
 ssot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
 if isinstance(ssot, dict) and ssot:
@@ -27,9 +33,10 @@ if isinstance(ssot, dict) and ssot:
         f"{ssot.get('regime_label', 'Unknown')} | "
         f"Conf {float(ssot.get('confidence', 0.0) or 0.0):.0%} | "
         f"Score {float(ssot.get('final_score', 0.0) or 0.0):+.2f} | "
-        f"P(On/N/Off) {float(probs.get('risk_on', 0.0) or 0.0):.0%}/"
-        f"{float(probs.get('neutral', 0.0) or 0.0):.0%}/"
-        f"{float(probs.get('risk_off', 0.0) or 0.0):.0%}"
+        f"P(On/S/D/C) {float(probs.get('risk_on', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('selective', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('defensive', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('crisis', 0.0) or 0.0):.0%}"
     )
 
 
@@ -58,7 +65,7 @@ def latest_snapshot_info() -> tuple[Path | None, str]:
     return p, f"{mtime:%Y-%m-%d %H:%M} ({age_hours:.1f}h ago) • {status}"
 
 
-left, right = st.columns(2)
+left, right = _responsive_cols(2)
 with left:
     st.subheader("📦 EOD Pipeline")
     snap_file, snap_msg = latest_snapshot_info()
@@ -92,16 +99,24 @@ with right:
         st.code(out[-4000:] if out else "(no output)", language="text")
 
     if ALERT_FILE.exists():
+        today_str = datetime.now().strftime("%Y-%m-%d")
         lines = ALERT_FILE.read_text().splitlines()
-        st.caption(f"Recent alerts ({min(len(lines), 20)} shown):")
-        for ln in lines[-20:]:
-            st.write(f"- {ln}")
+        today_lines = [ln for ln in lines if ln.startswith(f"[{today_str}")]
+        if today_lines:
+            st.caption(f"Today's alerts ({len(today_lines)}):")
+            for ln in today_lines:
+                st.write(f"- {ln}")
+        else:
+            st.info("No alerts for today.")
+        with st.expander("Full alert history (last 7 days)", expanded=False):
+            for ln in lines[-30:]:
+                st.write(f"- {ln}")
     else:
         st.info("No alerts log yet.")
 
 st.markdown("---")
 st.subheader("🕒 GIFT NIFTY Poller")
-g1, g2 = st.columns([1, 1])
+g1, g2 = _responsive_cols(2, [1, 1])
 with g1:
     if st.button("Run GIFT Poll (Once)", width="stretch"):
         rc, out = run_script("poll_gift_nifty.py", ["--once"])
@@ -119,7 +134,7 @@ with g2:
 
 st.markdown("---")
 st.subheader("🧰 Recovery Tools")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = _responsive_cols(5)
 with col1:
     if st.button("Health Check", width="stretch"):
         rc, out = run_script("recovery_tools.py", ["--health"])
@@ -134,9 +149,16 @@ with col2:
         if rc == 0:
             st.success("History rebuild complete.")
         else:
-            st.error(f"Rebuild returned code {rc}.")
+            st.error(f"History rebuild returned code {rc}.")
         st.code(out[-4000:] if out else "(no output)", language="text")
 with col3:
+    if st.button("Repair Stale", width="stretch"):
+        rc, out = run_script("recovery_tools.py", ["--repair-stale-bhavcopy"])
+        if rc == 0:
+            st.success("Stale repair complete.")
+        else:
+            st.error(f"Stale repair returned code {rc}.")
+        st.code(out[-4000:] if out else "(no output)", language="text")
     backfill_days = st.number_input("Backfill Days", min_value=1, max_value=365, value=30, step=1)
     if st.button("Run Backfill", width="stretch"):
         rc, out = run_script("recovery_tools.py", ["--backfill-days", str(int(backfill_days))])
@@ -146,6 +168,13 @@ with col3:
             st.error(f"Backfill returned code {rc}.")
         st.code(out[-4000:] if out else "(no output)", language="text")
 with col4:
+    if st.button("Trust Score", width="stretch"):
+        rc, out = run_script("recovery_tools.py", ["--trust-score"])
+        if rc == 0:
+            st.success("Trust score complete.")
+        else:
+            st.error(f"Trust score returned code {rc}.")
+        st.code(out[-4000:] if out else "(no output)", language="text")
     if st.button("Run Regime Sanity Tests", width="stretch"):
         rc, out = run_script("regime_sanity_tests.py")
         if rc == 0:
@@ -153,10 +182,18 @@ with col4:
         else:
             st.error(f"Sanity tests failed (code {rc}).")
         st.code(out[-4000:] if out else "(no output)", language="text")
+with col5:
+    if st.button("Backfill Regime", width="stretch"):
+        rc, out = run_script("recovery_tools.py", ["--backfill-regime-history"])
+        if rc == 0:
+            st.success("Regime history backfilled.")
+        else:
+            st.error(f"Regime history backfill failed (code {rc}).")
+        st.code(out[-4000:] if out else "(no output)", language="text")
 
 st.markdown("---")
 st.subheader("🧾 Bhavcopy Parity")
-pc1, pc2 = st.columns([1, 1])
+pc1, pc2 = _responsive_cols(2, [1, 1])
 with pc1:
     if st.button("Run Parity Report", width="stretch"):
         rc, out = run_script("bhavcopy_parity_report.py")
@@ -182,7 +219,7 @@ with pc2:
 
 st.markdown("---")
 st.subheader("🛡 Data Trust Score")
-t1, t2 = st.columns([1, 1])
+t1, t2 = _responsive_cols(2, [1, 1])
 with t1:
     if st.button("Run Data Trust Score", width="stretch"):
         rc, out = run_script("data_trust_score.py")
@@ -210,7 +247,7 @@ with t2:
 
 st.markdown("---")
 st.subheader("🧪 Prediction Integrity")
-pi1, pi2, pi3 = st.columns([1, 1, 1])
+pi1, pi2, pi3 = _responsive_cols(3, [1, 1, 1])
 with pi1:
     if st.button("Run Integrity Cycle", width="stretch"):
         rc, out = run_script("prediction_integrity_cycle.py")
@@ -240,7 +277,7 @@ with pi3:
 
 st.markdown("---")
 st.subheader("🧮 Scoring Audit")
-sa1, sa2 = st.columns([1, 1])
+sa1, sa2 = _responsive_cols(2, [1, 1])
 with sa1:
     if st.button("Run Scoring Audit", width="stretch"):
         rc, out = run_script("scoring_audit_report.py")

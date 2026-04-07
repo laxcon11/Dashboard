@@ -3,13 +3,19 @@ import streamlit as st
 
 from regime_model import load_regime_settings, save_regime_settings, reset_regime_settings
 from regime_state import load_regime_snapshot
-from utils import setup_page, get_ui_detail_mode
+from utils import setup_page, get_ui_detail_mode, get_ui_device_mode, responsive_cols as _responsive_cols
 
 
 setup_page("Regime Settings")
 _ = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
 st.title("⚙️ Regime Settings")
 st.caption("Configure Macro + Liquidity scoring inputs, weights, and thresholds.")
+st.caption(f"Device mode: **{device_mode}**")
+
+
+# _responsive_cols imported from utils
 
 settings = load_regime_settings()
 
@@ -23,7 +29,7 @@ group_caps = blend.setdefault("group_caps", {
     "Commodities": 0.20,
 })
 
-col1, col2 = st.columns(2)
+col1, col2 = _responsive_cols(2)
 with col1:
     blend["macro_weight"] = st.slider("Macro Weight", 0.0, 1.0, float(blend["macro_weight"]), 0.01)
     blend["liquidity_weight"] = st.slider("Liquidity Weight", 0.0, 1.0, float(blend["liquidity_weight"]), 0.01)
@@ -38,14 +44,14 @@ with col2:
     blend["slow_window"] = st.slider("Slow Window (periods)", 5, 30, int(blend["slow_window"]), 1)
 
 st.subheader("Decision Thresholds")
-col3, col4 = st.columns(2)
+col3, col4 = _responsive_cols(2)
 with col3:
     blend["risk_on_threshold"] = st.slider("Risk On Probability Threshold", 0.40, 0.90, float(blend["risk_on_threshold"]), 0.01)
 with col4:
     blend["risk_off_threshold"] = st.slider("Risk Off Probability Threshold", 0.40, 0.90, float(blend["risk_off_threshold"]), 0.01)
 
 st.subheader("SOFR/IORB Stress Penalty")
-col5, col6 = st.columns(2)
+col5, col6 = _responsive_cols(2)
 with col5:
     blend["sofr_iorb_penalty_enabled"] = st.checkbox(
         "Enable SOFR/IORB penalty",
@@ -89,7 +95,7 @@ with col6:
     )
 
 st.subheader("Group Caps")
-gc1, gc2, gc3 = st.columns(3)
+gc1, gc2, gc3 = _responsive_cols(3)
 with gc1:
     group_caps["Macro"] = st.slider("Macro Cap", 0.05, 0.60, float(group_caps.get("Macro", 0.30)), 0.01)
     group_caps["Risk Appetite"] = st.slider("Risk Appetite Cap", 0.05, 0.60, float(group_caps.get("Risk Appetite", 0.20)), 0.01)
@@ -105,7 +111,7 @@ def render_factor_controls(domain_key: str, title: str):
     factors = settings[domain_key]
     group_options = ["Macro", "Liquidity", "Risk Appetite", "Rates/Currency", "Commodities"]
     for factor_id, factor in factors.items():
-        c1, c2, c3, c4, c5 = st.columns([2.4, 1, 1, 1.3, 1.6])
+        c1, c2, c3, c4, c5 = _responsive_cols(5, [2.4, 1, 1, 1.3, 1.6])
         with c1:
             st.write(factor.get("label", factor_id))
         with c2:
@@ -137,40 +143,41 @@ render_factor_controls("liquidity_factors", "Liquidity Factors")
 st.subheader("Live Preview")
 snapshot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
 if isinstance(snapshot, dict) and snapshot:
-    final_score = float(snapshot.get("final_score", 0.0) or 0.0)
-    k = 3.0
-    neutral_band = float(blend.get("neutral_band", 0.30))
-    risk_on_threshold = float(blend.get("risk_on_threshold", 0.60))
-    risk_off_threshold = float(blend.get("risk_off_threshold", 0.60))
-    risk_on_raw = math.exp(k * (final_score - neutral_band))
-    risk_off_raw = math.exp(k * (-final_score - neutral_band))
-    neutral_raw = math.exp(k * (neutral_band - abs(final_score)))
-    total = risk_on_raw + risk_off_raw + neutral_raw
-    p_on = risk_on_raw / total if total > 0 else 0.0
-    p_off = risk_off_raw / total if total > 0 else 0.0
-    p_neu = neutral_raw / total if total > 0 else 1.0
+    import regime_classification as classification
+    
+    # Simple preview based on new 4-class classification logic
+    preview_regime = classification.classify_regime(final_score)
+    probs = classification.calculate_regime_probabilities(final_score, preview_regime)
+    
+    p_on = probs.get("risk_on", 0.0)
+    p_sel = probs.get("selective", 0.0)
+    p_def = probs.get("defensive", 0.0)
+    p_cri = probs.get("crisis", 0.0)
 
-    if p_on >= risk_on_threshold and p_on > p_off and p_on > p_neu:
-        preview_regime = "🟢 Risk On"
-    elif p_off >= risk_off_threshold and p_off > p_on and p_off > p_neu:
-        preview_regime = "🔴 Risk Off"
-    else:
-        preview_regime = "🟡 Neutral"
+    # Add Emojis for preview
+    EMOJI_MAP = {
+        "Risk On": "🟢 Risk On",
+        "Selective": "🟡 Selective",
+        "Defensive": "🟠 Defensive",
+        "Crisis": "🔴 Crisis"
+    }
+    preview_display = EMOJI_MAP.get(preview_regime, preview_regime)
 
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Preview Regime", preview_regime)
-    p2.metric("Preview P(Risk On)", f"{p_on:.0%}")
-    p3.metric("Preview P(Neutral)", f"{p_neu:.0%}")
-    p4.metric("Preview P(Risk Off)", f"{p_off:.0%}")
+    c1, c2, c3, c4, c5 = _responsive_cols(5)
+    c1.metric("Preview Regime", preview_display)
+    c2.metric("P(Risk On)", f"{p_on:.0%}")
+    c3.metric("P(Selective)", f"{p_sel:.0%}")
+    c4.metric("P(Defensive)", f"{p_def:.0%}")
+    c5.metric("P(Crisis)", f"{p_cri:.0%}")
     st.caption(
-        f"Preview uses latest Macro SSOT score {final_score:+.3f} with current unsaved thresholds/band. "
-        "Weight changes require save + Macro Risk recompute for full effect."
+        f"Preview uses latest Macro SSOT score {final_score:+.3f} with unified 4-class taxonomy. "
+        "Threshold changes in this page affect probability calculation if the engine is re-run."
     )
 else:
     st.info("No Macro SSOT snapshot found yet. Open Macro Risk page once, then return for live preview.")
 
 st.markdown("---")
-btn1, btn2, btn3 = st.columns(3)
+btn1, btn2, btn3 = _responsive_cols(3)
 with btn1:
     if st.button("💾 Save Settings", width='stretch'):
         save_regime_settings(settings)

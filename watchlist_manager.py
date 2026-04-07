@@ -3,8 +3,7 @@ import os
 import logging
 from NSE_Config import PRESET_WATCHLISTS
 
-# Configure logger
-logging.basicConfig(level=logging.INFO)
+# Module-level logger (do NOT call basicConfig here — it overrides app logging)
 logger = logging.getLogger(__name__)
 
 WATCHLIST_FILE = "watchlists.json"

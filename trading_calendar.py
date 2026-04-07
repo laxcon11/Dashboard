@@ -59,3 +59,18 @@ def nse_business_day_age(last_date: Optional[pd.Timestamp], ref_date: Optional[p
     if last > ref:
         return 0
     return max(0, nse_business_days_between(last, ref) - 1)
+
+
+def add_nse_business_days(base: pd.Timestamp, days: int) -> pd.Timestamp:
+    """Return the date that is *days* NSE trading days after *base*.
+
+    Walks forward one calendar day at a time, counting only days that
+    pass ``is_nse_trading_day``.  Skips weekends and NSE holidays.
+    """
+    d = pd.Timestamp(base).normalize()
+    remaining = int(days)
+    while remaining > 0:
+        d += pd.Timedelta(days=1)
+        if is_nse_trading_day(d):
+            remaining -= 1
+    return d

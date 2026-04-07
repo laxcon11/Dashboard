@@ -78,7 +78,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build F&O lot-size map from NSE FO Bhavcopy CSV/ZIP")
     parser.add_argument(
         "--file",
-        default="/Users/laxmanacharya/Downloads/BhavCopy_NSE_FO_0_0_0_20260220_F_0000.csv",
+        default=str(Path.home() / "Downloads" / "BhavCopy_NSE_FO_0_0_0_20260220_F_0000.csv"),
         help="Path to NSE FO bhavcopy CSV or CSV.ZIP",
     )
     parser.add_argument("--out", default="notes/fno_lot_sizes.json", help="Output JSON path")

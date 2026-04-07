@@ -8,13 +8,18 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from utils import setup_page, get_ui_detail_mode
+from utils import setup_page, get_ui_detail_mode, get_ui_device_mode, responsive_cols as _responsive_cols
 
 
 setup_page("Roadmap TODO")
 _ = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
 
 STORE_FILE = Path("notes/todo_inventory.json")
+
+
+# _responsive_cols imported from utils
 
 
 def _default_seed() -> dict:
@@ -117,19 +122,20 @@ def _delete_task(payload: dict, task_id: str) -> bool:
 st.title("✅ Roadmap TODO Tracker")
 st.caption("Track pending updates, dependencies, and implementation conditions. Completed items auto-hide from active list.")
 st.caption(f"Store file: `{STORE_FILE}`")
+st.caption(f"Device mode: **{device_mode}**")
 
 store = _load_store()
 pending = store.get("pending", [])
 completed = store.get("completed", [])
 
-m1, m2, m3 = st.columns(3)
+m1, m2, m3 = _responsive_cols(3)
 m1.metric("Pending", len(pending))
 m2.metric("Completed", len(completed))
 m3.metric("Total", len(pending) + len(completed))
 
 with st.expander("➕ Add New Task", expanded=False):
     with st.form("add_todo_form"):
-        c1, c2 = st.columns(2)
+        c1, c2 = _responsive_cols(2)
         with c1:
             title = st.text_input("Task Title")
             area = st.selectbox("Area", ["Regime", "Liquidity", "Swing", "Journal", "Data", "Ops", "UI", "Other"])
@@ -175,7 +181,7 @@ else:
 
     for task in pending_sorted:
         tid = str(task.get("id"))
-        tcol1, tcol2 = st.columns([5, 1])
+        tcol1, tcol2 = _responsive_cols(2, [5, 1])
         with tcol1:
             st.markdown(
                 f"**{task.get('title', 'Untitled')}**  \n"

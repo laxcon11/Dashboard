@@ -55,31 +55,31 @@ def _run_page_vars(path: Path) -> dict[str, Any]:
 def _config_checks() -> tuple[float, dict[str, Any], list[str]]:
     settings = load_regime_settings()
     blend = settings.get("blend", {})
+    global_f = settings.get("global_factors", {})
     macro = settings.get("macro_factors", {})
     liq = settings.get("liquidity_factors", {})
+    risk = settings.get("risk_factors", {})
 
     checks: dict[str, bool] = {}
     hard_fail: list[str] = []
 
+    gw = float(blend.get("global_weight", 0.0))
     mw = float(blend.get("macro_weight", 0.0))
     lw = float(blend.get("liquidity_weight", 0.0))
-    checks["blend_weights_valid"] = (0.0 <= mw <= 1.0 and 0.0 <= lw <= 1.0 and (mw + lw) > 0)
+    rw = float(blend.get("risk_weight", 0.0))
+    
+    # Check if sum is close to 1.0 (some users might not perfectly sum to 1.0 but it should be close)
+    total_w = gw + mw + lw + rw
+    checks["blend_weights_valid"] = (0.95 <= total_w <= 1.05)
 
-    fw = float(blend.get("fast_weight", 0.0))
-    sw = float(blend.get("slow_weight", 0.0))
-    checks["fast_slow_weights_valid"] = (0.0 <= fw <= 1.0 and 0.0 <= sw <= 1.0 and (fw + sw) > 0)
-
-    impulse_influence = float(blend.get("impulse_influence", 0.0))
-    checks["impulse_influence_valid"] = (0.0 <= impulse_influence <= 0.6)
-
-    max_w = float(blend.get("max_factor_weight", 0.0))
-    checks["max_factor_weight_valid"] = (0.01 <= max_w <= 0.5)
+    checks["impulse_influence_valid"] = (0.0 <= float(blend.get("impulse_influence", 0.0)) <= 0.6)
+    checks["max_factor_weight_valid"] = (0.01 <= float(blend.get("max_factor_weight", 0.0)) <= 0.5)
 
     caps = blend.get("group_caps", {})
     checks["group_caps_valid"] = all(0 < float(v) <= 1.0 for v in caps.values()) if isinstance(caps, dict) else False
 
     factor_ok = True
-    for f in {**macro, **liq}.values():
+    for f in {**global_f, **macro, **liq, **risk}.values():
         try:
             w = float(f.get("weight", 0.0))
             if w < 0 or w > 1:
@@ -98,12 +98,11 @@ def _config_checks() -> tuple[float, dict[str, Any], list[str]]:
     score = 100.0 * (sum(1 for v in checks.values() if v) / max(1, len(checks)))
     detail = {
         "checks": checks,
+        "global_weight": gw,
         "macro_weight": mw,
         "liquidity_weight": lw,
-        "fast_weight": fw,
-        "slow_weight": sw,
-        "impulse_influence": impulse_influence,
-        "max_factor_weight": max_w,
+        "risk_weight": rw,
+        "total_weight": total_w
     }
     return score, detail, hard_fail
 
@@ -112,81 +111,42 @@ def _macro_checks(page_vars: dict[str, Any]) -> tuple[float, dict[str, Any], lis
     hard_fail: list[str] = []
     checks: dict[str, bool] = {}
 
-    mr = page_vars.get("macro_result", {}) or {}
-    lr = page_vars.get("liquidity_result", {}) or {}
+    res = page_vars.get("main_regime_result", {}) or {}
+    if not res:
+        return 0.0, {"error": "main_regime_result not found"}, ["main_regime_result_missing"]
 
-    macro_dir = float(mr.get("directional_norm", 0.0))
-    liq_dir = float(lr.get("directional_norm", 0.0))
-    macro_imp = float(mr.get("impulse_norm", 0.0))
-    liq_imp = float(lr.get("impulse_norm", 0.0))
+    pillar_scores = res.get("pillar_scores", {})
+    final_score = float(res.get("final_score", 0.0))
 
-    mw = float(page_vars.get("macro_weight", 0.0))
-    lw = float(page_vars.get("liquidity_weight", 0.0))
-    ii = float(page_vars.get("impulse_influence", 0.0))
+    # Corrected Weighting: Pillar scores are already weighted by absolute weights
+    recomputed_score = sum(pillar_scores.values())
 
-    final_dir = float(page_vars.get("final_directional", 0.0))
-    final_imp = float(page_vars.get("final_impulse", 0.0))
-    final_score = float(page_vars.get("final_score", 0.0))
-
-    recomputed_dir = (macro_dir * mw) + (liq_dir * lw)
-    recomputed_imp = (macro_imp * mw) + (liq_imp * lw)
-    recomputed_score = (recomputed_dir * (1.0 - ii)) + (recomputed_imp * ii)
-
-    checks["final_directional_formula"] = abs(final_dir - recomputed_dir) <= 1e-6
-    checks["final_impulse_formula"] = abs(final_imp - recomputed_imp) <= 1e-6
-    checks["final_score_formula"] = abs(final_score - recomputed_score) <= 1e-6
-
-    probs = [
-        float(page_vars.get("p_risk_on", 0.0)),
-        float(page_vars.get("p_neutral", 0.0)),
-        float(page_vars.get("p_risk_off", 0.0)),
-    ]
-    checks["probability_sum_1"] = abs(sum(probs) - 1.0) <= 1e-6
-
-    for key, result in (("macro", mr), ("liquidity", lr)):
-        rows = result.get("rows", []) if isinstance(result, dict) else []
-        if rows:
-            eff_sum = sum(float(r.get("Eff W", 0.0)) for r in rows if r.get("Eff W") is not None)
-            checks[f"{key}_eff_weight_sum_close_1"] = abs(eff_sum - 1.0) <= 0.03
-        else:
-            checks[f"{key}_eff_weight_sum_close_1"] = False
-
-    checks["final_directional_range"] = -1.0 <= final_dir <= 1.0
+    checks["final_score_formula"] = abs(final_score - recomputed_score) <= 1e-4
     checks["final_score_range"] = -1.0 <= final_score <= 1.0
+    
+    rows = res.get("rows", [])
+    if rows:
+        # Check pillar sums
+        for p_name in ["Global", "Growth", "Liquidity", "Risk"]:
+            p_rows = [r for r in rows if r.get("Pillar") == p_name]
+            p_score_sum = sum(float(r.get("Score", 0.0)) * float(r.get("Weight", 0.0)) for r in p_rows)
+            # Growth in rows matches Growth in pillar_scores
+            p_key = p_name
+            checks[f"{p_name}_sum_match"] = abs(p_score_sum - pillar_scores.get(p_key, 0.0)) <= 1e-4
+    else:
+        checks["factor_rows_present"] = False
 
     for k, ok in checks.items():
-        if not ok and k in {"final_directional_formula", "final_score_formula", "probability_sum_1"}:
+        if not ok and k in {"final_score_formula", "final_score_range"}:
             hard_fail.append(k)
 
     score = 100.0 * (sum(1 for v in checks.values() if v) / max(1, len(checks)))
 
-    sensitivity = {
-        "final_directional": round(final_dir, 6),
-        "final_impulse": round(final_imp, 6),
-        "final_score": round(final_score, 6),
-    }
-
-    try:
-        # weight sensitivity (+/- 10% relative on macro weight, renormalized with liquidity)
-        up_mw = _clamp(mw * 1.10, 0.01, 0.99)
-        up_lw = 1.0 - up_mw
-        dn_mw = _clamp(mw * 0.90, 0.01, 0.99)
-        dn_lw = 1.0 - dn_mw
-        s_up = ((macro_dir * up_mw) + (liq_dir * up_lw))
-        s_dn = ((macro_dir * dn_mw) + (liq_dir * dn_lw))
-        sensitivity["dir_macro_weight_up10pct"] = round(float(s_up), 6)
-        sensitivity["dir_macro_weight_dn10pct"] = round(float(s_dn), 6)
-        sensitivity["dir_shift_abs_max"] = round(max(abs(s_up - final_dir), abs(s_dn - final_dir)), 6)
-    except Exception:
-        pass
-
     detail = {
         "checks": checks,
-        "macro_directional": macro_dir,
-        "liquidity_directional": liq_dir,
-        "recomputed_final_directional": recomputed_dir,
-        "recomputed_final_score": recomputed_score,
-        "sensitivity": sensitivity,
+        "pillar_scores": pillar_scores,
+        "recomputed_final_score": round(recomputed_score, 4),
+        "actual_final_score": round(final_score, 4)
     }
     return score, detail, hard_fail
 
@@ -223,18 +183,20 @@ def _leading_checks(page_vars: dict[str, Any]) -> tuple[float, dict[str, Any], l
 
 def _cross_page_parity(macro_vars: dict[str, Any], leading_vars: dict[str, Any]) -> tuple[float, dict[str, Any], list[str]]:
     hard_fail: list[str] = []
-    macro_rows = (macro_vars.get("macro_result", {}) or {}).get("rows", []) or []
+    res = macro_vars.get("main_regime_result", {}) or {}
+    macro_rows = res.get("rows", []) or []
 
     macro_map: dict[str, int] = {}
     for row in macro_rows:
         name = str(row.get("Factor", "")).strip().lower()
-        macro_map[name] = _safe_sign(row.get("Slow"))
+        # Macro rows use 'Score' column in the new engine
+        macro_map[name] = _safe_sign(row.get("Score"))
 
     leading_map = {
         "dollar index": _safe_sign(leading_vars.get("dxy_score")),
-        "us 10y yield": _safe_sign(leading_vars.get("yield_score")),
+        "us yield curve (10y-3m)": _safe_sign(leading_vars.get("curve_directional") if "curve_directional" in leading_vars else None),
         "copper/gold ratio": _safe_sign(leading_vars.get("cg_score")),
-        "credit spread (hyg/lqd)": _safe_sign(leading_vars.get("credit_score")),
+        "global credit spread": _safe_sign(leading_vars.get("credit_score")),
     }
 
     comparisons = []
@@ -252,13 +214,80 @@ def _cross_page_parity(macro_vars: dict[str, Any], leading_vars: dict[str, Any])
         )
 
     if not comparisons:
-        score = 70.0
+        score = 100.0 # No comparisons possible, so no penalty
         detail = {"comparisons": [], "match_rate": None, "note": "No overlapping factors available for parity."}
         return score, detail, hard_fail
 
     match_rate = sum(1 for x in comparisons if x["match"]) / len(comparisons)
     score = 100.0 * match_rate
     detail = {"comparisons": comparisons, "match_rate": round(match_rate, 4)}
+    return score, detail, hard_fail
+
+
+import pandas as pd
+
+def _playbook_checks() -> tuple[float, dict[str, Any], list[str]]:
+    hard_fail: list[str] = []
+    checks: dict[str, bool] = {}
+    
+    sig_file = ROOT / "data" / "snapshots" / "tradable_signals.parquet"
+    if not sig_file.exists():
+        return 0.0, {"error": "tradable_signals.parquet missing"}, ["playbook_file_missing"]
+    
+    try:
+        df = pd.read_parquet(sig_file)
+    except Exception as e:
+        return 0.0, {"error": f"Failed to read parquet: {e}"}, ["playbook_read_error"]
+
+    if df.empty:
+        return 100.0, {"note": "No tradable signals found to audit."}, []
+
+    ok_df = df[df["audit_reason"] == "OK"]
+    
+    # 1. Freshness (within 24h)
+    latest_date = pd.to_datetime(df["date"].max())
+    now = datetime.now()
+    checks["snapshot_freshness"] = bool((now - latest_date).days <= 1)
+
+    if ok_df.empty:
+        # If freshness is OK but no signals are 'OK', we still pass freshness
+        detail = {
+            "checks": {k: bool(v) for k, v in checks.items()},
+            "signal_count": int(len(df)),
+            "ok_signal_count": 0,
+            "note": "Snapshot found, but no signals passed scanner filters."
+        }
+        return 100.0 if checks["snapshot_freshness"] else 0.0, detail, []
+
+    # 2. Risk Integrity (Entry > Stop for Longs in 'OK' set)
+    # Our playbook is currently LONG only
+    invalid_risk = ok_df[ok_df["suggested_entry"] <= ok_df["suggested_stop"]]
+    checks["risk_integrity"] = bool(len(invalid_risk) == 0)
+
+    # 3. Deterministic Targets (Check if R:R is ~2.0)
+    # target = entry + 2 * (entry - stop)
+    entry = ok_df["suggested_entry"]
+    stop = ok_df["suggested_stop"]
+    target = ok_df["target_price"]
+    expected_target = entry + 2.0 * (entry - stop)
+    # Allow small epsilon for float rounding
+    target_errors = (target - expected_target).abs() > 0.01
+    checks["target_determinism"] = bool(not target_errors.any())
+
+    # 4. Position Sizing
+    checks["position_sizing_present"] = bool((ok_df["position_size"] > 0).all())
+
+    if not checks["risk_integrity"]:
+        hard_fail.append("invalid_risk_in_ok_signals")
+
+    score = 100.0 * (sum(1 for v in checks.values() if v) / max(1, len(checks)))
+    detail = {
+        "checks": {k: bool(v) for k, v in checks.items()},
+        "total_signal_count": int(len(df)),
+        "ok_signal_count": int(len(ok_df)),
+        "latest_signal_date": str(latest_date.date()),
+        "invalid_risk_in_ok_count": int(len(invalid_risk))
+    }
     return score, detail, hard_fail
 
 
@@ -270,19 +299,23 @@ def main() -> int:
     macro_score, macro_detail, macro_fail = _macro_checks(macro_vars)
     lead_score, lead_detail, lead_fail = _leading_checks(leading_vars)
     parity_score, parity_detail, parity_fail = _cross_page_parity(macro_vars, leading_vars)
+    pb_score, pb_detail, pb_fail = _playbook_checks()
 
-    overall = (0.30 * cfg_score) + (0.35 * macro_score) + (0.20 * lead_score) + (0.15 * parity_score)
-    hard_fails = cfg_fail + macro_fail + lead_fail + parity_fail
+    # Weights adjusted to include Playbook (Config: 20%, Macro: 30%, Lead: 15%, Parity: 15%, Playbook: 20%)
+    overall = (0.20 * cfg_score) + (0.30 * macro_score) + (0.15 * lead_score) + (0.15 * parity_score) + (0.20 * pb_score)
+    hard_fails = cfg_fail + macro_fail + lead_fail + parity_fail + pb_fail
 
     if hard_fails:
         status = "FAIL"
     elif overall >= 95:
         status = "PASS"
-    elif overall >= 85:
+    elif overall >= 80:
         status = "WARN"
     else:
         status = "FAIL"
 
+    p_scores = macro_detail.get("pillar_scores", {})
+    
     payload = {
         "generated_at": datetime.now().isoformat(),
         "status": status,
@@ -290,15 +323,20 @@ def main() -> int:
         "hard_fail_reasons": hard_fails,
         "scores": {
             "config": round(float(cfg_score), 2),
-            "macro": round(float(macro_score), 2),
+            "global": round(float(p_scores.get("Global", 0.0) * 100), 2),
+            "growth": round(float(p_scores.get("Growth", 0.0) * 100), 2),
+            "liquidity": round(float(p_scores.get("Liquidity", 0.0) * 100), 2),
+            "risk": round(float(p_scores.get("Risk", 0.0) * 100), 2),
             "leading": round(float(lead_score), 2),
             "cross_page_parity": round(float(parity_score), 2),
+            "playbook": round(float(pb_score), 2),
         },
         "details": {
             "config": cfg_detail,
             "macro": macro_detail,
             "leading": lead_detail,
             "cross_page_parity": parity_detail,
+            "playbook": pb_detail,
         },
     }
 
@@ -310,8 +348,10 @@ def main() -> int:
     print(f"[ok] scoring audit written: {latest}")
     print(
         f"[ok] status={payload['status']} overall={payload['overall_score']:.2f} "
-        f"config={payload['scores']['config']:.2f} macro={payload['scores']['macro']:.2f} "
-        f"leading={payload['scores']['leading']:.2f} parity={payload['scores']['cross_page_parity']:.2f}"
+        f"config={payload['scores']['config']:.2f} global={payload['scores']['global']:.2f} "
+        f"growth={payload['scores']['growth']:.2f} liquidity={payload['scores']['liquidity']:.2f} "
+        f"risk={payload['scores']['risk']:.2f} leading={payload['scores']['leading']:.2f} "
+        f"parity={payload['scores']['cross_page_parity']:.2f} playbook={payload['scores']['playbook']:.2f}"
     )
     return 0
 

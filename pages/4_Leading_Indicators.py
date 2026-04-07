@@ -19,14 +19,21 @@ from utils import (
     get_live_price_safe,
     render_key_observations,
     get_ui_detail_mode,
+    get_ui_device_mode,
     render_source_freshness,
     render_decision_header,
+    responsive_cols as _responsive_cols,
 )
 import analytics
 from config import FRED_API_KEY, MARKET_SYMBOLS as CONFIG_MARKET_SYMBOLS, LEADING_SYMBOLS as CONFIG_LEADING_SYMBOLS
 
 setup_page("Leading Indicators")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
+
+
+# _responsive_cols imported from utils
 
 # ==================== CUSTOM CSS ====================
 st.markdown("""
@@ -94,6 +101,7 @@ st.markdown("""
 # ==================== TITLE ====================
 st.markdown('<h1 class="main-title">📊 Leading Indicators Dashboard</h1>', unsafe_allow_html=True)
 st.markdown("**Early signals of market direction** • Liquidity • Yields • Currency • Risk Assets")
+st.caption(f"Device mode: **{device_mode}**")
 render_decision_header(source="macro_ssot")
 st.markdown("---")
 
@@ -135,7 +143,7 @@ LEADING_SYMBOLS = CONFIG_LEADING_SYMBOLS
 ALL_SYMBOLS = list(set(MARKET_SYMBOLS.keys()) | set(LEADING_SYMBOLS.keys()))
 
 with st.spinner("📡 Fetching market data..."):
-    all_data = batch_download(ALL_SYMBOLS, period="6mo")
+    all_data = batch_download(ALL_SYMBOLS, period="1y")
 
 market_data = {k: all_data.get(k) for k in MARKET_SYMBOLS}
 data = {k: all_data.get(k) for k in LEADING_SYMBOLS}
@@ -186,9 +194,18 @@ curve = None
 if yield_10y is not None and yield_3m is not None:
     curve = yield_10y - yield_3m
     curve_signal = "Yield Curve Positive" if curve > 0 else "Yield Curve Inverted"
+    
+    # Calculate Z-score based directional signal for parity
+    try:
+        y10_series = market_data.get("^TNX")["Close"]
+        y3m_series = market_data.get("^IRX")["Close"]
+        curve_series = (y10_series - y3m_series).dropna()
+        curve_directional = analytics.calculate_z_score_signal(curve_series)
+    except Exception:
+        curve_directional = 1 if curve > 0 else -1
 
 # Display signal cards
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = _responsive_cols(5)
 
 with col1:
     if curve_signal and yield_10y is not None and yield_3m is not None and curve is not None:
@@ -202,6 +219,17 @@ with col1:
         ''', unsafe_allow_html=True)
 
 with col2:
+    if yield_signal not in INVALID_SIGNAL_STATES and yield_value:
+        card_class = "signal-card-negative" if yield_score == -1 else "signal-card-positive"
+        st.markdown(f'''
+        <div class="signal-card {card_class}">
+            <h3>📊 Yield Trend</h3>
+            <h2>{yield_value:.2f}%</h2>
+            <p>{SIGNAL_EXPLANATIONS.get(yield_signal, "")}</p>
+        </div>
+        ''', unsafe_allow_html=True)
+
+with col3:
     if credit_signal not in ["No Data", "Insufficient Data", "Error"] and ratio_credit:
         card_class = "signal-card-positive" if credit_score == 1 else "signal-card-negative"
         st.markdown(f'''
@@ -212,7 +240,7 @@ with col2:
         </div>
         ''', unsafe_allow_html=True)
 
-with col3:
+with col4:
     if dxy_signal not in ["No Data", "Insufficient Data", "Error"] and dxy_value:
         card_class = "signal-card-negative" if dxy_score == -1 else "signal-card-positive"
         st.markdown(f'''
@@ -223,7 +251,7 @@ with col3:
         </div>
         ''', unsafe_allow_html=True)
 
-with col4:
+with col5:
     if ratio_cg and cg_signal not in ["No Data", "Insufficient Data", "Error"]:
         card_class = "signal-card-positive" if cg_score == 1 else "signal-card-negative"
         st.markdown(f'''
@@ -381,7 +409,7 @@ directional_normalized = (
     sum(directional_values) / len(directional_values) if len(directional_values) >= 3 else 0
 )
 
-g1, g2 = st.columns(2)
+g1, g2 = _responsive_cols(2)
 
 with g1:
     fig_daily = go.Figure(go.Indicator(
@@ -431,7 +459,7 @@ with g2:
     st.plotly_chart(fig_directional, width='stretch')
     st.caption(f"Using {len(directional_values)} factors")
 
-summary_c1, summary_c2 = st.columns(2)
+summary_c1, summary_c2 = _responsive_cols(2)
 with summary_c1:
     st.metric("Daily Impulse", f"{daily_normalized:+.2f}")
 with summary_c2:
@@ -464,19 +492,32 @@ with st.expander("🧠 Factor Breakdown (Expand)", expanded=False):
         )
     st.caption("Daily reacts to latest move. Directional reflects broader trend context.")
 
-if daily_normalized > 0.3:
-    st.success("Daily Environment: Risk ON")
-elif daily_normalized < -0.3:
-    st.error("Daily Environment: Risk OFF")
-else:
-    st.warning("Daily Environment: Neutral")
+def _env_label(v: float) -> str:
+    if v > 0.3:
+        return "Risk ON"
+    if v < -0.3:
+        return "Risk OFF"
+    return "Neutral"
 
-if directional_normalized > 0.3:
-    st.success("Directional Environment: Risk ON")
-elif directional_normalized < -0.3:
-    st.error("Directional Environment: Risk OFF")
+
+daily_env = _env_label(daily_normalized)
+directional_env = _env_label(directional_normalized)
+if view_mode == "Summary":
+    st.info(f"Environment: Daily {daily_env} | Directional {directional_env}")
 else:
-    st.warning("Directional Environment: Neutral")
+    if daily_env == "Risk ON":
+        st.success("Daily Environment: Risk ON")
+    elif daily_env == "Risk OFF":
+        st.error("Daily Environment: Risk OFF")
+    else:
+        st.warning("Daily Environment: Neutral")
+
+    if directional_env == "Risk ON":
+        st.success("Directional Environment: Risk ON")
+    elif directional_env == "Risk OFF":
+        st.error("Directional Environment: Risk OFF")
+    else:
+        st.warning("Directional Environment: Neutral")
 
 st.markdown("---")
 
@@ -518,7 +559,7 @@ st.markdown("---")
 
 # ==================== RATIO TRENDS ====================
 with st.expander("📈 Key Ratio Trends (Expand)", expanded=False):
-    col1, col2 = st.columns(2)
+    col1, col2 = _responsive_cols(2)
 
     with col1:
         copper = data.get("HG=F")
@@ -591,7 +632,7 @@ with st.expander("📊 View All Market Indicators", expanded=False):
     for symbol, label in MARKET_SYMBOLS.items():
         df = market_data.get(symbol)
         if df is not None and len(df) > 0:
-            col1, col2 = st.columns([3, 1])
+            col1, col2 = _responsive_cols(2, [3, 1])
 
             with col1:
                 df_chart = prepare_timeseries_for_chart(df)
@@ -694,6 +735,6 @@ if view_mode == "Detail":
 
 # ==================== FOOTER ====================
 st.markdown("---")
-st.caption("💡 **Tip**: Leading indicators help anticipate regime shifts before markets move")
-st.caption("Data: Yahoo Finance, FRED | Updated: Real-time with 15-20min delay")
-st.caption("✅ Enhanced: Fixed US Treasury Yield signal | Modern UI | Better visuals")
+st.caption("Data: Yahoo Finance + FRED (15-20 min delay).")
+if view_mode == "Detail":
+    st.caption("Tip: Leading indicators help anticipate regime shifts before markets move.")

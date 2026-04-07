@@ -11,6 +11,7 @@ Optimizations:
 
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import streamlit as st
 import logging
 import requests
@@ -54,10 +55,6 @@ from trading_calendar import latest_nse_business_day, nse_business_day_age
 # ==================== LOGGING SETUP ====================
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(levelname)s:%(name)s:%(message)s"
-)
 
 # Shared session for FRED requests
 session = requests.Session()
@@ -135,12 +132,17 @@ def _build_nse_session() -> requests.Session:
         }
     )
 
-    # Warm cookies; failures are expected in restricted/offline environments.
-    for url in ("https://www.nseindia.com/", "https://www.nseindia.com/all-reports"):
+    # Warm cookies; precisely ordered for Option Chain authorization
+    urls = [
+        "https://www.nseindia.com/",
+        "https://www.nseindia.com/option-chain"
+    ]
+    for url in urls:
         try:
             s.get(url, timeout=10)
-        except Exception:
-            pass
+            time.sleep(1.0) # Critical settle time for Akamai/nsit cookies
+        except Exception as exc:
+            logger.debug("NSE cookie warmup failed for %s: %s", url, exc)
     return s
 
 
@@ -170,6 +172,10 @@ def _download_bhavcopy_for_date(s: requests.Session, d: date, target_dir: Path) 
     return None
 
 
+    logger.info("Bhavcopy auto-download did not find a valid file in lookback window.")
+    return None
+
+
 def auto_download_latest_bhavcopy() -> Optional[Path]:
     """
     Attempt to download the latest available Bhavcopy from NSE archives.
@@ -187,8 +193,75 @@ def auto_download_latest_bhavcopy() -> Optional[Path]:
         if downloaded is not None:
             return downloaded
 
-    logger.info("Bhavcopy auto-download did not find a valid file in lookback window.")
     return None
+
+
+def fetch_nse_option_chain(symbol: str = "NIFTY") -> pd.DataFrame:
+    """
+    Fetch option chain from NSE API.
+    Returns: DataFrame with [strike, expiry, type, oi, iv, ltp]
+    """
+    # v3.6: Transition to v3 API and specific Referer
+    s = _build_nse_session()
+    base_url = "https://www.nseindia.com/api/option-chain-v3"
+    params = {"type": "Indices", "symbol": symbol}
+    
+    try:
+        headers = {
+            "Referer": "https://www.nseindia.com/option-chain",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive"
+        }
+        resp = s.get(base_url, params=params, headers=headers, timeout=15)
+        
+        if resp.status_code != 200:
+            # Fallback to legacy v2 if v3 is blocked or not found
+            legacy_url = "https://www.nseindia.com/api/option-chain-indices"
+            logger.info("Attempting legacy v2 fallback...")
+            resp = s.get(legacy_url, params={"symbol": symbol}, headers=headers, timeout=15)
+            
+        if resp.status_code != 200:
+            logger.error(f"NSE Option Chain fetch failed: {resp.status_code}")
+            return pd.DataFrame()
+            
+        data = resp.json()
+        records = data.get("records", {}).get("data", [])
+        
+        flat_data = []
+        for r in records:
+            strike = r.get("strikePrice")
+            expiry = r.get("expiryDate")
+            
+            # CALLS
+            ce = r.get("CE")
+            if ce:
+                flat_data.append({
+                    "strike": strike,
+                    "expiry": expiry,
+                    "type": "call",
+                    "oi": ce.get("openInterest", 0),
+                    "iv": ce.get("impliedVolatility", 0),
+                    "ltp": ce.get("lastPrice", 0)
+                })
+                
+            # PUTS
+            pe = r.get("PE")
+            if pe:
+                flat_data.append({
+                    "strike": strike,
+                    "expiry": expiry,
+                    "type": "put",
+                    "oi": pe.get("openInterest", 0),
+                    "iv": pe.get("impliedVolatility", 0),
+                    "ltp": pe.get("lastPrice", 0)
+                })
+        
+        return pd.DataFrame(flat_data)
+    except Exception as e:
+        logger.error(f"Error fetching NSE Option Chain: {e}")
+        return pd.DataFrame()
 
 
 def _standardize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -200,6 +273,12 @@ def _standardize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
             rename[col] = "SYMBOL"
         elif norm in {"TCKRSYMB", "TICKERSYMBOL"}:
             rename[col] = "SYMBOL"
+        elif norm in {"OPEN", "OPNPRIC"}:
+            rename[col] = "OPEN"
+        elif norm in {"HIGH", "HGHPRIC"}:
+            rename[col] = "HIGH"
+        elif norm in {"LOW", "LWPRIC"}:
+            rename[col] = "LOW"
         elif norm == "CLOSE":
             rename[col] = "CLOSE"
         elif norm in {"CLSPRIC", "CLOSINGPRICE"}:
@@ -217,8 +296,8 @@ def _standardize_bhavcopy_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=rename)
 
 
-def _extract_bhavcopy_prices(df: pd.DataFrame) -> Dict[str, Tuple[float, Optional[float], Optional[float]]]:
-    """Return symbol->(close, prev_close, volume) from a bhavcopy-like DataFrame."""
+def _extract_bhavcopy_prices(df: pd.DataFrame) -> Dict[str, Tuple[float, Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]]:
+    """Return symbol->(close, prev_close, volume, open, high, low) from a bhavcopy-like DataFrame."""
     if df is None or df.empty:
         return {}
 
@@ -239,6 +318,12 @@ def _extract_bhavcopy_prices(df: pd.DataFrame) -> Dict[str, Tuple[float, Optiona
     else:
         local["PREVCLOSE"] = pd.NA
 
+    for c in ["OPEN", "HIGH", "LOW"]:
+        if c in local.columns:
+            local[c] = pd.to_numeric(local[c], errors="coerce")
+        else:
+            local[c] = pd.NA
+
     local = local.dropna(subset=["CLOSE"])
     if local.empty:
         return {}
@@ -250,17 +335,20 @@ def _extract_bhavcopy_prices(df: pd.DataFrame) -> Dict[str, Tuple[float, Optiona
     else:
         local["VOLUME"] = pd.NA
 
-    prices: Dict[str, Tuple[float, Optional[float], Optional[float]]] = {}
+    prices: Dict[str, Tuple[float, Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]] = {}
     for _, row in local.iterrows():
         symbol = f"{row['SYMBOL']}.NS"
         close = float(row["CLOSE"])
         prev_close = None if pd.isna(row["PREVCLOSE"]) else float(row["PREVCLOSE"])
         vol = None if pd.isna(row["VOLUME"]) else float(row["VOLUME"])
-        prices[symbol] = (close, prev_close, vol)
+        o = None if pd.isna(row["OPEN"]) else float(row["OPEN"])
+        h = None if pd.isna(row["HIGH"]) else float(row["HIGH"])
+        l = None if pd.isna(row["LOW"]) else float(row["LOW"])
+        prices[symbol] = (close, prev_close, vol, o, h, l)
     return prices
 
 
-def _read_bhavcopy_file(path: Path) -> Dict[str, Tuple[float, Optional[float], Optional[float]]]:
+def _read_bhavcopy_file(path: Path) -> Dict[str, Tuple[float, Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]]:
     """Parse bhavcopy CSV or ZIP and return symbol price map."""
     try:
         if path.suffix.lower() == ".csv":
@@ -294,7 +382,7 @@ def _extract_bhavcopy_trade_date(df: pd.DataFrame) -> Optional[pd.Timestamp]:
     return None
 
 
-def _read_bhavcopy_file_with_meta(path: Path) -> Tuple[Dict[str, Tuple[float, Optional[float], Optional[float]]], Optional[pd.Timestamp]]:
+def _read_bhavcopy_file_with_meta(path: Path) -> Tuple[Dict[str, Tuple[float, Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]], Optional[pd.Timestamp]]:
     """Parse Bhavcopy and return (prices, trade_date)."""
     try:
         if path.suffix.lower() == ".csv":
@@ -373,9 +461,9 @@ def _list_bhavcopy_candidates() -> List[Path]:
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def load_latest_bhavcopy_prices() -> Dict[str, Tuple[float, Optional[float], Optional[float]]]:
+def load_latest_bhavcopy_prices() -> Dict[str, Tuple[float, Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]]:
     """
-    Load latest available Bhavcopy price map: symbol -> (close, prev_close, volume).
+    Load latest available Bhavcopy price map: symbol -> (close, prev_close, volume, open, high, low).
     Returns empty dict if no valid file is found.
     """
     if not BHAVCOPY_FALLBACK_ENABLED:
@@ -426,7 +514,7 @@ def get_bhavcopy_price(symbol: str) -> Tuple[Optional[float], Optional[float], O
     if not row:
         return None, None, None
 
-    close, prev_close, _ = row
+    close, prev_close, _, _, _, _ = row
     if prev_close is None or prev_close == 0:
         return close, None, None
 
@@ -440,6 +528,9 @@ def _build_fallback_price_df(
     prev_close: Optional[float],
     trade_date: Optional[pd.Timestamp] = None,
     volume: Optional[float] = None,
+    o: Optional[float] = None,
+    h: Optional[float] = None,
+    l: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Build a minimal 2-row OHLCV DataFrame so downstream chart/price code can operate.
@@ -453,11 +544,15 @@ def _build_fallback_price_df(
         prev_close = price
     vol_today = 0.0 if volume is None or pd.isna(volume) else float(max(0.0, volume))
 
+    o_td = price if o is None else o
+    h_td = price if h is None else h
+    l_td = price if l is None else l
+
     df = pd.DataFrame(
         {
-            "Open": [prev_close, price],
-            "High": [prev_close, price],
-            "Low": [prev_close, price],
+            "Open": [prev_close, o_td],
+            "High": [prev_close, h_td],
+            "Low": [prev_close, l_td],
             "Close": [prev_close, price],
             "Volume": [0.0, vol_today],
         },
@@ -580,15 +675,27 @@ def quick_data_health_summary() -> Dict[str, object]:
         universe = set(NIFTY_200)
         available = set(work["symbol"].unique())
         missing = universe - available
-        summary["missing_symbols"] = len(missing)
         summary["duplicates"] = int(work.duplicated(subset=["symbol", "date"]).sum())
 
         latest_bd = latest_nse_business_day()
         ages = work.groupby("symbol")["date"].max().apply(
             lambda d: (nse_business_day_age(pd.Timestamp(d), latest_bd) or 0)
         )
-        summary["stale_warn"] = int((ages >= DATA_STALENESS_WARN_DAYS).sum())
-        summary["stale_error"] = int((ages >= DATA_STALENESS_ERROR_DAYS).sum())
+        stale_warn_syms = set(ages[ages >= DATA_STALENESS_WARN_DAYS].index)
+        stale_err_syms = set(ages[ages >= DATA_STALENESS_ERROR_DAYS].index)
+
+        # Bhavcopy fallback: symbols stale in parquet but present in the
+        # latest Bhavcopy should not be flagged, mirroring runtime behaviour.
+        bhav_snap = get_latest_bhavcopy_snapshot()
+        bhav_prices = bhav_snap.get("prices", {}) or {}
+        if bhav_prices:
+            stale_warn_syms -= set(bhav_prices.keys())
+            stale_err_syms -= set(bhav_prices.keys())
+            missing -= set(bhav_prices.keys())
+
+        summary["missing_symbols"] = len(missing)
+        summary["stale_warn"] = len(stale_warn_syms)
+        summary["stale_error"] = len(stale_err_syms)
 
         summary["ok"] = (
             summary["missing_symbols"] == 0
@@ -605,7 +712,7 @@ def quick_data_health_summary() -> Dict[str, object]:
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def load_local_nse_history() -> pd.DataFrame:
+def load_local_nse_history(days: int | None = None) -> pd.DataFrame:
     """Load local NSE OHLCV history parquet if available."""
     if not LOCAL_NSE_HISTORY_ENABLED:
         return pd.DataFrame()
@@ -633,12 +740,17 @@ def load_local_nse_history() -> pd.DataFrame:
             }
         )
         out = out.dropna(subset=["date", "symbol", "close"])
+        
+        if days:
+            cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=days)
+            out = out[out["date"] >= cutoff]
+
         # Keep parquet aligned with tracked NSE universe only.
         try:
             from NSE_Config import NIFTY_200
             out = out[out["symbol"].isin(set(NIFTY_200))]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not apply NIFTY_200 universe filter to local parquet: %s", exc)
         return out
     except Exception as exc:
         logger.warning("Failed to load local NSE history parquet: %s", exc)
@@ -814,7 +926,7 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
                         group_by="ticker",
                         progress=False,
                         threads=True,
-                        auto_adjust=True,
+                        auto_adjust=False,
                         timeout=20,
                     )
                     break
@@ -868,44 +980,56 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
         # 4) Persist incremental API rows back to local parquet for NSE symbols.
         persist_local_nse_updates(api_updates)
 
-        # 5) Bhavcopy fallback for still-missing NSE symbols and stale local-only symbols.
+        # 5) Bhavcopy fallback for missing NSE symbols and stale local-only symbols.
+        # IMPROVEMENT: Also use Bhavcopy to fill gaps even if API returned some data, 
+        # provided Bhavcopy has a more recent index than the API result.
         bhav_prices = load_latest_bhavcopy_prices()
         bhav_snapshot = get_latest_bhavcopy_snapshot()
         bhav_trade_date = bhav_snapshot.get("trade_date")
         bhav_updates: Dict[str, pd.DataFrame] = {}
 
-        missing_nse = [s for s in valid_symbols if s not in result and _is_nse_equity_symbol(s)]
-        for symbol in missing_nse:
+        for symbol in valid_symbols:
+            if not _is_nse_equity_symbol(symbol):
+                continue
+                
             row = bhav_prices.get(symbol)
             if not row:
                 continue
-            close, prev_close, vol = row
-            bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol)
-            result[symbol] = bdf
-            source_map[symbol] = "BHAVCOPY"
-            bhav_updates[symbol] = bdf
-            logger.warning("%s: Using Bhavcopy fallback (missing).", symbol)
+                
+            close, prev_close, vol, o, h, l = row
+            bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol, o=o, h=h, l=l)
+            
+            needs_bhav = False
+            curr_p = np.nan
+            if symbol in result and not result[symbol].empty:
+                curr_p = float(result[symbol]["Close"].iloc[-1])
+            
+            if symbol not in result:
+                needs_bhav = True
+                source_label = "BHAVCOPY"
+            else:
+                api_max = result[symbol].index.max().normalize()
+                # Trigger if Bhavcopy is strictly newer OR if current price is invalid/missing
+                if isinstance(bhav_trade_date, pd.Timestamp) and bhav_trade_date.normalize() > api_max:
+                    needs_bhav = True
+                    source_label = source_map.get(symbol, "LOCAL") + "+BHAVCOPY"
+                elif pd.isna(curr_p) or curr_p <= 0:
+                    needs_bhav = True
+                    source_label = source_map.get(symbol, "LOCAL") + "+BHAVCOPY(RECOVERY)"
+                elif api_max < latest_bd:
+                    needs_bhav = True
+                    source_label = source_map.get(symbol, "LOCAL") + "+BHAVCOPY(STALE)"
 
-        stale_local_nse = [
-            s for s in valid_symbols
-            if _is_nse_equity_symbol(s)
-            and s in result
-            and source_map.get(s) == "LOCAL"
-            and not result[s].empty
-            and result[s].index.max().normalize() < latest_bd
-        ]
-        for symbol in stale_local_nse:
-            row = bhav_prices.get(symbol)
-            if not row:
-                continue
-            close, prev_close, vol = row
-            bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol)
-            merged = pd.concat([result[symbol], bdf], axis=0)
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-            result[symbol] = merged
-            source_map[symbol] = "LOCAL+BHAVCOPY"
-            bhav_updates[symbol] = bdf
-            logger.warning("%s: Using Bhavcopy fallback (stale local).", symbol)
+            if needs_bhav:
+                if symbol in result:
+                    merged = pd.concat([result[symbol], bdf], axis=0)
+                    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                    result[symbol] = merged
+                else:
+                    result[symbol] = bdf
+                source_map[symbol] = source_label
+                bhav_updates[symbol] = bdf
+                logger.warning("%s: Integrated Bhavcopy to fill history/staleness gap.", symbol)
 
         if bhav_updates:
             persist_local_nse_updates(bhav_updates)
@@ -924,8 +1048,8 @@ def batch_download(symbols: List[str], period: str = "1mo") -> Dict[str, pd.Data
                 row = bhav_prices.get(symbol)
                 if not row:
                     continue
-                close, prev_close, vol = row
-                bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol)
+                close, prev_close, vol, o, h, l = row
+                bdf = _build_fallback_price_df(close, prev_close, trade_date=bhav_trade_date, volume=vol, o=o, h=h, l=l)
                 if symbol in result and not result[symbol].empty:
                     merged = pd.concat([result[symbol], bdf], axis=0)
                     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
@@ -1010,6 +1134,18 @@ def extract_price_data(df: Optional[pd.DataFrame]) -> Tuple[Optional[float], Opt
         # Calculate change if we have at least 2 data points
         if len(series) >= 2:
             prev = series.iloc[-2]
+            
+            # Gap detection: if more than 3 days between last two points, 
+            # the 'change' might be deceptive (missing session).
+            try:
+                d1 = series.index[-1]
+                d2 = series.index[-2]
+                if hasattr(d1, 'date') and hasattr(d2, 'date'):
+                    gap_days = (d1.date() - d2.date()).days
+                    if gap_days > 3:
+                        logger.warning(f"Large history gap detected ({gap_days} days) for price extraction. Change percentage may be inaccurate.")
+            except Exception:
+                pass
 
             if prev == 0 or pd.isna(prev):
                 return current, 0, 0
@@ -1440,8 +1576,8 @@ def _extract_error_message(resp: requests.Response) -> str:
                 return str(msg)
         if isinstance(body, list) and body:
             return str(body[0])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not parse API error body: %s", exc)
     text = (resp.text or "").strip()
     return text[:180] if text else ""
 
@@ -1745,7 +1881,8 @@ def fetch_finnhub_fundamentals_batch(symbols_ns: List[str], api_key: str) -> Dic
         try:
             out[sym] = fetch_finnhub_fundamentals(sym, api_key)
             time.sleep(max(0.0, float(FINNHUB_RATE_LIMIT_PAUSE)))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Finnhub fundamentals fetch failed for %s: %s", sym, exc)
             out[sym] = {}
     return out
 

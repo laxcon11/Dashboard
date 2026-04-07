@@ -14,14 +14,16 @@ from config import (
     RSS_MAX_TOTAL_ITEMS,
 )
 from data_fetch import fetch_rss_feed_health, fetch_rss_feeds_by_keys
-from utils import get_ui_detail_mode, setup_page
+from utils import get_ui_detail_mode, setup_page, get_ui_device_mode
 
 
 setup_page("News Feed")
-_ = get_ui_detail_mode("Summary")
+view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
 
 st.title("📰 News Feed")
 st.caption("Contextual news mapped to tracked signals and sectors.")
+st.caption(f"Device mode: **{device_mode}**")
 
 st.sidebar.header("Feed Filters")
 FEED_GROUPS = {
@@ -87,7 +89,7 @@ with st.spinner("Fetching latest headlines..."):
         max_total=RSS_MAX_TOTAL_ITEMS,
     )
 
-if not news_df.empty:
+if not news_df.empty and view_mode == "Detail":
     news_df["published"] = pd.to_datetime(news_df["published"], utc=True, errors="coerce")
     news_df = news_df[news_df["published"].isna() | (news_df["published"] >= cutoff)]
     if keyword.strip():

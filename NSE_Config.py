@@ -1,20 +1,50 @@
+import logging
+
+_log = logging.getLogger(__name__)
+
 """
 NSE-Specific Configuration
-Contains NIFTY 200 stocks categorized by sectors for easy selection
+Contains NIFTY 200 stocks categorized by sectors for easy selection.
+Institutional Hardening v3: Master Calibration Layer
 """
+
+# ==================== GLOBAL CALIBRATION (v3) ====================
+NIFTY_LOT_SIZE = 65
+RISK_FREE_RATE = 0.0705         # 1Y T-Bill Proxy
+DIVIDEND_YIELD = 0.012          # Nifty Average
+
+# Hybrid Cost Model (Split components)
+BROKERAGE_PER_ORDER = 20.0      # Fixed
+EST_SLIPPAGE_PCT = 0.001        # 0.1% Variable
+STT_SELL_OPT_PCT = 0.0005       # 0.05% Variable
+GST_PCT = 0.18                  # 18% on Brokerage
+OTHER_CHARGES_PCT = 0.0001      # 0.01% Variable
+
+CONFIG_VERSION = "v3_lot65_atmIV_costaware"
+
+# System Invariants (Strict Guards)
+assert NIFTY_LOT_SIZE == 65, "Critical Error: Lot size miscalibration"
+assert 0 < RISK_FREE_RATE < 0.2, "Abnormal RFR detected"
+assert 0 <= DIVIDEND_YIELD < 0.05, "Abnormal Dividend Yield detected"
+# =================================================================
 
 # ==================== SECTOR INDICES ====================
 
 NSE_SECTOR_INDICES = {
     '^NSEBANK': 'Banking',
-    'BSE.NS': 'Capital Market',
+    '^CNXPSUBANK': 'PSU Banks',
+    '^CNXFIN': 'Financial Services',
     '^CNXIT': 'IT',
     '^CNXAUTO': 'Auto',
     '^CNXPHARMA': 'Pharma',
     '^CNXFMCG': 'FMCG',
     '^CNXMETAL': 'Metal',
     '^CNXREALTY': 'Realty',
-    '^CNXENERGY': 'Energy'
+    '^CNXENERGY': 'Energy',
+    '^CNXMEDIA': 'Media',
+    '^CNXINFRA': 'Infrastructure',
+    '^CNXPSE': 'PSE',
+    '^CNXSERVICE': 'Services'
 }
 # ==================== NIFTY 200 STOCKS BY SECTOR ====================
 
@@ -126,6 +156,24 @@ TEXTILE_STOCKS = [
     'PAGEIND.NS',
 ]
 
+MEDIA_STOCKS = [
+    'ZEEL.NS', 'SUNTV.NS', 'PVRINOX.NS', 'NETWORK18.NS',
+]
+
+PSU_BANK_STOCKS = [
+    'SBIN.NS', 'BANKBARODA.NS', 'PNB.NS', 'CANBK.NS', 'UNIONBANK.NS', 'BANKINDIA.NS', 'INDIANB.NS',
+]
+
+PSE_STOCKS = [
+    'NTPC.NS', 'POWERGRID.NS', 'ONGC.NS', 'COALINDIA.NS', 'HAL.NS', 'BEL.NS', 'BPCL.NS',
+    'GAIL.NS', 'IOC.NS', 'RECLTD.NS', 'PFC.NS', 'BHEL.NS',
+]
+
+INFRA_STOCKS = [
+    'LT.NS', 'ADANIPORTS.NS', 'ULTRACEMCO.NS', 'GRASIM.NS', 'POWERGRID.NS', 'NTPC.NS',
+    'GMRAIRPORT.NS', 'SIEMENS.NS', 'ABB.NS',
+]
+
 # ==================== F&O EXPANSION ====================
 # Delta = symbols in currently traded F&O universe not yet part of the current core list
 FNO_DELTA_STOCKS = [
@@ -165,25 +213,26 @@ HIGH_YIELD_STOCKS = [
 # ==================== CATEGORIZED STOCK GROUPS ====================
 
 SECTOR_CATEGORIES = {
+    '🏦 Banking': BANK_STOCKS,
+    '🏛️ PSU Banks': PSU_BANK_STOCKS,
+    '💳 Financial Services': FINANCIAL_SERVICES_STOCKS,
+    '💻 IT': IT_STOCKS,
     '🚗 Auto': AUTO_STOCKS,
+    '💊 Pharma': PHARMA_STOCKS,
+    '🛒 FMCG': FMCG_STOCKS,
+    '⚒️ Metal': METAL_STOCKS,
+    '🏘️ Realty': REALTY_STOCKS,
+    '⚡ Energy': ENERGY_STOCKS,
+    '📺 Media': MEDIA_STOCKS,
+    '🏗️ Infrastructure': INFRA_STOCKS,
+    '🏢 PSE': PSE_STOCKS,
+    '💼 Services': SERVICES_STOCKS,
     '⚙️ Capital Goods': CAPITAL_GOODS_STOCKS,
     '🏭 Cement': CEMENT_STOCKS,
     '🧪 Chemicals': CHEMICAL_STOCKS,
     '🏗️ Construction': CONSTRUCTION_STOCKS,
     '🏠 Consumer Durables': CONSUMER_DURABLES_STOCKS,
     '🛍️ Consumer Services': CONSUMER_SERVICES_STOCKS,
-    '⚡ Energy': ENERGY_STOCKS,
-    '🛒 FMCG': FMCG_STOCKS,
-    '🏦 Banks': BANK_STOCKS,
-    '💳 NBFC & Finance': NBFC_FINANCE_STOCKS,
-    '📈 Insurance & Capital Markets': INSURANCE_CM_STOCKS,
-    '💻 IT & Tech': IT_STOCKS,
-    '⚒️ Metals': METAL_STOCKS,
-    '💊 Pharma': PHARMA_STOCKS,
-    '🏘️ Real Estate': REALTY_STOCKS,
-    '💼 Services': SERVICES_STOCKS,
-    '📱 Telecom': TELECOM_STOCKS,
-    '🧵 Textiles': TEXTILE_STOCKS,
 }
 
 THEMATIC_CATEGORIES = {
@@ -255,46 +304,27 @@ NIFTY_200 = (
 PRESET_WATCHLISTS = {
     'NIFTY 200': list(NIFTY_200),
 
-    'Top 20 by Market Cap': [
+    'Blue Chip Focus': [
         'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'INFY.NS',
-        'HINDUNILVR.NS', 'ITC.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'KOTAKBANK.NS',
-        'LT.NS', 'AXISBANK.NS', 'BAJFINANCE.NS', 'MARUTI.NS', 'HCLTECH.NS',
-        'SUNPHARMA.NS', 'NTPC.NS', 'ULTRACEMCO.NS', 'ADANIENT.NS', 'ONGC.NS'
+        'SBIN.NS', 'BHARTIARTL.NS', 'KOTAKBANK.NS', 'AXISBANK.NS', 'BAJFINANCE.NS',
+        'LT.NS', 'ITC.NS', 'HINDUNILVR.NS', 'MARUTI.NS', 'SUNPHARMA.NS',
+        'ADANIENT.NS', 'TATASTEEL.NS', 'JSWSTEEL.NS', 'ONGC.NS', 'NTPC.NS'
     ],
 
-    'High Growth Mid-Caps': [
+    'Growth & Momentum': [
         'KAYNES.NS', 'DIXON.NS', 'POLYCAB.NS', 'DMART.NS', 'ASTRAL.NS',
         'ETERNAL.NS', 'NYKAA.NS', 'FLUOROCHEM.NS', 'CAMS.NS', 'ZYDUSLIFE.NS',
-        'PAGEIND.NS', 'PERSISTENT.NS', 'COFORGE.NS', 'MPHASIS.NS', 'LTTS.NS',
-        'GODREJPROP.NS', 'PRESTIGE.NS', 'OBEROIRLTY.NS', 'PHOENIXLTD.NS', 'BRIGADE.NS'
+        'HAL.NS', 'BEL.NS', 'RVNL.NS', 'MAZDOCK.NS', 'PREMIERENE.NS',
+        'TRENT.NS', 'SWIGGY.NS', 'ZOMATO.NS', 'PAYTM.NS', 'JIOFIN.NS'
     ],
 
-    'Banking & Finance': [
-        'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 'KOTAKBANK.NS', 'AXISBANK.NS',
-        'INDUSINDBK.NS', 'BAJFINANCE.NS', 'BAJAJFINSV.NS', 'HDFCLIFE.NS', 'SBILIFE.NS',
-        'ICICIGI.NS', 'HDFCAMC.NS', 'CHOLAFIN.NS', 'MUTHOOTFIN.NS', 'BANDHANBNK.NS',
-        'FEDERALBNK.NS', 'IDFCFIRSTB.NS', 'PNB.NS', 'BANKBARODA.NS', 'AUBANK.NS'
+    'High Yield (PSE)': list(PSE_STOCKS) + ['RECLTD.NS', 'PFC.NS', 'COALINDIA.NS', 'VEDL.NS'],
+
+    'F&O Playbook (Delta)': list(FNO_DELTA_STOCKS),
+    'Swing Favorites': [
+        'RELIANCE.NS', 'TATASTEEL.NS', 'BAJFINANCE.NS', 'AXISBANK.NS', 'ICICIBANK.NS',
+        'M&M.NS', 'LT.NS', 'SUNPHARMA.NS', 'ADANIENT.NS', 'BHARTIARTL.NS'
     ],
-
-    'IT & Digital': [
-        'TCS.NS', 'INFY.NS', 'HCLTECH.NS', 'WIPRO.NS', 'TECHM.NS',
-        'LTIM.NS', 'PERSISTENT.NS', 'COFORGE.NS', 'MPHASIS.NS', 'LTTS.NS',
-        'TATAELXSI.NS', 'ETERNAL.NS', 'NYKAA.NS', 'PAYTM.NS', 'IRCTC.NS',
-        'BHARTIARTL.NS', 'TATACOMM.NS', 'DIXON.NS', 'KAYNES.NS', 'POLYCAB.NS'
-    ],
-
-    'Dividend Quality': list(DIVIDEND_QUALITY_STOCKS),
-    'High Yield': list(HIGH_YIELD_STOCKS),
-
-    'Swing Trading Favorites': [
-        'RELIANCE.NS', 'ASIANPAINT.NS', 'TATASTEEL.NS', 'JSWSTEEL.NS', 'BAJFINANCE.NS',
-        'AXISBANK.NS', 'ICICIBANK.NS', 'MARUTI.NS', 'M&M.NS', 'LT.NS',
-        'SUNPHARMA.NS', 'DRREDDY.NS', 'BHARTIARTL.NS', 'ADANIENT.NS', 'VEDL.NS',
-        'HINDALCO.NS', 'ULTRACEMCO.NS', 'GRASIM.NS', 'INDUSINDBK.NS', 'BAJAJ-AUTO.NS'
-    ],
-
-    'F&O Delta': list(FNO_DELTA_STOCKS),
-    'Most Traded F&O (30)': list(FNO_MOST_TRADED_30),
 }
 
 
@@ -312,14 +342,14 @@ def get_preset_watchlist(preset_name):
 
 def validate_nse_config():
     """Validate NSE configuration"""
-    print(f"✅ NSE Config loaded")
-    print(f"   Total stocks in NIFTY 200: {len(NIFTY_200)}")
-    print(f"   Categories available: {len(STOCK_CATEGORIES)}")
-    print(f"   Preset watchlists: {len(PRESET_WATCHLISTS)}")
+    _log.info(
+        "NSE Config loaded: %d stocks, %d categories, %d presets",
+        len(NIFTY_200), len(STOCK_CATEGORIES), len(PRESET_WATCHLISTS),
+    )
 
     # Check for duplicates
     if len(NIFTY_200) != len(set(NIFTY_200)):
-        print("⚠️  Warning: Duplicate stocks found in NIFTY_200")
+        _log.warning("Duplicate stocks found in NIFTY_200")
 
     return True
 

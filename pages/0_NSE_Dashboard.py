@@ -18,6 +18,7 @@ import numpy as np
 from pathlib import Path
 import logging
 import time
+import scoring
 import importlib.util
 
 # Import from shared modules
@@ -70,6 +71,7 @@ from utils import (
     get_live_price_safe,
     render_key_observations,
     get_ui_detail_mode,
+    get_ui_device_mode,
     render_decision_header,
 )
 
@@ -90,11 +92,45 @@ logger = logging.getLogger(__name__)
 # ==================== PAGE CONFIG ====================
 setup_page("NSE Dashboard")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
 _page_t0 = time.perf_counter()
 _perf: dict[str, float] = {}
 
+
+def _responsive_cols(n_or_spec, spec=None):
+    if isinstance(n_or_spec, int):
+        count = n_or_spec
+    elif spec is not None and isinstance(spec, int):
+        count = spec
+    elif spec is not None:
+        count = len(spec)
+    else:
+        count = len(n_or_spec)
+    if is_mobile:
+        return [st.container() for _ in range(count)]
+    return st.columns(spec if spec is not None else n_or_spec)
+
+
+def _compact_table(
+    df: pd.DataFrame,
+    mobile_cols: list[str] | None = None,
+    rows_summary: int = 20,
+    rows_detail: int = 40,
+) -> pd.DataFrame:
+    out = df.copy()
+    if is_mobile:
+        if mobile_cols:
+            keep = [c for c in mobile_cols if c in out.columns]
+            if keep:
+                out = out[keep]
+        cap = rows_summary if view_mode == "Summary" else rows_detail
+        out = out.head(cap)
+    return out
+
 st.title("🚀 NSE Dashboard Launcher")
-st.caption("Advanced swing trading analysis for Indian markets - NIFTY 200 Coverage")
+st.caption("Swing dashboard for NIFTY 200.")
+st.caption(f"Device mode: **{device_mode}**")
 render_decision_header(source="macro_ssot")
 
 if GIFT_NIFTY_DASHBOARD_CARD and is_gift_session_active(
@@ -109,7 +145,8 @@ if GIFT_NIFTY_DASHBOARD_CARD and is_gift_session_active(
             close = pd.to_numeric(nd["Close"], errors="coerce").dropna()
             if len(close) >= 1:
                 prev_close = float(close.iloc[-1])
-    except Exception:
+    except Exception as exc:
+        logger.debug("Unable to resolve previous NIFTY close for GIFT context: %s", exc)
         prev_close = None
 
     gift = get_gift_nifty_snapshot(prev_nifty_close=prev_close)
@@ -120,29 +157,31 @@ if GIFT_NIFTY_DASHBOARD_CARD and is_gift_session_active(
         if not gift.get("available", False):
             st.info("GIFT NIFTY feed unavailable. Configure API/local snapshot source first.")
         else:
-            g1, g2, g3, g4 = st.columns(4)
+            g1, g2, g3, g4 = _responsive_cols(4)
             with g1:
                 st.metric("GIFT NIFTY", f"{float(gift.get('price')):,.2f}", None if gift.get("change_pct") is None else f"{float(gift.get('change_pct')):+.2f}%")
             with g2:
                 prem = gift.get("premium_pct_vs_prev_close")
-                st.metric("Premium/Discount vs Prev Close", "N/A" if prem is None else f"{float(prem):+.2f}%")
+                st.metric("Prem/Disc vs Prev", "N/A" if prem is None else f"{float(prem):+.2f}%")
             with g3:
                 st.metric("Implied Gap", str(gift.get("implied_label", "Unknown")))
             with g4:
                 delay_min = gift.get("delay_min")
                 st.metric("Feed Delay", "N/A" if delay_min is None else f"{float(delay_min):.0f} min")
-            st.caption(
-                f"Source: {gift.get('source', 'N/A')} | As of: {gift.get('as_of_ist', 'N/A')} | "
-                f"Mode: {gift.get('delay_note', 'unknown')} | {gift.get('note', '')}"
-            )
+            if view_mode == "Detail":
+                st.caption(
+                    f"Source: {gift.get('source', 'N/A')} | As of: {gift.get('as_of_ist', 'N/A')} | "
+                    f"Mode: {gift.get('delay_note', 'unknown')} | {gift.get('note', '')}"
+                )
             if gift.get("unverified", False):
                 st.warning("GIFT source is scrape-based (unverified). Treat as directional context only.")
-            if gift.get("quality_note"):
+            if gift.get("quality_note") and view_mode == "Detail":
                 st.caption(f"Normalization: {gift.get('quality_note')}")
-            st.caption(
-                f"Active window: {int(GIFT_NIFTY_SESSION_START_IST_HOUR):02d}:00 IST to "
-                f"{int(GIFT_NIFTY_COLLAPSE_IST_HOUR):02d}:00 IST (next day)."
-            )
+            if view_mode == "Detail":
+                st.caption(
+                    f"Active window: {int(GIFT_NIFTY_SESSION_START_IST_HOUR):02d}:00 IST to "
+                    f"{int(GIFT_NIFTY_COLLAPSE_IST_HOUR):02d}:00 IST (next day)."
+                )
 
 # Helper functions have been moved to analytics.py
 
@@ -286,7 +325,8 @@ with st.spinner(f"📊 Fetching data for {len(selected_stocks)} stocks..."):
     all_symbols = sorted(set(index_symbols + sector_symbols + selected_stocks))
 
     # Single batched pull is faster than multiple overlapping network/cache calls.
-    merged_data = batch_download(all_symbols, period="3mo")
+    # Use 6mo to help accumulate local history for 200DMA breadth
+    merged_data = batch_download(all_symbols, period="6mo")
     index_data = {s: merged_data.get(s) for s in index_symbols}
     sector_data = {s: merged_data.get(s) for s in sector_symbols}
     watchlist_data = {s: merged_data.get(s) for s in selected_stocks}
@@ -309,11 +349,11 @@ if telemetry_df is not None and not telemetry_df.empty:
 # ==================== MARKET OVERVIEW ====================
 st.subheader("🏛️ Market Overview")
 
-cols = st.columns(len(MAIN_INDICES))
+cols = _responsive_cols(len(MAIN_INDICES))
 
 for col, (symbol, name) in zip(cols, MAIN_INDICES.items()):
     df = index_data.get(symbol)
-    price, change, change_pct = get_live_price_safe(symbol, df)
+    price, change, change_pct = get_live_price_safe(symbol, df, mode="live_first")
 
     if price:
         col.metric(name, format_price(price), format_change(change_pct))
@@ -324,7 +364,7 @@ for col, (symbol, name) in zip(cols, MAIN_INDICES.items()):
 sector_context_rows = []
 for symbol, name in NSE_SECTOR_INDICES.items():
     df = sector_data.get(symbol)
-    _, _, chg_pct = get_live_price_safe(symbol, df)
+    _, _, chg_pct = get_live_price_safe(symbol, df, mode="live_first")
     if chg_pct is None:
         continue
     sector_context_rows.append({"Sector": name, "Change %": float(chg_pct)})
@@ -335,7 +375,7 @@ if not sector_context_df.empty:
 # ==================== SECTORAL VIEW - IMPROVED BAR CHART ====================
 if mode != "Swing Rankings":
     st.subheader("📊 Sectoral Performance")
-    st.caption("✅ Includes Banking & Capital Market sectors")
+    st.caption("✅ Includes Banking, Financials, PSU Banks, Media, Infra, and more (Official Indices)")
 
     if not sector_context_df.empty:
         sector_df = sector_context_df.copy()
@@ -369,6 +409,7 @@ if mode != "Swing Rankings":
         fig.update_xaxes(tickangle=-45)
 
         st.plotly_chart(fig, width='stretch')
+
 
 # ==================== MODE-SPECIFIC DISPLAYS ====================
 _t_mode = time.perf_counter()
@@ -537,7 +578,7 @@ elif mode == "End of Day":
     total_vwap = above_count + below_count
 
     # Metrics
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = _responsive_cols(3)
     with col1:
         st.metric("Above VWAP", above_count, f"{(above_count/total_vwap*100):.1f}%" if total_vwap > 0 else "N/A")
     with col2:
@@ -549,7 +590,7 @@ elif mode == "End of Day":
             st.error("🔴 Bearish Bias")
 
     # Side-by-Side Tables
-    col_left, col_right = st.columns(2)
+    col_left, col_right = _responsive_cols(2)
 
     with col_left:
         st.markdown("#### 🟢 Above VWAP")
@@ -595,7 +636,7 @@ elif mode == "End of Day":
     total = advances + declines + unchanged
 
     if total > 0:
-        col_table, col_chart = st.columns([1, 1])
+        col_table, col_chart = _responsive_cols([1, 1])
 
         with col_table:
             st.markdown("#### Market Breadth Stats")
@@ -702,7 +743,7 @@ elif mode == "Full Analysis":
         vwap = analytics.calculate_vwap(df_vwap)
 
         # Metrics row
-        col1, col2, col3, col4, col5 = st.columns(5)  # Increased to 5 columns for VWAP
+        col1, col2, col3, col4, col5 = _responsive_cols(5)  # Increased to 5 columns for VWAP
 
         price, change, change_pct = get_live_price_safe(symbol, df)
 
@@ -742,7 +783,7 @@ elif mode == "Full Analysis":
         if support and resistance:
             st.markdown("### 📊 Support & Resistance Levels (20-day)")
 
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3 = _responsive_cols(3)
 
             with col1:
                 st.metric("Support", format_price(support),
@@ -852,7 +893,7 @@ elif mode == "Full Analysis":
         # Additional Stats
         st.markdown("**📈 Additional Statistics**")
 
-        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        stat_col1, stat_col2, stat_col3 = _responsive_cols(3)
 
         with stat_col1:
             week_high = df['High'].tail(5).max()
@@ -882,7 +923,7 @@ elif mode == "Full Analysis":
                 if not f:
                     st.caption("Fundamentals unavailable for this symbol right now.")
                 else:
-                    fc1, fc2, fc3, fc4 = st.columns(4)
+                    fc1, fc2, fc3, fc4 = _responsive_cols(4)
                     with fc1:
                         pe = f.get("peBasicExclExtraTTM")
                         st.metric("P/E", "N/A" if pe is None else f"{float(pe):.2f}")
@@ -901,7 +942,7 @@ elif mode == "Full Analysis":
         with st.expander("🛡️ Smart Trade Planner (Risk/Reward Calculator)", expanded=False):
             avg_range = calculate_atr(df, 14).iloc[-1]
 
-            p_col1, p_col2, p_col3 = st.columns(3)
+            p_col1, p_col2, p_col3 = _responsive_cols(3)
 
             with p_col1:
                 risk_amt = st.number_input("Max Risk (Loss) ₹", value=5000, step=1000, help="Amount you are willing to lose if Stop Loss is hit")
@@ -941,60 +982,9 @@ elif mode == "Swing Rankings":
     st.subheader("🎯 Swing Trade Rankings")
     st.caption(f"Regime-gated setup engine on {len(selected_stocks)} selected stocks")
 
-    strictness_cfg = {
-        "Conservative": {
-            "tier_a_plus": 8.8,
-            "tier_a": 8.0,
-            "tier_b": 7.2,
-            "min_vol_ratio": 1.0,
-            "min_rs": -1.0,
-            "rs_floor_penalty": 0.15,
-            "risk_on_breadth": 1.2,
-            "risk_off_breadth": 0.85,
-            "risk_off_min_score": 9.4,
-            "top_n": 2,
-            "watchlist_n": 4,
-        },
-        "Balanced": {
-            "tier_a_plus": 8.5,
-            "tier_a": 7.5,
-            "tier_b": 6.5,
-            "min_vol_ratio": 0.8,
-            "min_rs": -3.0,
-            "rs_floor_penalty": 0.10,
-            "risk_on_breadth": 1.1,
-            "risk_off_breadth": 0.9,
-            "risk_off_min_score": 9.0,
-            "top_n": 3,
-            "watchlist_n": 5,
-        },
-        "Aggressive": {
-            "tier_a_plus": 8.2,
-            "tier_a": 7.0,
-            "tier_b": 6.0,
-            "min_vol_ratio": 0.6,
-            "min_rs": -5.0,
-            "rs_floor_penalty": 0.08,
-            "risk_on_breadth": 1.0,
-            "risk_off_breadth": 0.95,
-            "risk_off_min_score": 8.6,
-            "top_n": 4,
-            "watchlist_n": 8,
-        },
-    }
-    cfg = strictness_cfg.get(swing_strictness, strictness_cfg["Balanced"])
+    cfg = scoring.STRICTNESS_CFG.get(swing_strictness, scoring.STRICTNESS_CFG["Balanced"])
 
-    def clamp_score(value):
-        return max(0.0, min(10.0, value))
-
-    def setup_tier(score):
-        if score >= cfg["tier_a_plus"]:
-            return "A+"
-        if score >= cfg["tier_a"]:
-            return "A"
-        if score >= cfg["tier_b"]:
-            return "B"
-        return "C"
+    # Helpers moved to scoring.py
 
     nifty_df = index_data.get('^NSEI')
     bank_df = index_data.get('^NSEBANK')
@@ -1011,36 +1001,9 @@ elif mode == "Swing Rankings":
 
     breadth_ratio = (advances / declines) if declines > 0 else (float(advances) if advances > 0 else 0.0)
 
-    def trend_signal(df):
-        if df is None or len(df) < 50:
-            return 0
-        close = df['Close'].dropna()
-        if len(close) < 50:
-            return 0
-        ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-        ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
-        current = close.iloc[-1]
-        if current > ema20 > ema50:
-            return 1
-        if current < ema20 < ema50:
-            return -1
-        return 0
+    # trend_signal moved to scoring.py
 
-    def rs_spread_ema3(symbol_df, benchmark_df) -> float:
-        if symbol_df is None or benchmark_df is None:
-            return 0.0
-        if "Close" not in symbol_df.columns or "Close" not in benchmark_df.columns:
-            return 0.0
-        s_close = pd.to_numeric(symbol_df["Close"], errors="coerce").dropna()
-        b_close = pd.to_numeric(benchmark_df["Close"], errors="coerce").dropna()
-        merged = pd.concat([s_close.rename("s"), b_close.rename("b")], axis=1).dropna()
-        if len(merged) < 8:
-            return 0.0
-        spread = (merged["s"].pct_change() - merged["b"].pct_change()) * 100.0
-        spread = spread.dropna()
-        if spread.empty:
-            return 0.0
-        return float(spread.ewm(span=3, adjust=False).mean().iloc[-1])
+    # rs_spread_ema3 moved to scoring.py
 
     sector_name_to_index = {v: k for k, v in NSE_SECTOR_INDICES.items()}
     stock_to_sector = {}
@@ -1049,7 +1012,7 @@ elif mode == "Swing Rankings":
         for s in members:
             stock_to_sector[s] = clean_sector
 
-    regime_score = trend_signal(nifty_df) + trend_signal(bank_df)
+    regime_score = scoring.trend_signal(nifty_df) + scoring.trend_signal(bank_df)
     if regime_score >= 1 and breadth_ratio >= cfg["risk_on_breadth"]:
         regime_label = "🟢 Risk On"
         regime_bias = "Long setups preferred"
@@ -1063,7 +1026,7 @@ elif mode == "Swing Rankings":
         regime_bias = "Selective setups only"
         regime_adj = 0.0
 
-    r1, r2, r3 = st.columns(3)
+    r1, r2, r3 = _responsive_cols(3)
     r1.metric("Market Regime", regime_label)
     r2.metric("A/D Breadth", f"{advances}:{declines}", f"{breadth_ratio:.2f}")
     r3.info(f"{regime_bias} | {swing_strictness}")
@@ -1087,7 +1050,7 @@ elif mode == "Swing Rankings":
             else:
                 selective_note = "Dispersion market. Focus only on leadership sectors and avoid laggards."
 
-            s1, s2, s3 = st.columns(3)
+            s1, s2, s3 = _responsive_cols(3)
             s1.metric("Sector Breadth", f"{sector_adv}/{sector_total}", f"{sector_breadth:.0%}")
             s2.metric("Sector Dispersion", f"{sector_dispersion:.2f}")
             s3.metric("Leadership Spread", f"{leadership_spread:+.2f}%")
@@ -1095,7 +1058,7 @@ elif mode == "Swing Rankings":
 
             leaders = sector_context_df.head(3).copy()
             laggards = sector_context_df.tail(2).copy().sort_values("Change %", ascending=True)
-            l1, l2 = st.columns(2)
+            l1, l2 = _responsive_cols(2)
             with l1:
                 st.markdown("**Focus Sectors (Top 3)**")
                 st.dataframe(
@@ -1111,77 +1074,17 @@ elif mode == "Swing Rankings":
                     hide_index=True,
                 )
 
-    def clip01(v):
-        return max(0.0, min(1.0, v))
+    # clip01 moved to scoring.py
 
-    def recent_swing_low(series_low, lookback=20):
-        if series_low is None:
-            return np.nan
-        s = pd.to_numeric(series_low, errors="coerce").dropna()
-        if s.empty:
-            return np.nan
-        return float(s.tail(lookback).min())
+    # Leg helpers moved to scoring.py
 
-    def momentum_leg_low(close_series, ema_series, low_series, fallback_lookback=20):
-        c = pd.to_numeric(close_series, errors="coerce")
-        e = pd.to_numeric(ema_series, errors="coerce")
-        l = pd.to_numeric(low_series, errors="coerce")
-        df_leg = pd.concat([c.rename("c"), e.rename("e"), l.rename("l")], axis=1).dropna()
-        if len(df_leg) < 5:
-            return recent_swing_low(low_series, lookback=fallback_lookback)
-        start_idx = None
-        vals_c = df_leg["c"].values
-        vals_e = df_leg["e"].values
-        for i in range(len(df_leg) - 2, 2, -1):
-            # Start leg on EMA20 reclaim only after at least 2 bars below EMA20.
-            if (vals_c[i - 2] <= vals_e[i - 2]) and (vals_c[i - 1] <= vals_e[i - 1]) and (vals_c[i] > vals_e[i]):
-                start_idx = i
-                break
-        if start_idx is None:
-            return recent_swing_low(low_series, lookback=fallback_lookback)
-        leg_low = df_leg["l"].iloc[start_idx:].min()
-        if pd.isna(leg_low):
-            return recent_swing_low(low_series, lookback=fallback_lookback)
-        return float(leg_low)
-
-    def pullback_leg_low(df_local):
-        if df_local is None or df_local.empty or "High" not in df_local.columns or "Low" not in df_local.columns:
-            return np.nan
-        highs = pd.to_numeric(df_local["High"], errors="coerce")
-        lows = pd.to_numeric(df_local["Low"], errors="coerce")
-        w = min(25, len(df_local))
-        if w < 5:
-            return float(lows.dropna().tail(10).min()) if not lows.dropna().empty else np.nan
-        high_window = highs.tail(w)
-        if high_window.dropna().empty:
-            return float(lows.dropna().tail(10).min()) if not lows.dropna().empty else np.nan
-        high_idx = high_window.idxmax()
-        leg_lows = lows.loc[high_idx:]
-        leg_lows = leg_lows.dropna()
-        if leg_lows.empty:
-            return float(lows.dropna().tail(10).min()) if not lows.dropna().empty else np.nan
-        return float(leg_lows.min())
-
-    def prior_support_below(series_low, anchor, bars=60):
-        s = pd.to_numeric(series_low, errors="coerce").dropna().tail(bars)
-        if len(s) < 7 or pd.isna(anchor):
-            return np.nan
-        candidates = []
-        vals = s.values
-        for i in range(2, len(vals) - 2):
-            v = vals[i]
-            if v < vals[i - 1] and v < vals[i + 1] and v < vals[i - 2] and v < vals[i + 2]:
-                if v < anchor:
-                    candidates.append(v)
-        if not candidates:
-            return np.nan
-        return float(max(candidates))
+    # pullback and support helpers moved to scoring.py
 
     liq_score = 0
     liq_score += 1 if breadth_ratio >= 1.05 else -1
     liq_score += 1 if advances > declines else -1
-    liq_score += 1 if trend_signal(nifty_df) >= 0 else -1
-    liq_score += 1 if trend_signal(bank_df) >= 0 else -1
+    liq_score += 1 if scoring.trend_signal(nifty_df) >= 0 else -1
+    liq_score += 1 if scoring.trend_signal(bank_df) >= 0 else -1
     if liq_score >= 2:
         liquidity_label = "🟢 Healthy"
         liquidity_gate_pass = True
@@ -1193,7 +1096,7 @@ elif mode == "Swing Rankings":
         liquidity_gate_pass = False
 
     regime_gate_pass = regime_label != "🔴 Risk Off"
-    g1, g2, g3 = st.columns(3)
+    g1, g2, g3 = _responsive_cols(3)
     g1.metric("Liquidity Check", liquidity_label, f"Score {liq_score:+d}")
     g2.metric("Regime Check", "Pass" if regime_gate_pass else "Blocked", regime_label)
     g3.metric("Global Checks", "Pass" if (regime_gate_pass and liquidity_gate_pass) else "Blocked")
@@ -1248,7 +1151,7 @@ elif mode == "Swing Rankings":
                         benchmark_df = sector_idx_df
                         benchmark_label = sector_name
                 rs = analytics.calculate_relative_strength(df, benchmark_df, period=20)
-                rs_ema3 = rs_spread_ema3(df, benchmark_df)
+                rs_ema3 = scoring.rs_spread_ema3(df, benchmark_df)
                 rsi = calculate_rsi(df).iloc[-1] if len(df) > 14 else np.nan
                 ema20_series = calculate_ema(df, 20)
                 ema20 = ema20_series.iloc[-1]
@@ -1271,9 +1174,9 @@ elif mode == "Swing Rankings":
                 low10 = df["Low"].tail(10).min() if "Low" in df.columns else close.tail(10).min()
                 low20 = df["Low"].tail(20).min() if "Low" in df.columns else close.tail(20).min()
                 low_series = df["Low"] if "Low" in df.columns else close
-                mom_leg_low = momentum_leg_low(close, ema20_series, low_series, fallback_lookback=20)
-                pb_leg_low = pullback_leg_low(df)
-                prior_support = prior_support_below(low_series, pb_leg_low, bars=60)
+                mom_leg_low = scoring.momentum_leg_low(close, ema20_series, low_series, fallback_lookback=20)
+                pb_leg_low = scoring.pullback_leg_low(df)
+                prior_support = scoring.prior_support_below(low_series, pb_leg_low, bars=60)
                 range_series = (pd.to_numeric(df["High"], errors="coerce") - pd.to_numeric(df["Low"], errors="coerce")).dropna() if {"High", "Low"}.issubset(df.columns) else pd.Series(dtype=float)
                 if not range_series.empty:
                     tight_idx = range_series.tail(10).idxmin()
@@ -1294,20 +1197,26 @@ elif mode == "Swing Rankings":
                     elif atr14 <= q25:
                         atr_adj = 1
 
-                inv_momentum = max(
+                # 1. Invalidation Candidates
+                raw_inv_momentum = max(
                     [x for x in [mom_leg_low, (ema20 - atr_buffer_m)] if pd.notna(x)]
                 ) if (pd.notna(mom_leg_low) or pd.notna(ema20)) else low10
 
                 pb_anchor = pb_leg_low if pd.notna(pb_leg_low) else low10
                 pb_candidate = pb_anchor - atr_buffer_q
                 ps_candidate = (prior_support - atr_buffer_q) if pd.notna(prior_support) else np.nan
-                inv_pullback = max([x for x in [pb_candidate, ps_candidate] if pd.notna(x)]) if pd.notna(ps_candidate) else pb_candidate
+                raw_inv_pullback = max([x for x in [pb_candidate, ps_candidate] if pd.notna(x)]) if pd.notna(ps_candidate) else pb_candidate
 
                 contraction_anchor_candidates = [x for x in [contraction_range_low, tight_bar_low] if pd.notna(x)]
                 if contraction_anchor_candidates:
-                    inv_volatility = min(contraction_anchor_candidates) - atr_buffer_h
+                    raw_inv_volatility = min(contraction_anchor_candidates) - atr_buffer_h
                 else:
-                    inv_volatility = (low20 - atr_buffer_h) if pd.notna(low20) else low20
+                    raw_inv_volatility = (low20 - atr_buffer_h) if pd.notna(low20) else low20
+
+                # 2. Apply Unified Risk Ceiling (3x ATR Cap)
+                inv_momentum = scoring.get_unified_stop_loss(price, raw_inv_momentum, atr14, "LONG")
+                inv_pullback = scoring.get_unified_stop_loss(price, raw_inv_pullback, atr14, "LONG")
+                inv_volatility = scoring.get_unified_stop_loss(price, raw_inv_volatility, atr14, "LONG")
 
                 mom_time_stop = max(2, 5 + atr_adj)
                 pb_time_stop = max(3, 7 + atr_adj)
@@ -1323,8 +1232,24 @@ elif mode == "Swing Rankings":
                         rel_ret = merged["s"].pct_change() - merged["b"].pct_change()
                         rel_std = rel_ret.tail(20).std()
 
+                # New metrics for Correction & Momentum Protection
+                low20 = float(df["Low"].tail(20).min())
+                high20 = float(df["High"].tail(20).max())
+                
+                # Calculate consecutive red days (Close < Prev Close)
+                diffs = close.diff().dropna()
+                consecutive_red = 0
+                for val in reversed(diffs.values):
+                    if val < 0:
+                        consecutive_red += 1
+                    else:
+                        break
+                
+                dd_penalty = scoring.drawdown_penalty(price, high20)
+                streak_penalty = scoring.streak_penalty(consecutive_red)
+
                 trend_align = 1.0 if trend_bull else 0.0
-                vol_quality = clip01(vol_ratio / 2.0)
+                vol_quality = scoring.clip01(vol_ratio / 2.0)
                 rs_blend = (0.7 * rs) + (0.3 * rs_ema3)
                 if rs >= 2.0 and rs_ema3 >= 0:
                     rs_tier = "Strong"
@@ -1333,10 +1258,28 @@ elif mode == "Swing Rankings":
                 else:
                     rs_tier = "Neutral"
 
-                # Strict setup families
-                momentum_pass = bool(trend_bull and breakout and (vol_ratio >= 1.0) and (rsi >= 52) and (rsi <= 78))
+                # Phase 8: Volume Gate for Momentum (>= 1.2)
+                momentum_pass = bool(trend_bull and breakout and (vol_ratio >= 1.2) and (rsi >= 52) and (rsi <= 78))
+                
+                is_continuation = False
+                # Phase 8: Breakout Persistence (Continuation)
+                if not momentum_pass:
+                    # Check if it was a breakout yesterday
+                    if len(df) >= 2:
+                        y_breakout = analytics.detect_breakout(df.iloc[:-1])
+                        if y_breakout:
+                            # Consolidation Check: must be within striking distance of high (3%)
+                            if drawdown <= 0.03:
+                                momentum_pass = True
+                                is_continuation = True
+
                 pullback_pass = bool(trend_bull and (-2.5 <= dist_ema20 <= 1.5) and (40 <= rsi <= 58) and (not breakout))
                 vol_contract_pass = bool(nr7 and inside_day and (abs(dist_ema20) <= 4.0) and (pd.isna(atr_pct) or atr_pct <= 4.0))
+
+                # Heavy gate: Reject if drawdown > 10% (strict correction limit)
+                drawdown = (high20 - price) / high20 if high20 > 0 else 0.0
+                if drawdown >= 0.10:
+                    continue
 
                 hard_gate_pass = bool(regime_gate_pass and liquidity_gate_pass)
                 gate_reason = "OK" if hard_gate_pass else ("Regime" if not regime_gate_pass else "Liquidity")
@@ -1372,11 +1315,14 @@ elif mode == "Swing Rankings":
                     "Liquidity Gate": liquidity_gate_pass,
                     "Hard Gate": hard_gate_pass,
                     "Gate Reason": gate_reason,
+                    "Volatility Pass": vol_contract_pass,
                     "Momentum Pass": momentum_pass,
                     "Pullback Pass": pullback_pass,
-                    "Volatility Pass": vol_contract_pass,
+                    "Is Continuation": is_continuation,
                     "Mom Base": analytics.calculate_momentum_score(df, nifty_df),
                     "PB Base": analytics.calculate_pullback_score(df, nifty_df),
+                    "DD Penalty": dd_penalty,
+                    "Streak Penalty": streak_penalty,
                     "Inv Momentum": inv_momentum,
                     "Inv Pullback": inv_pullback,
                     "Inv Volatility": inv_volatility,
@@ -1480,7 +1426,7 @@ elif mode == "Swing Rankings":
     score_df["Near Miss Reason"] = score_df.apply(_near_miss_reason, axis=1)
 
     with st.expander("🧪 Quality Diagnostics (RS Stability Calibration)", expanded=False):
-        d1, d2, d3, d4 = st.columns(4)
+        d1, d2, d3, d4 = _responsive_cols(4)
         d1.metric("rel_std p10", f"{q10:.4f}" if pd.notna(q10) else "n/a")
         d2.metric("rel_std p50", f"{q50:.4f}" if pd.notna(q50) else "n/a")
         d3.metric("rel_std p90", f"{q90:.4f}" if pd.notna(q90) else "n/a")
@@ -1500,15 +1446,17 @@ elif mode == "Swing Rankings":
     score_df["Vol Pct"] = score_df["Vol Ratio"].rank(pct=True).fillna(0.5)
 
     # Decomposed scoring with tie-breaker quality terms
-    score_df["M_Breakout"] = score_df["Breakout"].apply(lambda x: 1.6 if x else -0.8)
+    # Phase 8: Bonus applies to both fresh breakouts and continuations
+    score_df["M_Breakout"] = np.where(score_df["Breakout"] | score_df.get("Is Continuation", False), 1.6, -0.8)
     score_df["M_Trend"] = score_df["Trend"].apply(lambda x: 1.2 if x == "Bullish" else -1.0)
     score_df["M_RS"] = 2.3 * score_df["RS Pct"]
     score_df["M_Vol"] = 1.6 * score_df["Vol Pct"]
     score_df["M_Stability"] = 1.0 * score_df["RS Stability"]
     score_df["Momentum Score"] = (
         3.0 + (0.55 * score_df["Mom Base"]) + score_df["M_Breakout"] + score_df["M_Trend"] +
-        score_df["M_RS"] + score_df["M_Vol"] + score_df["M_Stability"] + regime_adj
-    ).apply(clamp_score)
+        score_df["M_RS"] + score_df["M_Vol"] + score_df["M_Stability"] + regime_adj -
+        score_df["DD Penalty"] - score_df["Streak Penalty"]
+    ).apply(scoring.clamp_score)
 
     score_df["P_Distance"] = score_df["dist_ema20"].apply(lambda x: 1.4 if -2.5 <= x <= 1.5 else -0.6)
     score_df["P_RSI"] = score_df["RSI"].apply(lambda x: 1.2 if 40 <= x <= 58 else -0.6)
@@ -1517,8 +1465,9 @@ elif mode == "Swing Rankings":
     score_df["P_Stability"] = 1.1 * score_df["RS Stability"]
     score_df["Pullback Score"] = (
         2.8 + (0.60 * score_df["PB Base"]) + score_df["P_Distance"] + score_df["P_RSI"] +
-        score_df["P_Trend"] + score_df["P_RS"] + score_df["P_Stability"] + (regime_adj * 0.8)
-    ).apply(clamp_score)
+        score_df["P_Trend"] + score_df["P_RS"] + score_df["P_Stability"] + (regime_adj * 0.8) -
+        (score_df["DD Penalty"] * 0.8) - (score_df["Streak Penalty"] * 0.6)
+    ).apply(scoring.clamp_score)
 
     score_df["V_NR7"] = score_df["NR7"].apply(lambda x: 2.8 if x else 0.0)
     score_df["V_Inside"] = score_df["Inside Day"].apply(lambda x: 1.2 if x else 0.0)
@@ -1528,7 +1477,7 @@ elif mode == "Swing Rankings":
     score_df["Volatility Score"] = (
         1.8 + score_df["V_NR7"] + score_df["V_Inside"] + score_df["V_Distance"] +
         score_df["V_Vol"] + score_df["V_RS"] + (0.9 * score_df["RS Stability"]) + (regime_adj * 0.5)
-    ).apply(clamp_score)
+    ).apply(scoring.clamp_score)
 
     def build_family(df, score_col, setup_name, pass_col, inv_col):
         temp = df[df[pass_col]].copy()
@@ -1536,7 +1485,7 @@ elif mode == "Swing Rankings":
             return temp
         temp["Score"] = temp[score_col].round(2)
         temp["Setup Type"] = setup_name
-        temp["Tier"] = temp["Score"].apply(setup_tier)
+        temp["Tier"] = temp["Score"].apply(lambda x: scoring.setup_tier(x, cfg))
         temp["Invalidation"] = temp[inv_col]
         if setup_name.startswith("Momentum"):
             temp["Invalidation Rule"] = temp["Inv Rule Momentum"]
@@ -1586,7 +1535,7 @@ elif mode == "Swing Rankings":
         ascending=[False, False, False, False, False]
     ).drop_duplicates(subset=["Symbol"])
     tier_counts = tier_best["Tier"].value_counts()
-    t1, t2, t3, t4 = st.columns(4)
+    t1, t2, t3, t4 = _responsive_cols(4)
     t1.metric("A+", int(tier_counts.get("A+", 0)))
     t2.metric("A", int(tier_counts.get("A", 0)))
     t3.metric("B", int(tier_counts.get("B", 0)))
@@ -1598,24 +1547,25 @@ elif mode == "Swing Rankings":
         help="ON: show only executable picks. OFF: show discovery view with pre-gate and blocked candidates.",
     )
     if execution_mode:
-        st.caption("Mode: Execution-first. Primary view shows only Tradable Now setups.")
+        st.caption("Mode: Execution-first (Tradable Now only).")
     else:
-        st.caption("Mode: Discovery-first. Includes pre-gate and blocked/watch candidates.")
+        st.caption("Mode: Discovery-first (includes pre-gate and blocked/watch).")
 
     hard_pass_total = combined[combined["Hard Gate"]].drop_duplicates(subset=["Symbol"]).shape[0]
     hard_pass_a_total = combined[
         combined["Hard Gate"] & combined["Tier"].isin(["A+", "A"])
     ].drop_duplicates(subset=["Symbol"]).shape[0]
-    st.caption(
-        f"Tradable-check pass: {hard_pass_total} symbols | "
-        f"A+/A among tradable-check pass: {hard_pass_a_total}"
-    )
+    if view_mode == "Detail":
+        st.caption(
+            f"Tradable-check pass: {hard_pass_total} symbols | "
+            f"A+/A among tradable-check pass: {hard_pass_a_total}"
+        )
 
     if not execution_mode:
         st.markdown(f"### ⭐ Top Ranked (Pre-Gate) - Best {cfg['top_n']}")
         top_ranked = tier_best.head(cfg["top_n"]).copy()
         if not top_ranked.empty:
-            top_rank_cols = st.columns(len(top_ranked))
+            top_rank_cols = _responsive_cols(len(top_ranked))
             for i, (_, row) in enumerate(top_ranked.iterrows()):
                 with top_rank_cols[i]:
                     with st.container(border=True):
@@ -1625,24 +1575,22 @@ elif mode == "Swing Rankings":
                         st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
                         st.caption(f"Entry Gate: {row['Gate Status']} ({row['Gate Reason']})")
                         risk_atr_txt = f"{row['Risk (ATR)']:.2f} ATR" if pd.notna(row.get("Risk (ATR)")) else "ATR n/a"
-                        st.caption(
-                            f"Invalidation: {format_price(row['Invalidation'])} "
-                            f"({row['Invalidation %']:.2f}% | {risk_atr_txt})"
-                        )
-                        st.caption(str(row.get("Invalidation Detail", row.get("Invalidation Rule", ""))))
-                        st.caption(f"Trigger: {row.get('Trigger Type', 'Close < Invalidation')} | Time Stop: {int(row.get('Time Stop (bars)', 0))} bars")
-                        st.caption(
-                            f"RS20: {float(row.get('RS', 0.0)):+.2f} | "
-                            f"RS EMA3: {float(row.get('RS EMA3', 0.0)):+.2f} | "
-                            f"Tier: {row.get('RS Tier', 'Neutral')} vs {row.get('RS Benchmark', 'NIFTY 50')}"
-                        )
-                        st.caption(
-                            f"Quality: {float(row.get('Quality Score', 0.0)):.2f} "
-                            f"({row.get('Quality Band', 'Blocked')}) | RS floor penalty: {float(row.get('RS Floor Penalty', 0.0)):.2f}"
-                        )
-                        if pd.notna(row.get("ML")) and row.get("ML", 0) > 0:
-                            run_abs = float(row["Price"]) - float(row["ML"])
-                            st.caption(f"Run-up from ML: {run_abs:+.2f} ({float(row.get('LTP vs ML %', 0.0)):+.2f}%)")
+                        st.caption(f"Inv: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% | {risk_atr_txt})")
+                        if view_mode == "Detail":
+                            st.caption(str(row.get("Invalidation Detail", row.get("Invalidation Rule", ""))))
+                            st.caption(f"Trigger: {row.get('Trigger Type', 'Close < Invalidation')} | Time Stop: {int(row.get('Time Stop (bars)', 0))} bars")
+                            st.caption(
+                                f"RS20: {float(row.get('RS', 0.0)):+.2f} | "
+                                f"RS EMA3: {float(row.get('RS EMA3', 0.0)):+.2f} | "
+                                f"Tier: {row.get('RS Tier', 'Neutral')} vs {row.get('RS Benchmark', 'NIFTY 50')}"
+                            )
+                            st.caption(
+                                f"Quality: {float(row.get('Quality Score', 0.0)):.2f} "
+                                f"({row.get('Quality Band', 'Blocked')}) | RS floor penalty: {float(row.get('RS Floor Penalty', 0.0)):.2f}"
+                            )
+                            if pd.notna(row.get("ML")) and row.get("ML", 0) > 0:
+                                run_abs = float(row["Price"]) - float(row["ML"])
+                                st.caption(f"Run-up from ML: {run_abs:+.2f} ({float(row.get('LTP vs ML %', 0.0)):+.2f}%)")
                         sym = row['Symbol']
                         prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
                         setup_label = str(row.get("Setup Type", "Swing Ranking"))
@@ -1722,8 +1670,8 @@ elif mode == "Swing Rankings":
                 indent=2,
             )
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to write tradable snapshot metadata %s: %s", snapshot_meta_path, exc)
     if not tradable_today.empty:
         snap = pd.DataFrame({
             "date": run_date,
@@ -1740,7 +1688,8 @@ elif mode == "Swing Rankings":
         if snapshot_path.exists():
             try:
                 hist_all = pd.read_parquet(snapshot_path)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to read existing tradable snapshot %s: %s", snapshot_path, exc)
                 hist_all = pd.DataFrame(columns=snapshot_cols)
         else:
             hist_all = pd.DataFrame(columns=snapshot_cols)
@@ -1755,7 +1704,8 @@ elif mode == "Swing Rankings":
     if snapshot_path.exists():
         try:
             hist = pd.read_parquet(snapshot_path)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to read tradable snapshot history %s: %s", snapshot_path, exc)
             hist = pd.DataFrame(columns=snapshot_cols)
     else:
         hist = pd.DataFrame(columns=snapshot_cols)
@@ -1791,8 +1741,8 @@ elif mode == "Swing Rankings":
                 meta_d = pd.to_datetime(meta_obj.get("last_run_date"), errors="coerce")
                 if not pd.isna(meta_d):
                     latest_run_date = meta_d.normalize()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to read tradable snapshot metadata %s: %s", snapshot_meta_path, exc)
         lookback_dates = all_dates[-20:] if len(all_dates) >= 20 else all_dates
         hist20 = hist[hist["date"].isin(lookback_dates)].copy()
 
@@ -1914,16 +1864,34 @@ elif mode == "Swing Rankings":
                 tview["Score"] = tview["Score"].map(lambda x: f"{x:.2f}")
                 tview["Quality"] = tview["Quality"].map(lambda x: f"{x:.2f}")
                 tview["Quality Trend(5)"] = tview["Quality Trend(5)"].map(lambda x: f"{x:+.2f}")
-                st.dataframe(tview, width="stretch", hide_index=True)
+                st.dataframe(
+                    _compact_table(
+                        tview,
+                        mobile_cols=["Tag", "Symbol", "Setup", "Tier", "Score", "Status Tag"],
+                        rows_summary=12,
+                        rows_detail=24,
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
             else:
                 st.info("No tradable rows found in latest snapshot.")
             if not dropped_df.empty:
                 st.markdown("**Dropped / Paused Since Previous Trading Day**")
-                st.dataframe(dropped_df, width="stretch", hide_index=True)
+                st.dataframe(
+                    _compact_table(
+                        dropped_df,
+                        mobile_cols=["Tag", "Symbol", "Setup", "Status Tag"],
+                        rows_summary=10,
+                        rows_detail=20,
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
 
     if not actionable.empty:
         st.markdown("### 🏆 Tradable Now (A+/A + Entry Gate Pass)")
-        top_cols = st.columns(len(actionable))
+        top_cols = _responsive_cols(len(actionable))
         for i, (_, row) in enumerate(actionable.iterrows()):
             with top_cols[i]:
                 with st.container(border=True):
@@ -1932,25 +1900,23 @@ elif mode == "Swing Rankings":
                     st.metric("Score", f"{row['Score']:.2f}/10")
                     st.metric("Price", format_price(row['Price']), format_change(row['Change %']))
                     risk_atr_txt = f"{row['Risk (ATR)']:.2f} ATR" if pd.notna(row.get("Risk (ATR)")) else "ATR n/a"
-                    st.caption(
-                        f"Invalidation: {format_price(row['Invalidation'])} "
-                        f"({row['Invalidation %']:.2f}% | {risk_atr_txt})"
-                    )
-                    st.caption(str(row.get("Invalidation Detail", row.get("Invalidation Rule", ""))))
-                    st.caption(f"Trigger: {row.get('Trigger Type', 'Close < Invalidation')} | Time Stop: {int(row.get('Time Stop (bars)', 0))} bars")
-                    st.caption(
-                        f"RS20: {float(row.get('RS', 0.0)):+.2f} | "
-                        f"RS EMA3: {float(row.get('RS EMA3', 0.0)):+.2f} | "
-                        f"Tier: {row.get('RS Tier', 'Neutral')} vs {row.get('RS Benchmark', 'NIFTY 50')}"
-                    )
-                    st.caption(
-                        f"Quality: {float(row.get('Quality Score', 0.0)):.2f} "
-                        f"({row.get('Quality Band', 'Blocked')}) | RS floor penalty: {float(row.get('RS Floor Penalty', 0.0)):.2f}"
-                    )
-                    if pd.notna(row.get("ML")) and row.get("ML", 0) > 0:
-                        run_abs = float(row["Price"]) - float(row["ML"])
-                        st.caption(f"Run-up from ML: {run_abs:+.2f} ({float(row.get('LTP vs ML %', 0.0)):+.2f}%)")
-                    st.caption(f"Trend:{row['Trend']} | Vol:{row['Vol Ratio']:.2f}x | RSI:{row['RSI']:.1f}")
+                    st.caption(f"Inv: {format_price(row['Invalidation'])} ({row['Invalidation %']:.2f}% | {risk_atr_txt})")
+                    if view_mode == "Detail":
+                        st.caption(str(row.get("Invalidation Detail", row.get("Invalidation Rule", ""))))
+                        st.caption(f"Trigger: {row.get('Trigger Type', 'Close < Invalidation')} | Time Stop: {int(row.get('Time Stop (bars)', 0))} bars")
+                        st.caption(
+                            f"RS20: {float(row.get('RS', 0.0)):+.2f} | "
+                            f"RS EMA3: {float(row.get('RS EMA3', 0.0)):+.2f} | "
+                            f"Tier: {row.get('RS Tier', 'Neutral')} vs {row.get('RS Benchmark', 'NIFTY 50')}"
+                        )
+                        st.caption(
+                            f"Quality: {float(row.get('Quality Score', 0.0)):.2f} "
+                            f"({row.get('Quality Band', 'Blocked')}) | RS floor penalty: {float(row.get('RS Floor Penalty', 0.0)):.2f}"
+                        )
+                        if pd.notna(row.get("ML")) and row.get("ML", 0) > 0:
+                            run_abs = float(row["Price"]) - float(row["ML"])
+                            st.caption(f"Run-up from ML: {run_abs:+.2f} ({float(row.get('LTP vs ML %', 0.0)):+.2f}%)")
+                        st.caption(f"Trend:{row['Trend']} | Vol:{row['Vol Ratio']:.2f}x | RSI:{row['RSI']:.1f}")
 
                     sym = row['Symbol']
                     prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
@@ -2011,7 +1977,19 @@ elif mode == "Swing Rankings":
         mon["LTP vs ML %"] = mon["LTP vs ML %"].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
         mon["RS"] = mon["RS"].apply(lambda x: f"{x:+.2f}")
         mon["RS EMA3"] = mon["RS EMA3"].apply(lambda x: f"{x:+.2f}")
-        st.dataframe(mon, width='stretch', hide_index=True)
+        st.dataframe(
+            _compact_table(
+                mon,
+                mobile_cols=[
+                    "Symbol", "Setup Type", "Tier", "Score", "Entry Gate", "Price",
+                    "Invalidation %", "Vol Ratio", "RSI", "Block Reason"
+                ],
+                rows_summary=20,
+                rows_detail=35,
+            ),
+            width='stretch',
+            hide_index=True,
+        )
 
         blocked_a = monitor[(monitor["Tier"].isin(["A+", "A"])) & (~monitor["Hard Gate"])].shape[0]
         b_count = monitor[monitor["Tier"] == "B"].shape[0]
@@ -2035,7 +2013,16 @@ elif mode == "Swing Rankings":
                         "Block Reason": reasons,
                     }
                 )
-            st.dataframe(pd.DataFrame(diag_rows), width="stretch", hide_index=True)
+            st.dataframe(
+                _compact_table(
+                    pd.DataFrame(diag_rows),
+                    mobile_cols=["Symbol", "Setup", "Tier", "Regime Check", "Liquidity Check", "Block Reason"],
+                    rows_summary=12,
+                    rows_detail=20,
+                ),
+                width="stretch",
+                hide_index=True,
+            )
 
     near_miss_df = score_df[
         score_df["Hard Gate"].astype(bool) &
@@ -2062,7 +2049,16 @@ elif mode == "Swing Rankings":
             nview["RSI"] = nview["RSI"].apply(lambda x: f"{x:.1f}")
             nview["Quality Score"] = nview["Quality Score"].apply(lambda x: f"{x:.2f}")
             nview["dist_ema20"] = nview["dist_ema20"].apply(lambda x: f"{x:+.2f}%")
-            st.dataframe(nview.head(25 if view_mode == "Summary" else 100), width="stretch", hide_index=True)
+            st.dataframe(
+                _compact_table(
+                    nview,
+                    mobile_cols=["Symbol", "Trend", "Price", "RS", "RSI", "Quality Score", "Near Miss Reason"],
+                    rows_summary=20,
+                    rows_detail=40,
+                ),
+                width="stretch",
+                hide_index=True,
+            )
 
     if (not execution_mode) and (view_mode == "Detail"):
         with st.expander("🏷️ Tier Buckets (A+ / A / B / C)", expanded=False):
@@ -2077,7 +2073,16 @@ elif mode == "Swing Rankings":
                 tdf["Price"] = tdf["Price"].apply(format_price)
                 tdf["Change %"] = tdf["Change %"].apply(format_change)
                 tdf["Invalidation %"] = tdf["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-                st.dataframe(tdf, width='stretch', hide_index=True)
+                st.dataframe(
+                    _compact_table(
+                        tdf,
+                        mobile_cols=["Symbol", "Setup Type", "Tier", "Score", "Entry Gate", "Block Reason"],
+                        rows_summary=12,
+                        rows_detail=15,
+                    ),
+                    width='stretch',
+                    hide_index=True,
+                )
 
     if (not execution_mode) and (view_mode == "Detail"):
         with st.expander("📊 Setup Family Boards", expanded=False):
@@ -2090,7 +2095,16 @@ elif mode == "Swing Rankings":
                 mview["Vol Ratio"] = mview["Vol Ratio"].apply(lambda x: f"{x:.2f}x")
                 mview["RSI"] = mview["RSI"].apply(lambda x: f"{x:.1f}")
                 mview["Invalidation %"] = mview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-                st.dataframe(mview, width='stretch', hide_index=True)
+                st.dataframe(
+                    _compact_table(
+                        mview,
+                        mobile_cols=["Symbol", "Tier", "Score", "Price", "RS", "RSI", "Gate Status"],
+                        rows_summary=10,
+                        rows_detail=12,
+                    ),
+                    width='stretch',
+                    hide_index=True,
+                )
             else:
                 st.info("No momentum setups today.")
 
@@ -2101,7 +2115,16 @@ elif mode == "Swing Rankings":
                 pview["RSI"] = pview["RSI"].apply(lambda x: f"{x:.1f}")
                 pview["dist_ema20"] = pview["dist_ema20"].apply(lambda x: f"{x:.1f}%")
                 pview["Invalidation %"] = pview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-                st.dataframe(pview, width='stretch', hide_index=True)
+                st.dataframe(
+                    _compact_table(
+                        pview,
+                        mobile_cols=["Symbol", "Tier", "Score", "Price", "RSI", "dist_ema20", "Gate Status"],
+                        rows_summary=10,
+                        rows_detail=12,
+                    ),
+                    width='stretch',
+                    hide_index=True,
+                )
             else:
                 st.info("No pullback setups today.")
 
@@ -2113,7 +2136,16 @@ elif mode == "Swing Rankings":
                 vview["NR7"] = vview["NR7"].apply(lambda x: "Yes" if x else "-")
                 vview["Inside Day"] = vview["Inside Day"].apply(lambda x: "Yes" if x else "-")
                 vview["Invalidation %"] = vview["Invalidation %"].apply(lambda x: f"{x:.2f}%")
-                st.dataframe(vview, width='stretch', hide_index=True)
+                st.dataframe(
+                    _compact_table(
+                        vview,
+                        mobile_cols=["Symbol", "Tier", "Score", "Price", "Vol Ratio", "NR7", "Gate Status"],
+                        rows_summary=10,
+                        rows_detail=12,
+                    ),
+                    width='stretch',
+                    hide_index=True,
+                )
             else:
                 st.info("No volatility contraction setups today.")
 
@@ -2130,7 +2162,16 @@ elif mode == "Swing Rankings":
                 dview["RS Stability"] = dview["RS Stability"].apply(lambda x: f"{x:.2f}")
                 dview["RS Pct"] = dview["RS Pct"].apply(lambda x: f"{x:.2f}")
                 dview["Vol Pct"] = dview["Vol Pct"].apply(lambda x: f"{x:.2f}")
-                st.dataframe(dview, width='stretch', hide_index=True)
+                st.dataframe(
+                    _compact_table(
+                        dview,
+                        mobile_cols=["Symbol", "Setup Type", "Tier", "Score", "Gate Status", "Quality Score"],
+                        rows_summary=15,
+                        rows_detail=20,
+                    ),
+                    width='stretch',
+                    hide_index=True,
+                )
 
 _perf["mode_render_s"] = round(time.perf_counter() - _t_mode, 3)
 _perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)
@@ -2144,13 +2185,13 @@ if st.sidebar.checkbox("Show Performance Diagnostics", value=False):
 # ==================== FOOTER ====================
 st.markdown("---")
 
-footer_cols = st.columns([2, 1, 1])
+footer_cols = _responsive_cols([2, 1, 1])
 
 with footer_cols[0]:
-    st.caption(f"📊 Analyzing **{len(selected_stocks)}** stocks from **{selection_method}**")
+    st.caption(f"{len(selected_stocks)} stocks • {selection_method}")
 
 with footer_cols[1]:
-    st.caption(f"🕐 Updated: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"Updated {datetime.now().strftime('%H:%M:%S')}")
 
 with footer_cols[2]:
-    st.caption("✅ Enhanced: VWAP | Tables | Better visuals")
+    st.caption("VWAP + compact tables")

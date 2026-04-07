@@ -56,7 +56,7 @@ def main() -> int:
         bh = bhav_prices.get(symbol)
         if not bh:
             continue
-        close_b, prev_b, vol_b = bh
+        close_b, prev_b, vol_b, _, _, _ = bh
         rows.append(
             {
                 "symbol": symbol,

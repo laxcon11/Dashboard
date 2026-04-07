@@ -1,197 +1,119 @@
-# 🚀 Dashboard Launcher
+# 🚀 NSE Swing Trading Dashboard
 
-A multi-page Streamlit dashboard that tracks market conditions, liquidity, and leading indicators to help evaluate **Risk-On / Risk-Off regimes** and macro trends.
-
-This project combines:
-
-* Global markets
-* Liquidity indicators
-* Credit and commodity signals
-* Risk scoring models
-* Leading indicators
-
-The goal is to provide a **fast, practical view of market conditions** in one place.
+A multi-page Streamlit dashboard for Indian equity swing trading. Tracks market conditions, liquidity, regime scoring, and leading indicators to evaluate **Risk-On / Selective / Defensive / Crisis** regimes.
 
 ---
 
 ## Features
 
-### 1. NSE Dashboard
-
-* Watchlist tracking
-* Technical indicators
-* Volume and momentum signals
-
-### 2. Global Markets
-
-* Major global indices
-* Commodities
-* Currencies
-* Crypto snapshot
-
-### 3. Liquidity Dashboard
-
-* Fed Balance Sheet
-* Reverse Repo
-* Treasury General Account
-* Money supply indicators
-
-### 4. Macro Risk Dashboard
-
-* Risk-On / Risk-Off scoring
-* Weighted macro indicators
-* Liquidity overlay
-* Trend charts and gauges
-
-### 5. Leading Indicators Dashboard
-
-* Yield curve signal
-* Copper / Gold ratio
-* Credit spread proxy (HYG / LQD)
-* Dollar and yield trends
-* Market impulse gauge
-
-### 6. Trading Journal
-
-* Log and track trades
-* Performance statistics
-* Historical trade analysis
+| # | Page | What it does |
+|---|------|-------------|
+| 0 | **NSE Dashboard** | Watchlist tracking, swing rankings, technical indicators, volume/momentum signals |
+| 1 | **Global Markets** | Global indices, commodities, currencies, crypto snapshot |
+| 2 | **Money Supply** | Fed balance sheet, reverse repo, TGA, M2, SOFR-IORB spread |
+| 3 | **Macro Risk** | Risk-On/Off scoring, weighted macro & liquidity indicators, regime classification |
+| 4 | **Leading Indicators** | Yield curve, copper/gold ratio, credit spreads (HYG/LQD), dollar & yield trends |
+| 5 | **Trading Journal** | Trade logging with legs, R-multiples, performance stats |
+| 6 | **Regime Settings** | Tunable macro/liquidity weights and thresholds |
+| 7 | **Portfolio Risk** | Concentration, sector exposure, risk checks |
+| 8 | **Ops Automation** | EOD pipeline, alerts, data trust scoring, recovery tools |
+| 9 | **Prediction Integrity** | Immutable prediction log, Brier score, calibration proposals |
+| 10 | **Scoring Audit** | Regime scoring transparency and audit reports |
+| 11 | **Tradable Universe** | NIFTY 200 screener with setup family detection |
+| 12 | **Todo Tracker** | Project roadmap and task tracking |
+| 13 | **India Macro Context** | FII/DII flows, India-specific macro signals |
+| 14 | **News Feed** | 60+ curated RSS feeds with health monitoring |
+| 15 | **Stock Fundamentals** | EODHD/Finnhub fundamentals and stock-level news |
 
 ---
-
 
 ## Project Structure
 
 ```
-project/
+Dashboard/
+├── app.py                     # Entry point / launcher
+├── config.py                  # Global settings, API keys, thresholds
+├── NSE_Config.py              # NIFTY 200 stocks by sector, preset watchlists
+├── data_fetch.py              # Central data pipeline (Yahoo, FRED, BhavCopy, RSS, EODHD, Finnhub)
+├── utils.py                   # Shared UI components, charts, price formatting
+├── analytics.py               # Scoring logic (momentum, pullback, liquidity)
+├── indicators.py              # RSI, EMA, ATR, MACD, Bollinger, Stochastic
+├── regime_model.py            # Regime settings load/save/defaults
+├── regime_state.py            # Regime snapshot persistence
+├── factor_registry.py         # Cross-page factor metadata (SSOT)
+├── gift_nifty.py              # GIFT Nifty multi-source overlay
+├── india_context.py           # FII/DII flows, India macro signals
+├── trading_calendar.py        # NSE holiday-aware business days
+├── watchlist_manager.py       # JSON-backed watchlist CRUD
+├── requirements.txt           # Python dependencies
+├── .env.example               # Environment variable template
+├── setup.sh / setup.bat       # Quick-start setup scripts
 │
-├── app.py
-├── config.py
-├── data_fetch.py
-│
-├── pages/
-│   ├── 0_NSE_Dashboard.py
-│   ├── 1_Global_Markets.py
-│   ├── 2_Money_Supply.py
-│   ├── 3_Macro_Risk.py
-│   ├── 4_Leading_Indicators.py
-│   ├── 5_Trading_Journal.py
-│   ├── 6_Regime_Settings.py
-│   ├── 7_Portfolio_Risk.py
-│   ├── 8_Ops_Automation.py
-│   ├── 9_Prediction_Integrity.py
-│   ├── 10_Scoring_Audit.py
-│   ├── 11_Tradable_Universe.py
-│   ├── 12_Todo_Tracker.py
-│   ├── 13_India_Macro_Context.py
-│   ├── 14_News_Feed.py
-│   └── 15_Stock_Fundamentals.py
-│
-├── requirements.txt
-├── .env.example
-├── docs/
-│   └── SCORING_LOGIC.md
-
-└── README.md
+├── pages/                     # 16 Streamlit sub-pages (see table above)
+├── scripts/                   # Operational & test scripts (19 files)
+├── prediction_integrity/      # Prediction engine, store, schema
+├── data/                      # Parquet history, BhavCopy, snapshots
+├── notes/                     # JSON config/state (regime, journal, holidays)
+├── logs/                      # Runtime logs, parity reports, trust scores
+├── exports/                   # Generated PDF reports
+└── docs/                      # Documentation (14 files)
 ```
 
 ---
 
-## Installation
+## Quick Start
 
-### 1. Clone the repository
+```bash
+# Clone and setup
+git clone <repo-url>
+cd Dashboard
 
-```
-git clone https://github.com/yourusername/trading-dashboard.git
-cd trading-dashboard
-```
+# Option A: Use setup script
+./setup.sh    # macOS/Linux
+setup.bat     # Windows
 
-### 2. Install dependencies
-
-```
+# Option B: Manual
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 3. Set environment variables
-
-Create a `.env` file from template:
-
-```
+# Configure API keys
 cp .env.example .env
-```
+# Edit .env with your FRED, Finnhub, EODHD keys
 
----
-
-## Running the Dashboard
-
-```
+# Run
 streamlit run app.py
 ```
-
-The dashboard will open in your browser.
 
 ---
 
 ## Data Sources
 
-* Yahoo Finance (market data)
-* FRED (liquidity and macro data)
-* NSE India (VIX and indices)
-* RSS feeds (India/global market headlines)
-* EODHD (EOD market profile data, plan-dependent)
-* Finnhub (fundamentals/news, plan/key-dependent)
-
----
-
-## Design Principles
-
-This project is designed for:
-
-* Fast loading
-* Clean modular structure
-* Reusable data utilities
-* Cached downloads
-* Expandable dashboards
-
----
-
-## Future Improvements
-
-Planned upgrades:
-
-* Global liquidity composite
-* Market breadth indicators
-* Earnings trend indicators
-* Sector rotation signals
-* Risk regime history database
-
----
-
-## Disclaimer
-
-This dashboard is for educational and research purposes only.
-Not investment advice.
+| Source | Used For |
+|--------|----------|
+| Yahoo Finance | Market data (stocks, indices, FX, crypto, commodities) |
+| FRED | Liquidity & macro data (Fed balance sheet, yields, M2, etc.) |
+| NSE India | VIX, BhavCopy (official exchange close prices) |
+| RSS Feeds | 60+ curated India/global market headlines |
+| EODHD | Fundamentals & news (plan-dependent) |
+| Finnhub | Fundamentals & news (key-dependent) |
 
 ---
 
 ## Documentation
 
-Detailed scoring and governance logic:
-- `docs/SCORING_LOGIC.md`
-
-Recommended onboarding docs:
-- `docs/USER_GUIDE.md`
-- `docs/WORKFLOW.md`
+| File | Purpose |
+|------|---------|
+| [CHANGELOG.md](docs/CHANGELOG.md) | Version history |
+| [CODE_MANIFEST.md](docs/CODE_MANIFEST.md) | File-by-file inventory |
+| [DECISIONS.md](docs/DECISIONS.md) | Architecture Decision Records |
+| [HANDOVER.md](docs/HANDOVER.md) | New developer onboarding |
+| [SCORING_LOGIC.md](docs/SCORING_LOGIC.md) | Regime scoring & governance |
+| [USER_GUIDE.md](docs/USER_GUIDE.md) | End-user guide |
+| [WORKFLOW.md](docs/WORKFLOW.md) | Development workflow |
 
 ---
 
-## Author
+## Disclaimer
 
-Built using:
-
-* Python
-* Streamlit
-* Pandas
-* Plotly
-* Yahoo Finance API
-* FRED API
+This dashboard is for educational and research purposes only. Not investment advice.

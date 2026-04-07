@@ -33,6 +33,7 @@ def main() -> int:
     parser.add_argument("--repair-stale-bhavcopy", action="store_true", help="Repair stale symbols from latest Bhavcopy.")
     parser.add_argument("--parity-report", action="store_true", help="Run Bhavcopy parity report.")
     parser.add_argument("--trust-score", action="store_true", help="Run unified data trust score report.")
+    parser.add_argument("--backfill-regime-history", action="store_true", help="Backfill 90D timeline from existing EOD snapshots.")
     args = parser.parse_args()
 
     rc = 0
@@ -60,6 +61,9 @@ def main() -> int:
     if args.trust_score:
         rc |= run_cmd([sys.executable, "scripts/data_trust_score.py"])
 
+    if args.backfill_regime_history:
+        rc |= run_cmd([sys.executable, "scripts/backfill_regime_history.py"])
+
     if not (
         args.health
         or args.rebuild_history
@@ -67,6 +71,7 @@ def main() -> int:
         or args.repair_stale_bhavcopy
         or args.parity_report
         or args.trust_score
+        or args.backfill_regime_history
     ):
         parser.print_help()
     return rc

@@ -8,11 +8,13 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from utils import setup_page, get_ui_detail_mode
+from utils import setup_page, get_ui_detail_mode, get_ui_device_mode, responsive_cols as _responsive_cols
 
 
 setup_page("Scoring Audit")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG_FILE = ROOT / "logs" / "scoring_audit_latest.json"
@@ -21,6 +23,7 @@ LOGIC_DOC = ROOT / "docs" / "SCORING_LOGIC.md"
 st.title("🧮 Scoring Audit")
 st.caption("Deterministic audit of scoring, weightage, logic consistency, and cross-page parity.")
 st.caption(f"UI mode: **{view_mode}**")
+st.caption(f"Device mode: **{device_mode}**")
 if LOGIC_DOC.exists():
     st.info(f"Scoring logic reference: `{LOGIC_DOC}`")
 else:
@@ -34,7 +37,10 @@ def run_audit() -> tuple[int, str]:
     return proc.returncode, out.strip()
 
 
-c1, c2 = st.columns([1, 2])
+# _responsive_cols imported from utils
+
+
+c1, c2 = _responsive_cols(2, [1, 2])
 with c1:
     if st.button("Run Scoring Audit", width="stretch"):
         rc, out = run_audit()
@@ -62,7 +68,7 @@ except Exception:
 status = str(payload.get("status", "UNKNOWN")).upper()
 overall = payload.get("overall_score", "N/A")
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6, m7 = _responsive_cols(7)
 with m1:
     if status == "PASS":
         st.success(f"Status: {status}")
@@ -71,13 +77,17 @@ with m1:
     else:
         st.error(f"Status: {status}")
 with m2:
-    st.metric("Overall", overall)
+    st.metric("Audit Score", overall)
 with m3:
-    st.metric("Config", payload.get("scores", {}).get("config", "N/A"))
+    st.metric("Global", payload.get("scores", {}).get("global", "N/A"))
 with m4:
-    st.metric("Macro", payload.get("scores", {}).get("macro", "N/A"))
+    st.metric("Growth", payload.get("scores", {}).get("growth", "N/A"))
 with m5:
-    st.metric("Leading", payload.get("scores", {}).get("leading", "N/A"))
+    st.metric("Liquidity", payload.get("scores", {}).get("liquidity", "N/A"))
+with m6:
+    st.metric("Risk", payload.get("scores", {}).get("risk", "N/A"))
+with m7:
+    st.metric("Playbook", payload.get("scores", {}).get("playbook", "N/A"))
 
 hard_fails = payload.get("hard_fail_reasons", []) or []
 if hard_fails:
@@ -97,15 +107,31 @@ else:
         df = pd.DataFrame(cmp_rows)
         st.dataframe(df, width="stretch", hide_index=True)
 
-with st.expander("Macro Math Details", expanded=(view_mode == "Detail")):
+with st.expander("Playbook Audit Details", expanded=(view_mode == "Detail")):
+    pb = payload.get("details", {}).get("playbook", {})
+    if "error" in pb:
+        st.error(pb["error"])
+    elif "note" in pb:
+        st.info(pb["note"])
+    else:
+        st.json(pb)
+        checks = pb.get("checks", {})
+        if checks:
+            cols = st.columns(len(checks))
+            for i, (k, v) in enumerate(checks.items()):
+                with cols[i]:
+                    st.write(f"**{k}**")
+                    st.write("✅" if v else "❌")
+
+with st.expander("Regime Engine Details", expanded=(view_mode == "Detail")):
     macro = payload.get("details", {}).get("macro", {})
     st.json(macro)
 
-with st.expander("Leading Math Details", expanded=(view_mode == "Detail")):
+with st.expander("Leading Indicator Details", expanded=(view_mode == "Detail")):
     leading = payload.get("details", {}).get("leading", {})
     st.json(leading)
 
-with st.expander("Config Checks", expanded=(view_mode == "Detail")):
+with st.expander("Configuration Checks", expanded=(view_mode == "Detail")):
     cfg = payload.get("details", {}).get("config", {})
     st.json(cfg)
 

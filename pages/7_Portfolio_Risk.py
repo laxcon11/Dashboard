@@ -2,21 +2,52 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 import time
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from NSE_Config import SECTOR_CATEGORIES, FNO_DELTA_STOCKS, FNO_MOST_TRADED_30
+from NSE_Config import SECTOR_CATEGORIES, FNO_DELTA_STOCKS, FNO_MOST_TRADED_30, NSE_SECTOR_INDICES
 from data_fetch import batch_download, extract_price_data
 from regime_state import load_regime_snapshot
-from utils import setup_page, get_ui_detail_mode
+from utils import setup_page, get_ui_detail_mode, get_ui_device_mode, make_page_diag_block
 
 
 setup_page("Portfolio Risk")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
+_summary_diag = st.expander("🔬 Open Diagnostics", expanded=False) if view_mode == "Summary" else None
+page_diag_block = make_page_diag_block(view_mode, _summary_diag)
+
+
+def _responsive_cols(n_or_spec):
+    if is_mobile:
+        count = n_or_spec if isinstance(n_or_spec, int) else len(n_or_spec)
+        return [st.container() for _ in range(count)]
+    return st.columns(n_or_spec)
+
+
+def _compact_table(
+    df: pd.DataFrame,
+    mobile_cols: list[str] | None = None,
+    rows_summary: int = 15,
+    rows_detail: int = 30,
+) -> pd.DataFrame:
+    out = df.copy()
+    if is_mobile:
+        if mobile_cols:
+            keep = [c for c in mobile_cols if c in out.columns]
+            if keep:
+                out = out[keep]
+        cap = rows_summary if view_mode == "Summary" else rows_detail
+        out = out.head(cap)
+    return out
+
 st.title("🛡 Portfolio Risk & Execution Control")
-st.caption("Position-taking discipline: concentration, correlation, exposure, and pre-trade checklist.")
+st.caption("Concentration, correlation, exposure, and pre-trade checks.")
+st.caption(f"Device mode: **{device_mode}**")
 _page_t0 = time.perf_counter()
 _perf: dict[str, float] = {}
 
@@ -24,14 +55,23 @@ JOURNAL_FILE = Path("notes/trading_journal.csv")
 RULES_FILE = Path("notes/portfolio_rules.json")
 FNO_LOT_FILE = Path("notes/fno_lot_sizes.json")
 
+EMOJI_REGIME_MAP = {
+    "Risk On": "🟢 Risk On",
+    "Selective": "🟡 Selective",
+    "Defensive": "🟠 Defensive",
+    "Crisis": "🔴 Crisis",
+    "Unknown": "Unknown"
+}
+
 DEFAULT_RULES = {
     "max_concurrent_trades": 6,
     "max_sector_weight_pct": 35.0,
     "max_single_trade_risk_pct": 1.0,
     "regime_size_hints": {
         "🟢 Risk On": 1.0,
-        "🟡 Neutral": 0.6,
-        "🔴 Risk Off": 0.35,
+        "🟡 Selective": 0.65,
+        "🟠 Defensive": 0.50,
+        "🔴 Crisis": 0.25,
         "Unknown": 0.5,
     },
 }
@@ -138,7 +178,7 @@ if open_trades.empty:
 rules = load_rules()
 
 with st.expander("⚙️ Trade Budget Rules", expanded=True):
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = _responsive_cols(3)
     with c1:
         rules["max_concurrent_trades"] = st.number_input(
             "Max Concurrent Trades", min_value=1, max_value=30, value=int(rules["max_concurrent_trades"]), step=1
@@ -152,12 +192,13 @@ with st.expander("⚙️ Trade Budget Rules", expanded=True):
             "Max Single-Trade Risk (% of equity)", min_value=0.25, max_value=3.0, value=float(rules["max_single_trade_risk_pct"]), step=0.05
         )
 
-    st.markdown("**Per-Regime Position Size Hints**")
-    r1, r2, r3, r4 = st.columns(4)
-    rules["regime_size_hints"]["🟢 Risk On"] = r1.slider("Risk On", 0.25, 1.5, float(rules["regime_size_hints"]["🟢 Risk On"]), 0.05)
-    rules["regime_size_hints"]["🟡 Neutral"] = r2.slider("Neutral", 0.25, 1.5, float(rules["regime_size_hints"]["🟡 Neutral"]), 0.05)
-    rules["regime_size_hints"]["🔴 Risk Off"] = r3.slider("Risk Off", 0.1, 1.0, float(rules["regime_size_hints"]["🔴 Risk Off"]), 0.05)
-    rules["regime_size_hints"]["Unknown"] = r4.slider("Unknown", 0.25, 1.0, float(rules["regime_size_hints"]["Unknown"]), 0.05)
+    st.markdown("**Regime Size Hints**")
+    r1, r2, r3, r4, r5 = _responsive_cols(5)
+    rules["regime_size_hints"]["🟢 Risk On"] = r1.slider("Risk On", 0.25, 1.5, float(rules["regime_size_hints"].get("🟢 Risk On", 1.0)), 0.05)
+    rules["regime_size_hints"]["🟡 Selective"] = r2.slider("Selective", 0.25, 1.5, float(rules["regime_size_hints"].get("🟡 Selective", 0.65)), 0.05)
+    rules["regime_size_hints"]["🟠 Defensive"] = r3.slider("Defensive", 0.1, 1.0, float(rules["regime_size_hints"].get("🟠 Defensive", 0.50)), 0.05)
+    rules["regime_size_hints"]["🔴 Crisis"] = r4.slider("Crisis", 0.05, 0.5, float(rules["regime_size_hints"].get("🔴 Crisis", 0.25)), 0.05)
+    rules["regime_size_hints"]["Unknown"] = r5.slider("Unknown", 0.25, 1.0, float(rules["regime_size_hints"].get("Unknown", 0.5)), 0.05)
 
     if st.button("💾 Save Portfolio Rules", width="stretch"):
         save_rules(rules)
@@ -195,26 +236,53 @@ total_net = float(open_trades["Signed Notional"].sum())
 long_notional = float(open_trades.loc[open_trades["Signed Notional"] > 0, "Signed Notional"].sum())
 short_notional = abs(float(open_trades.loc[open_trades["Signed Notional"] < 0, "Signed Notional"].sum()))
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4 = _responsive_cols(4)
 col1.metric("Open Trades", int(len(open_trades)))
 col2.metric("Gross Exposure", f"₹{total_gross:,.0f}")
 col3.metric("Net Exposure", f"₹{total_net:,.0f}")
 col4.metric("Directional Split", f"L {long_notional:,.0f} / S {short_notional:,.0f}")
 
 st.markdown("### 🧭 Risk Dashboard")
-left, right = st.columns(2)
+left, right = _responsive_cols(2)
 
 with left:
+    # Fetch Sector Index Performance
+    with st.spinner("Fetching sector index performance..."):
+        index_symbols = list(NSE_SECTOR_INDICES.keys())
+        index_data = batch_download(index_symbols, period="2d")
+        sector_perf = {}
+        for idx_sym, clean_label in NSE_SECTOR_INDICES.items():
+            df_idx = index_data.get(idx_sym)
+            if df_idx is not None and not df_idx.empty:
+                prices = pd.to_numeric(df_idx["Close"], errors="coerce").dropna()
+                if len(prices) >= 2:
+                    perf = ((prices.iloc[-1] - prices.iloc[-2]) / prices.iloc[-2]) * 100.0
+                    sector_perf[clean_label] = perf
+                elif len(prices) == 1:
+                    sector_perf[clean_label] = 0.0
+
     st.markdown("**Sector Concentration**")
     sector_df = (
         open_trades.groupby("Sector", as_index=False)["Notional"].sum()
         .sort_values("Notional", ascending=False)
     )
     sector_df["Weight %"] = np.where(total_gross > 0, sector_df["Notional"] / total_gross * 100.0, 0.0)
+    
+    # Add Sector Perf Column
+    sector_df["Sector Perf (%)"] = sector_df["Sector"].map(sector_perf)
+    
     st.dataframe(
-        sector_df.assign(
-            Notional=sector_df["Notional"].map(lambda x: f"₹{x:,.0f}"),
-            **{"Weight %": sector_df["Weight %"].map(lambda x: f"{x:.1f}%")}
+        _compact_table(
+            sector_df.assign(
+                Notional=sector_df["Notional"].map(lambda x: f"₹{x:,.0f}"),
+                **{
+                    "Weight %": sector_df["Weight %"].map(lambda x: f"{x:.1f}%"),
+                    "Sector Perf (%)": sector_df["Sector Perf (%)"].map(lambda x: f"{x:+.2f}%" if pd.notnull(x) else "N/A")
+                }
+            ),
+            mobile_cols=["Sector", "Notional", "Weight %", "Sector Perf (%)"],
+            rows_summary=12,
+            rows_detail=20,
         ),
         width="stretch",
         hide_index=True,
@@ -228,8 +296,7 @@ with right:
     )
     st.bar_chart(exposure_df.set_index("Sector")["Signed Notional"], height=280)
 
-if view_mode == "Detail":
-    st.markdown("### 🔗 Correlation & Beta Proxy")
+with page_diag_block("🔗 Correlation & Beta Proxy"):
     ret_series = {}
     for sym in symbols_norm:
         d = mkt.get(sym)
@@ -243,7 +310,11 @@ if view_mode == "Detail":
     if len(ret_series) >= 3:
         ret_df = pd.DataFrame(ret_series).dropna()
         corr = ret_df.corr()
-        st.dataframe(corr.style.background_gradient(cmap="RdYlGn_r"), width="stretch")
+        if is_mobile:
+            corr_show = _compact_table(corr.reset_index().rename(columns={"index": "Symbol"}), rows_summary=8, rows_detail=12)
+            st.dataframe(corr_show, width="stretch", hide_index=True)
+        else:
+            st.dataframe(corr.style.background_gradient(cmap="RdYlGn_r"), width="stretch")
 
         if "^NSEI" not in mkt:
             mkt_idx = batch_download(["^NSEI"], period="6mo")
@@ -261,34 +332,48 @@ if view_mode == "Detail":
                 beta_rows.append({"Symbol": sym, "Beta Proxy": beta})
         if beta_rows:
             beta_df = pd.DataFrame(beta_rows).sort_values("Beta Proxy", ascending=False)
-            st.dataframe(beta_df.assign(**{"Beta Proxy": beta_df["Beta Proxy"].map(lambda x: f"{x:.2f}")}), width="stretch", hide_index=True)
+            st.dataframe(
+                _compact_table(
+                    beta_df.assign(**{"Beta Proxy": beta_df["Beta Proxy"].map(lambda x: f"{x:.2f}")}),
+                    mobile_cols=["Symbol", "Beta Proxy"],
+                    rows_summary=12,
+                    rows_detail=20,
+                ),
+                width="stretch",
+                hide_index=True,
+            )
     else:
         st.info("Not enough overlapping return history to compute stable correlation/beta matrix.")
 
 st.markdown("### ✅ Trade Checklist Engine")
 candidate_options = sorted(set(symbols_norm + list(sector_map.keys())))
 regime_snapshot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
-regime_options = ["🟢 Risk On", "🟡 Neutral", "🔴 Risk Off", "Unknown"]
-regime_default = str(regime_snapshot.get("regime_label", "Unknown")) if isinstance(regime_snapshot, dict) else "Unknown"
+regime_options = ["🟢 Risk On", "🟡 Selective", "🟠 Defensive", "🔴 Crisis", "Unknown"]
+
+raw_regime = str(regime_snapshot.get("regime_label", "Unknown")) if isinstance(regime_snapshot, dict) else "Unknown"
+regime_default = EMOJI_REGIME_MAP.get(raw_regime, "Unknown")
+
 if regime_default not in regime_options:
     regime_default = "Unknown"
 
 if isinstance(regime_snapshot, dict) and regime_snapshot:
     prob = regime_snapshot.get("probabilities", {}) if isinstance(regime_snapshot.get("probabilities", {}), dict) else {}
-    st.caption(
-        f"Macro SSOT: {regime_default} | "
-        f"Confidence: {float(regime_snapshot.get('confidence', 0.0) or 0.0):.0%} | "
-        f"Score: {float(regime_snapshot.get('final_score', 0.0) or 0.0):+.2f} | "
-        f"P(On/N/Off): {float(prob.get('risk_on', 0.0) or 0.0):.0%}/"
-        f"{float(prob.get('neutral', 0.0) or 0.0):.0%}/"
-        f"{float(prob.get('risk_off', 0.0) or 0.0):.0%}"
-    )
+    if view_mode == "Detail":
+        st.caption(
+            f"Macro SSOT: {regime_default} | "
+            f"Confidence: {float(regime_snapshot.get('confidence', 0.0) or 0.0):.0%} | "
+            f"Score: {float(regime_snapshot.get('final_score', 0.0) or 0.0):+.2f} | "
+            f"P(On/S/D/C): {float(prob.get('risk_on', 0.0) or 0.0):.0%}/"
+            f"{float(prob.get('selective', 0.0) or 0.0):.0%}/"
+            f"{float(prob.get('defensive', 0.0) or 0.0):.0%}/"
+            f"{float(prob.get('crisis', 0.0) or 0.0):.0%}"
+        )
 
 with st.form("trade_checklist_form", clear_on_submit=False):
-    candidate_symbol = st.selectbox("Candidate Symbol", options=candidate_options)
-    candidate_side = st.selectbox("Candidate Side", options=["LONG", "SHORT"])
+    candidate_symbol = st.selectbox("Symbol", options=candidate_options)
+    candidate_side = st.selectbox("Side", options=["LONG", "SHORT"])
     candidate_regime = st.selectbox(
-        "Current Regime",
+        "Regime",
         options=regime_options,
         index=regime_options.index(regime_default),
     )
@@ -297,14 +382,14 @@ with st.form("trade_checklist_form", clear_on_submit=False):
     if candidate_ltp is None:
         candidate_ltp = fetch_cached_ltp(candidate_symbol)
     entry_default = float(candidate_ltp) if candidate_ltp is not None and not pd.isna(candidate_ltp) else 100.0
-    c_ltp_col, c_entry_col, c_stop_col = st.columns(3)
+    c_ltp_col, c_entry_col, c_stop_col = _responsive_cols(3)
     with c_ltp_col:
         st.metric("LTP", f"₹{entry_default:,.2f}" if entry_default > 0 else "N/A")
     with c_entry_col:
-        entry = st.number_input("Candidate Entry Price", min_value=0.0, value=float(entry_default), step=0.5)
+        entry = st.number_input("Entry", min_value=0.0, value=float(entry_default), step=0.5)
     with c_stop_col:
         stop_default = (entry * 0.975) if candidate_side == "LONG" else (entry * 1.025)
-        stop = st.number_input("Candidate Stop Price", min_value=0.0, value=float(stop_default), step=0.5)
+        stop = st.number_input("Stop", min_value=0.0, value=float(stop_default), step=0.5)
     submitted = st.form_submit_button("Run Checklist", use_container_width=True)
 
 qty_key = "trade_checklist_qty"
@@ -318,15 +403,15 @@ if st.session_state.get(sym_key) != norm_candidate_symbol:
     st.session_state[qty_key] = desired_default_qty
     st.session_state[sym_key] = norm_candidate_symbol
 
-qty = st.number_input("Candidate Quantity", min_value=1, step=1, key=qty_key)
+qty = st.number_input("Quantity", min_value=1, step=1, key=qty_key)
 if norm_candidate_symbol in FNO_TRACKED_SYMBOLS:
     lot_txt = FNO_LOT_MAP.get(norm_candidate_symbol)
     if lot_txt:
-        st.caption(f"F&O symbol detected: default quantity set to lot size ({lot_txt}).")
+        st.caption(f"F&O lot default: {lot_txt}")
     else:
-        st.caption("F&O symbol detected: lot size cache missing for this symbol, defaulting to 1.")
+        st.caption("F&O lot size missing; default 1.")
 else:
-    st.caption("Non-F&O symbol: default quantity set to 100.")
+    st.caption("Cash symbol default: 100")
 
 check_state_key = "trade_checklist_last_run"
 if submitted or check_state_key not in st.session_state:
@@ -380,8 +465,8 @@ if risk_pct_equity > float(rules["max_single_trade_risk_pct"]):
     rule_rows.append({"Rule": "Single-Trade Risk", "Status": "FAIL", "Depends On Symbol": "Partly", "Detail": msg})
 else:
     rule_rows.append({"Rule": "Single-Trade Risk", "Status": "PASS", "Depends On Symbol": "Partly", "Detail": f"{risk_pct_equity:.2f}% <= {rules['max_single_trade_risk_pct']:.2f}%"})
-if candidate_regime == "🔴 Risk Off" and candidate_side == "LONG":
-    msg = "Risk Off regime blocks new long entries by policy."
+if (candidate_regime == "🟠 Defensive" or candidate_regime == "🔴 Crisis") and candidate_side == "LONG":
+    msg = f"{candidate_regime} policy restricts new long entries."
     reasons.append(msg)
     rule_rows.append({"Rule": "Regime Policy", "Status": "FAIL", "Depends On Symbol": "No", "Detail": msg})
 else:
@@ -419,22 +504,37 @@ else:
     st.success("Status: ALLOWED")
     st.write("- Checklist passed for current portfolio rules.")
 
-st.caption(
-    f"Candidate sector: {candidate_sector} | Regime size hint: {size_hint:.2f}x | Suggested qty: {suggested_qty} | "
-    f"Projected sector weight: {sector_after_pct:.1f}% of equity | Trade risk: {risk_pct_equity:.2f}% of equity | "
-    f"Projected gross deployed: ₹{gross_after:,.0f}"
-)
-
-st.markdown("**Checklist Rule Breakdown**")
-if rule_rows:
-    st.dataframe(pd.DataFrame(rule_rows), width="stretch", hide_index=True)
-
-symbol_independent_fails = [r["Rule"] for r in rule_rows if r["Status"] == "FAIL" and r["Depends On Symbol"] == "No"]
-if symbol_independent_fails:
-    st.info(
-        "Status may not change across symbols because these blockers are symbol-independent: "
-        + ", ".join(symbol_independent_fails)
+if view_mode == "Summary":
+    st.caption(
+        f"Sector: {candidate_sector} | Qty hint: {suggested_qty} | "
+        f"Sector wt: {sector_after_pct:.1f}% | Risk: {risk_pct_equity:.2f}%"
     )
+else:
+    st.caption(
+        f"Candidate sector: {candidate_sector} | Regime size hint: {size_hint:.2f}x | Suggested qty: {suggested_qty} | "
+        f"Projected sector weight: {sector_after_pct:.1f}% of equity | Trade risk: {risk_pct_equity:.2f}% of equity | "
+        f"Projected gross deployed: ₹{gross_after:,.0f}"
+    )
+
+with page_diag_block("Checklist Rule Breakdown"):
+    if rule_rows:
+        st.dataframe(
+            _compact_table(
+                pd.DataFrame(rule_rows),
+                mobile_cols=["Rule", "Status", "Depends On Symbol"],
+                rows_summary=10,
+                rows_detail=20,
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    symbol_independent_fails = [r["Rule"] for r in rule_rows if r["Status"] == "FAIL" and r["Depends On Symbol"] == "No"]
+    if symbol_independent_fails:
+        st.info(
+            "Status may not change across symbols because these blockers are symbol-independent: "
+            + ", ".join(symbol_independent_fails)
+        )
 
 _perf["checklist_eval_s"] = round(time.perf_counter() - _page_t0 - _perf.get("data_fetch_s", 0.0), 3)
 _perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)

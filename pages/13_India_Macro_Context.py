@@ -4,14 +4,23 @@ import streamlit as st
 
 from config import FRED_API_KEY, FRED_SERIES_INDIA_MACRO
 from data_fetch import fetch_fred_batch
-from utils import get_ui_detail_mode, render_key_observations, setup_page
+from india_context import get_india_macro_signals_v1
+from utils import get_ui_detail_mode, render_key_observations, setup_page, get_ui_device_mode, responsive_cols as _responsive_cols
+
+print(f"DEBUG: get_india_macro_signals_v1 imported: {get_india_macro_signals_v1 is not None}")
 
 
 setup_page("India Macro Context")
 _ = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
+
+
+# _responsive_cols imported from utils
 
 st.title("🌐 India Macro Context")
 st.caption("Global macro tailwinds/headwinds for Indian equities using FRED series.")
+st.caption(f"Device mode: **{device_mode}**")
 
 if not FRED_API_KEY:
     st.error("FRED_API_KEY not found in .env. This module requires FRED access.")
@@ -92,7 +101,7 @@ composite_score = int(sum(scores.values()))
 label = "Tailwind" if composite_score > 0 else ("Headwind" if composite_score < 0 else "Neutral")
 color = "#10b981" if composite_score > 0 else ("#ef4444" if composite_score < 0 else "#f59e0b")
 
-gcol1, gcol2 = st.columns([1, 2])
+gcol1, gcol2 = _responsive_cols(2, [1, 2])
 with gcol1:
     st.metric("Composite Score", composite_score, label)
 with gcol2:
@@ -121,7 +130,7 @@ metrics_df = pd.DataFrame(metric_rows)
 if metrics_df.empty:
     st.info("Insufficient data to compute indicator deltas.")
 else:
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = _responsive_cols(3)
     for i, (_, row) in enumerate(metrics_df.iterrows()):
         col = [c1, c2, c3][i % 3]
         with col:
@@ -164,3 +173,81 @@ for name, df in batch.items():
     )
     st.plotly_chart(fig, width="stretch")
     st.caption(f"India relevance: {INDIA_RELEVANCE.get(name, 'Context mapping not configured yet.')}")
+
+st.markdown("---")
+st.markdown("## 🇮🇳 Domestic Macro Pillars")
+st.caption("GST Trends & Government Bond Yield Curve (Source: PIB/CCIL/Trading Economics)")
+
+india_signals = get_india_macro_signals_v1()
+gst = india_signals.get("gst", {})
+curve = india_signals.get("curve", {})
+gst_hist = india_signals.get("gst_history", [])
+
+dcol1, dcol2 = _responsive_cols(2)
+
+with dcol1:
+    st.markdown("#### 🛍️ GST Collection")
+    if gst.get("status") != "UNAVAILABLE":
+        gst_val = gst.get("latest_collection", 0)
+        gst_yoy = gst.get("yoy_growth", 0)
+        gst_mom = gst.get("mom_growth", 0)
+        gst_signal = gst.get("demand_signal", "Neutral")
+        
+        ath_badge = " 🏆 **ALL TIME HIGH**" if gst.get("is_all_time_high") else ""
+        
+        st.metric(
+            "Latest Collection",
+            f"₹{gst_val:.2f} L Cr",
+            f"{gst_yoy:+.1f}% YoY",
+            delta_color="normal"
+        )
+        st.write(f"**Demand Signal**: {gst_signal}{ath_badge}")
+        st.caption(f"MoM: {gst_mom:+.1f}% | 3M Avg: ₹{gst.get('three_month_avg', 0):.2f} L Cr")
+        st.info(f"Listed companies (0.62% of base) contribute **{gst.get('listed_contribution', 'N/A')}%** of revenue.")
+        
+        if gst_hist:
+            gh_df = pd.DataFrame(gst_hist)
+            gh_df["month"] = pd.to_datetime(gh_df["month"])
+            
+            # Show YoY Growth Chart
+            fig_gst = go.Figure()
+            fig_gst.add_trace(go.Bar(
+                x=gh_df["month"],
+                y=gh_df["gst_collection_lakh_cr"],
+                name="Collection",
+                marker_color="#1f77b4",
+                opacity=0.6
+            ))
+            fig_gst.add_trace(go.Scatter(
+                x=gh_df["month"],
+                y=gh_df["gst_3m_avg"],
+                name="3M Avg",
+                line=dict(color="#ff7f0e", width=3)
+            ))
+            fig_gst.update_layout(
+                height=300, 
+                title="GST Collection Trend (Lakh Cr)",
+                margin=dict(l=10, r=10, t=40, b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig_gst, use_container_width=True)
+    else:
+        st.warning("GST data unavailable.")
+
+with dcol2:
+    st.markdown("#### 📈 India Yield Curve")
+    if curve.get("status") != "UNAVAILABLE":
+        y10 = curve.get("ten_year_yield", 0)
+        y3m = curve.get("three_month_yield", 0)
+        spread = curve.get("spread_bps", 0)
+        
+        st.metric("10Y - 3M Spread", f"{spread} bps", f"{y10:.2f}% (10Y) / {y3m:.2f}% (3M)")
+        st.write("**Curve State**: Positive Upward Slope" if spread > 0 else "**Curve State**: Inverted")
+        st.caption(f"As of: {curve.get('as_of', 'Recent')}")
+        
+        st.markdown("---")
+        st.markdown("**Official Portals & Sources**")
+        for link in gst.get("portal_links", []) + curve.get("sources", []):
+            st.markdown(f"- [{link['name']}]({link['url']})")
+    else:
+        st.warning("Yield curve data unavailable.")

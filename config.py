@@ -5,7 +5,10 @@ NSE-specific config moved to nse_config.py
 """
 
 import os
+import logging
 from dotenv import load_dotenv
+
+_log = logging.getLogger(__name__)
 
 # ==================== LOAD ENVIRONMENT VARIABLES ====================
 load_dotenv()
@@ -13,7 +16,7 @@ load_dotenv()
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 
 if not FRED_API_KEY:
-    print("⚠️  FRED_API_KEY not found in .env - Liquidity dashboard features disabled")
+    _log.warning("FRED_API_KEY not found in .env - Liquidity dashboard features disabled")
 
 
 # ==================== MAIN INDICES ====================
@@ -32,7 +35,7 @@ MAIN_INDICES = {
 # Quick risk snapshot (top of Global Markets dashboard)
 GLOBAL_RISK_SNAPSHOT = {
     "^GSPC": "S&P 500",
-    "^IXIC": "NASDAQ",
+    "^NDX": "NASDAQ 100",
     "DX-Y.NYB": "Dollar Index",
     "^TNX": "US 10Y Yield",
     "CL=F": "Crude Oil",
@@ -43,7 +46,7 @@ GLOBAL_RISK_SNAPSHOT = {
 # All global indices
 GLOBAL_INDICES = {
     "^GSPC": "S&P 500",
-    "^IXIC": "NASDAQ",
+    "^NDX": "NASDAQ 100",
     "^DJI": "Dow Jones",
     "^FTSE": "FTSE 100",
     "^FCHI": "CAC 40",
@@ -62,7 +65,8 @@ CURRENCIES = {
     "AUDUSD=X": "AUD/USD",
     "NZDUSD=X": "NZD/USD",
     "USDCHF=X": "USD/CHF",
-    "USDCAD=X": "USD/CAD"
+    "USDCAD=X": "USD/CAD",
+    "USDINR=X": "USD/INR"
 }
 
 # Commodities
@@ -94,7 +98,8 @@ BOND_MARKETS = {
 
 # ==================== MARKET OVERVIEW SYMBOLS ====================
 MARKET_SYMBOLS = {
-    "^IXIC": "NASDAQ",
+    "^IXIC": "NASDAQ COMP",
+    "^NDX": "NASDAQ 100",
     "^NSEI": "NIFTY 50",
     "DX-Y.NYB": "Dollar Index",
     "USDINR=X": "USD/INR",
@@ -108,7 +113,7 @@ MARKET_SYMBOLS = {
 
 MACRO_SYMBOLS = {
     "^DJI": "Dow Jones",
-    "^IXIC": "Nasdaq",
+    "^NDX": "Nasdaq 100",
     "^NSEI": "NIFTY 50",
     "^NSEBANK": "Bank NIFTY",
     "DX-Y.NYB": "Dollar Index",
@@ -121,7 +126,7 @@ MACRO_SYMBOLS = {
 
 MACRO_WEIGHTS = {
     "^DJI": 2,
-    "^IXIC": 2,
+    "^NDX": 2,
     "^NSEI": 2,
     "^NSEBANK": 1,
     "DX-Y.NYB": 2,
@@ -152,6 +157,7 @@ LEADING_SYMBOLS = {
     "^TNX": "US 10Y Yield",
     "^IRX": "US 3M Yield",
     "^NSEI": "NIFTY 50",
+    "^NDX": "NASDAQ 100",
     "DX-Y.NYB": "Dollar Index"
 }
 
@@ -381,7 +387,7 @@ RSS_MAX_TOTAL_ITEMS = 60
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 if not FINNHUB_API_KEY:
-    print("⚠️  FINNHUB_API_KEY not found in .env - Fundamentals features disabled")
+    _log.warning("FINNHUB_API_KEY not found in .env - Fundamentals features disabled")
 
 FINNHUB_NSE_PREFIX = "NSE:"
 FINNHUB_METRICS = [
@@ -405,7 +411,7 @@ FINNHUB_RATE_LIMIT_PAUSE = 0.5
 
 EODHD_API_KEY = os.getenv("EODHD_API_KEY", "").strip()
 if not EODHD_API_KEY:
-    print("⚠️  EODHD_API_KEY not found in .env - India fundamentals/news fallback disabled")
+    _log.warning("EODHD_API_KEY not found in .env - India fundamentals/news fallback disabled")
 
 EODHD_BASE_URL = os.getenv("EODHD_BASE_URL", "https://eodhd.com").strip().rstrip("/")
 EODHD_NSE_SUFFIX = ".NSE"
@@ -537,10 +543,10 @@ def validate_config():
     pass
 
     if issues:
-        print("\n".join(issues))
+        _log.warning("Config issues:\n%s", "\n".join(issues))
         return False
 
-    print("✅ Main config validated")
+    _log.info("Main config validated")
     return True
 
 

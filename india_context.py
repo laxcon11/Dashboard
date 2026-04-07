@@ -9,7 +9,8 @@ from typing import Any, Dict, Optional
 import pandas as pd
 import requests
 
-from data_fetch import fetch_india_vix
+from data_fetch import fetch_india_vix, fetch_fred_series
+from config import FRED_API_KEY
 
 
 CACHE_FILE = Path("notes/india_flows_cache.json")
@@ -449,10 +450,64 @@ def get_india_macro_signals_v1() -> Dict[str, Any]:
 
     vix_price, vix_change = fetch_india_vix()
     breadth = _latest_breadth_from_snapshot()
+    
+    # NEW: Fetch macro Growth & Liquidity indicators from FRED if available
+    macro_data = {}
+    liquidity_data = {}
+    
+    if FRED_API_KEY:
+        try:
+            # India Manufacturing Production YoY (Proxy for PMI Production component)
+            pmi_proxy = fetch_fred_series("INDPRMNTO01GYSAM", FRED_API_KEY)
+            if pmi_proxy is not None and not pmi_proxy.empty:
+                # Store full series for scoring engine
+                macro_data["pmi_india"] = pmi_proxy.set_index("date")["value"].dropna()
+            
+            # India Auto Sales (Passenger Car Registrations)
+            auto_sales = fetch_fred_series("INDSLRTCR03IXOBSAM", FRED_API_KEY)
+            if auto_sales is not None and not auto_sales.empty:
+                macro_data["auto_sales"] = auto_sales.set_index("date")["value"].dropna()
+                
+            # India Exports (Real Exports of Goods and Services)
+            exports = fetch_fred_series("NXRNSAXDCINQ", FRED_API_KEY)
+            if exports is not None and not exports.empty:
+                macro_data["exports_india"] = exports.set_index("date")["value"].dropna()
+            
+            # India Real Rate (Proxy: 10Y Yield - Consumer Prices)
+            ind_10y = fetch_fred_series("INDIRLTLT01STM", FRED_API_KEY)
+            ind_cpi = fetch_fred_series("CPALTT01INM657N", FRED_API_KEY)
+            if ind_10y is not None and not ind_10y.empty and ind_cpi is not None and not ind_cpi.empty:
+                df10 = ind_10y.set_index("date")["value"]
+                dfcpi = ind_cpi.set_index("date")["value"]
+                common = pd.concat([df10, dfcpi], axis=1).ffill().dropna()
+                # Yield - Inflation = Real Rate
+                real_rate_series = (common.iloc[:,0] - common.iloc[:,1]).dropna()
+                liquidity_data["real_rate"] = real_rate_series
+            else:
+                liquidity_data["real_rate"] = 0.0
+
+            liquidity_data["rbi_liq"] = 1.0 # Default positive for now
+        except Exception:
+            pass
+
     gst_context_file = Path("notes/gst_context.json")
     curve_file = Path("notes/india_curve_context.json")
     gst_context = None
-    curve = None
+    curve_obj = None # Renamed to avoid confusion
+    
+    import os
+    import time
+    
+    # Track file ages for staleness guards
+    gst_csv_path = Path("data/gst_monthly.csv")
+    gst_age = None
+    if gst_csv_path.exists():
+        gst_age = (time.time() - os.path.getmtime(gst_csv_path)) / 86400.0
+        
+    curve_age = None
+    if curve_file.exists():
+        curve_age = (time.time() - os.path.getmtime(curve_file)) / 86400.0
+
     if gst_context_file.exists():
         try:
             gst_context = json.loads(gst_context_file.read_text())
@@ -460,9 +515,20 @@ def get_india_macro_signals_v1() -> Dict[str, Any]:
             gst_context = None
     if curve_file.exists():
         try:
-            curve = json.loads(curve_file.read_text())
+            curve_obj = json.loads(curve_file.read_text())
         except Exception:
-            curve = None
+            curve_obj = None
+
+    curve_data = (
+        {
+            **curve_obj,
+            "value": (curve_obj.get("ten_year_yield", 0) - curve_obj.get("three_month_yield", 0)),
+            "status": "FINAL",
+        }
+        if curve_obj
+        else {"status": "UNAVAILABLE", "source": "pending", "value": 0.0}
+    )
+    liquidity_data["india_curve"] = curve_data["value"]
 
     return {
         "flows": {
@@ -498,19 +564,17 @@ def get_india_macro_signals_v1() -> Dict[str, Any]:
             "status": _freshness_state(breadth.get("as_of")),
             "source": breadth.get("source", "snapshot"),
         },
-        "curve": (
-            {
-                **curve,
-                "value": (curve.get("ten_year_yield", 0) - curve.get("three_month_yield", 0)),
-                "status": "FINAL",
-            }
-            if curve
-            else {"status": "UNAVAILABLE", "source": "pending"}
-        ),
+        "macro": macro_data,
+        "liquidity": liquidity_data,
+        "curve": {
+            **curve_data,
+            "age_days": curve_age
+        },
         "gst": {
             **gst_data,
             "listed_contribution": gst_context.get("listed_revenue_contribution_pct") if gst_context else None,
-            "portal_links": gst_context.get("sources") if gst_context else []
+            "portal_links": gst_context.get("sources") if gst_context else [],
+            "age_days": gst_age
         },
         "gst_history": gst_df_full.to_dict(orient="records") if not gst_df_full.empty else [],
         "updated_at": now,

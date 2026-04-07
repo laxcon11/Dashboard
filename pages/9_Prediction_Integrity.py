@@ -22,19 +22,27 @@ from prediction_integrity.store import (
     write_json,
 )
 from regime_state import load_regime_snapshot
-from utils import get_ui_detail_mode, setup_page
+from utils import get_ui_detail_mode, setup_page, get_ui_device_mode, responsive_cols as _responsive_cols, compact_table as _compact_table
 
 MIN_SAMPLE_BY_HORIZON = {1: 20, 5: 12, 20: 8}
 
 
 setup_page("Prediction Integrity")
 view_mode = get_ui_detail_mode("Summary")
+device_mode = get_ui_device_mode("Desktop")
+is_mobile = device_mode == "Mobile"
+
+
+# _responsive_cols imported from utils
+
+# _compact_table imported from utils
 
 st.title("🧪 Prediction Integrity")
 st.caption("Immutable prediction log, matured outcome scoring, and monthly calibration governance.")
 st.caption(f"UI mode: **{view_mode}**")
+st.caption(f"Device mode: **{device_mode}**")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3 = _responsive_cols(3)
 with c1:
     if st.button("Run Daily Integrity Cycle", width="stretch"):
         out = run_daily_cycle()
@@ -50,7 +58,7 @@ preds = load_predictions()
 outs = load_outcomes()
 vers = load_versions()
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4 = _responsive_cols(4)
 with m1:
     st.metric("Predictions Logged", int(len(preds)))
 with m2:
@@ -69,9 +77,10 @@ if isinstance(ssot, dict) and ssot:
         f"Current Macro SSOT: {ssot.get('regime_label', 'Unknown')} | "
         f"Confidence {float(ssot.get('confidence', 0.0) or 0.0):.0%} | "
         f"Score {float(ssot.get('final_score', 0.0) or 0.0):+.2f} | "
-        f"P(On/N/Off): {float(probs.get('risk_on', 0.0) or 0.0):.0%}/"
-        f"{float(probs.get('neutral', 0.0) or 0.0):.0%}/"
-        f"{float(probs.get('risk_off', 0.0) or 0.0):.0%}"
+        f"P(On/S/D/C): {float(probs.get('risk_on', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('selective', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('defensive', 0.0) or 0.0):.0%}/"
+        f"{float(probs.get('crisis', 0.0) or 0.0):.0%}"
     )
 
 st.subheader("Sample Sufficiency")
@@ -85,7 +94,7 @@ else:
         .count()
         .to_dict()
     )
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = _responsive_cols(3)
     for col, hz in zip([c1, c2, c3], [1, 5, 20]):
         actual_n = int(counts.get(hz, 0))
         min_n = int(MIN_SAMPLE_BY_HORIZON[hz])
@@ -138,7 +147,7 @@ if proposal_path is None:
     st.info("No calibration proposal file found yet. Generate monthly calibration first.")
 else:
     proposal = read_json(proposal_path) or {}
-    r1, r2, r3, r4 = st.columns(4)
+    r1, r2, r3, r4 = _responsive_cols(4)
     r1.metric("Proposal", str(proposal.get("proposal_id", "N/A")))
     r2.metric("Month", str(proposal.get("month", "N/A")))
     r3.metric("Status", str(proposal.get("status", "UNKNOWN")))
@@ -148,12 +157,16 @@ else:
 
     changes = proposal.get("proposed_changes", [])
     if isinstance(changes, list) and changes:
-        st.dataframe(pd.DataFrame(changes), width="stretch", hide_index=True)
+        st.dataframe(
+            _compact_table(pd.DataFrame(changes), ["field", "old_value", "new_value", "rationale"]),
+            width="stretch",
+            hide_index=True,
+        )
 
     with st.expander("Review & Approval", expanded=False):
         reviewer = st.text_input("Reviewer", value="laxman")
         comments = st.text_area("Review comments", value=str(proposal.get("approval", {}).get("comments") or ""))
-        s1, s2, s3 = st.columns(3)
+        s1, s2, s3 = _responsive_cols(3)
 
         def _save_status(status: str) -> None:
             proposal["status"] = status
@@ -188,19 +201,52 @@ with st.expander("Prediction Records (immutable)", expanded=(view_mode == "Detai
     else:
         show = preds.copy()
         show["pred_regime_probs"] = show["pred_regime_probs"].astype(str).str.slice(0, 120)
-        st.dataframe(show.sort_values(["date_issued", "horizon_days"], ascending=[False, True]), width="stretch", hide_index=True)
+        show = show.sort_values(["date_issued", "horizon_days"], ascending=[False, True])
+        st.dataframe(
+            _compact_table(
+                show,
+                ["date_issued", "horizon_days", "predicted_regime", "confidence_bucket", "model_version", "prediction_id"],
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        st.download_button(
+            label="Download Predictions CSV",
+            data=preds.to_csv(index=False).encode("utf-8"),
+            file_name=f"predictions_export_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
 
 with st.expander("Outcome Records", expanded=(view_mode == "Detail")):
     if outs.empty:
         st.info("No outcomes yet.")
     else:
-        st.dataframe(outs.sort_values(["evaluated_at"], ascending=False), width="stretch", hide_index=True)
+        show_outs = outs.sort_values(["evaluated_at"], ascending=False)
+        st.dataframe(
+            _compact_table(
+                show_outs,
+                ["evaluated_at", "horizon_days", "predicted_regime", "actual_regime", "regime_correct", "prediction_id"],
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        st.download_button(
+            label="Download Outcomes CSV",
+            data=outs.to_csv(index=False).encode("utf-8"),
+            file_name=f"outcomes_export_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
 
 with st.expander("Model Versions", expanded=False):
     if vers.empty:
         st.info("No model versions recorded yet.")
     else:
-        st.dataframe(vers.sort_values(["created_at"], ascending=False), width="stretch", hide_index=True)
+        show_vers = vers.sort_values(["created_at"], ascending=False)
+        st.dataframe(
+            _compact_table(show_vers, ["created_at", "version_id", "notes", "approved_by"]),
+            width="stretch",
+            hide_index=True,
+        )
 
 with st.expander("Calibration Artifacts", expanded=False):
     reports = sorted(CAL_DIR.glob("monthly_calibration_*.json"))

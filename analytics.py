@@ -89,9 +89,10 @@ def calculate_volume_ratio(df, adjust_live: bool = False) -> float:
             return raw_ratio
 
         progress = _nse_market_progress_ist(now_ist)
-        if progress <= 0.05 or progress >= 1.0:
+        # Suppress artificial spikes in first 45 minutes of the trading session
+        if progress <= 0.15 or progress >= 1.0:
             return raw_ratio
-        expected_eod_vol = float(latest_vol) / max(progress, 0.05)
+        expected_eod_vol = float(latest_vol) / progress
         return expected_eod_vol / float(avg_vol)
     except Exception as exc:
         logger.debug("calculate_volume_ratio failed: %s", exc)
@@ -163,9 +164,15 @@ def calculate_relative_strength(symbol_df, index_df, period: int = 20) -> float:
     try:
         if len(symbol_df) < period or len(index_df) < period:
             return 0
+            
+        sym_old_close = float(symbol_df['Close'].iloc[-period])
+        idx_old_close = float(index_df['Close'].iloc[-period])
+        
+        if sym_old_close == 0 or idx_old_close == 0:
+            return 0
 
-        stock_return = ((symbol_df['Close'].iloc[-1] / symbol_df['Close'].iloc[-period]) - 1) * 100
-        index_return = ((index_df['Close'].iloc[-1] / index_df['Close'].iloc[-period]) - 1) * 100
+        stock_return = ((symbol_df['Close'].iloc[-1] / sym_old_close) - 1) * 100
+        index_return = ((index_df['Close'].iloc[-1] / idx_old_close) - 1) * 100
 
         return stock_return - index_return
     except Exception as exc:
@@ -183,20 +190,25 @@ def calculate_momentum_score(stock_data, index_data) -> int:
     
     # 1. Trend Alignment (0-3)
     try:
-        ema20 = calculate_ema(stock_data, 20).iloc[-1]
-        ema50 = calculate_ema(stock_data, 50).iloc[-1]
-        if current > ema20 > ema50:
-            score += 3
-        elif current > ema20:
-            score += 1
+        ema20_series = calculate_ema(stock_data, 20)
+        ema50_series = calculate_ema(stock_data, 50)
+        if not ema20_series.empty and not ema50_series.empty:
+            ema20 = ema20_series.iloc[-1]
+            ema50 = ema50_series.iloc[-1]
+            if current > ema20 > ema50:
+                score += 3
+            elif current > ema20:
+                score += 1
     except Exception as exc:
         logger.debug("calculate_momentum_score trend segment failed: %s", exc)
     
     # 2. RSI Strength (0-2)
     try:
-        rsi = calculate_rsi(stock_data).iloc[-1]
-        if rsi > 60: score += 2
-        elif rsi > 55: score += 1
+        rsi_series = calculate_rsi(stock_data)
+        if not rsi_series.empty:
+            rsi = rsi_series.iloc[-1]
+            if rsi > 60: score += 2
+            elif rsi > 55: score += 1
     except Exception as exc:
         logger.debug("calculate_momentum_score rsi segment failed: %s", exc)
     
@@ -222,34 +234,53 @@ def calculate_pullback_score(stock_data, index_data) -> int:
     
     # 1. Buying the Dip (Near EMA 20) (0-4)
     try:
-        ema20 = calculate_ema(stock_data, 20).iloc[-1]
-        dist_pct = (current - ema20) / ema20 * 100
-        
-        if 0 < dist_pct <= 2: score += 4  # Perfect pullback
-        elif 0 < dist_pct <= 4: score += 2 # Decent pullback
-        elif -2 <= dist_pct <= 0: score += 3 # Slight undercut
+        ema20_series = calculate_ema(stock_data, 20)
+        if not ema20_series.empty:
+            ema20 = ema20_series.iloc[-1]
+            if ema20 != 0:
+                dist_pct = (current - ema20) / ema20 * 100
+                if 0 < dist_pct <= 2: score += 4  # Perfect pullback
+                elif 0 < dist_pct <= 4: score += 2 # Decent pullback
+                elif -2 <= dist_pct <= 0: score += 3 # Slight undercut
     except Exception as exc:
         logger.debug("calculate_pullback_score ema segment failed: %s", exc)
     
     # 2. RSI Reset (0-3)
     try:
-        rsi = calculate_rsi(stock_data).iloc[-1]
-        if 40 <= rsi <= 55: score += 3 # Perfect reset zone
-        elif 35 <= rsi < 40: score += 1
-        elif 55 < rsi <= 60: score += 1
+        rsi_series = calculate_rsi(stock_data)
+        if not rsi_series.empty:
+            rsi = rsi_series.iloc[-1]
+            if 40 <= rsi <= 55: score += 3 # Perfect reset zone
+            elif 35 <= rsi < 40: score += 1
+            elif 55 < rsi <= 60: score += 1
     except Exception as exc:
         logger.debug("calculate_pullback_score rsi segment failed: %s", exc)
     
     # 3. Volatility Compression (0-3)
     try:
-        if detect_nr7(stock_data):
-            score += 3
-        elif (stock_data['High'].iloc[-1] - stock_data['Low'].iloc[-1]) < calculate_atr(stock_data).iloc[-1] * 0.7:
-             score += 1
+        atr_s = calculate_atr(stock_data)
+        if not atr_s.empty:
+            atr = atr_s.iloc[-1]
+            daily_range = stock_data['High'].iloc[-1] - stock_data['Low'].iloc[-1]
+            
+            # Tightness check: prioritizes small ranges
+            if detect_nr7(stock_data):
+                score += 3
+            elif daily_range < atr * 0.7:
+                score += 2
+            elif daily_range < atr:
+                score += 1
+                
+            # "Loose" price action penalty: sharp volatile drops are not "orderly" pullbacks
+            if daily_range > atr * 1.3:
+                score -= 2
     except Exception as exc:
         logger.debug("calculate_pullback_score volatility segment failed: %s", exc)
 
-    return min(score, 10)
+    return clamp_score(score)
+
+def clamp_score(s):
+    return max(0, min(10, s))
 
 
 
@@ -347,14 +378,28 @@ def calculate_support_resistance(df, period: int = 20):
 
 # ==================== LEADING INDICATORS ====================
 
+def calculate_z_score_signal(series: pd.Series, lookback: int = 180, inverse: bool = False) -> int:
+    """Helper to calculate a discrete signal [-1, 0, 1] using Z-score logic."""
+    if series.empty or len(series.dropna()) < 20:
+        return 0
+    s = series.dropna().tail(lookback)
+    mean = s.mean()
+    std = s.std()
+    if std == 0 or pd.isna(std):
+        return 0
+    last_val = series.iloc[-1]
+    z = (last_val - mean) / std
+    # Simple threshold: sign of Z-score
+    score = 1 if z > 0 else -1
+    return -score if inverse else score
+
+
 def calculate_copper_gold_signal(data):
-    """Calculate Copper/Gold ratio signal"""
+    """Calculate Copper/Gold ratio signal using Z-score logic."""
     copper = data.get("HG=F")
     gold = data.get("GC=F")
 
-    if copper is None or gold is None:
-        return 0, 0, "No Data"
-    if "Close" not in copper.columns or "Close" not in gold.columns:
+    if copper is None or gold is None or "Close" not in copper.columns or "Close" not in gold.columns:
         return 0, 0, "No Data"
 
     try:
@@ -363,16 +408,12 @@ def calculate_copper_gold_signal(data):
             gold["Close"].rename("gold")
         ], axis=1).ffill().dropna()
 
-        if len(df) < 15:
+        if len(df) < 20:
             return 0, 0, "Insufficient Data"
 
         ratio = df["copper"] / df["gold"]
-        ma = ratio.rolling(10).mean()
-
         latest_ratio = ratio.iloc[-1]
-        latest_ma = ma.iloc[-1]
-
-        score = 1 if latest_ratio > latest_ma else -1
+        score = calculate_z_score_signal(ratio, inverse=False)
         signal = "Copper/Gold Positive" if score == 1 else "Copper/Gold Defensive"
 
         return float(latest_ratio), score, signal
@@ -382,13 +423,11 @@ def calculate_copper_gold_signal(data):
 
 
 def calculate_credit_spread_signal(data):
-    """Calculate HYG/LQD credit spread signal"""
+    """Calculate HYG/LQD credit spread signal using Z-score logic."""
     hyg = data.get("HYG")
     lqd = data.get("LQD")
 
-    if hyg is None or lqd is None:
-        return 0, 0, "No Data"
-    if "Close" not in hyg.columns or "Close" not in lqd.columns:
+    if hyg is None or lqd is None or "Close" not in hyg.columns or "Close" not in lqd.columns:
         return 0, 0, "No Data"
 
     try:
@@ -397,21 +436,13 @@ def calculate_credit_spread_signal(data):
             lqd["Close"].rename("lqd")
         ], axis=1).ffill().dropna()
 
-        if len(df) < 15:
+        if len(df) < 20:
             return 0, 0, "Insufficient Data"
 
         ratio = df["hyg"] / df["lqd"]
         ratio = ratio.replace([np.inf, -np.inf], np.nan).dropna()
-
-        if len(ratio) < 10:
-            return 0, 0, "Insufficient Data"
-
-        ma = ratio.rolling(10).mean()
-
         latest_ratio = ratio.iloc[-1]
-        latest_ma = ma.iloc[-1]
-
-        score = 1 if latest_ratio > latest_ma else -1
+        score = calculate_z_score_signal(ratio, inverse=False)
         signal = "Credit Risk On" if score == 1 else "Credit Risk Off"
 
         return float(latest_ratio), score, signal
@@ -421,21 +452,16 @@ def calculate_credit_spread_signal(data):
 
 
 def calculate_dollar_trend_signal(market_data):
-    """Calculate Dollar Index trend signal"""
+    """Calculate Dollar Index trend signal using Z-score logic."""
     dxy = market_data.get("DX-Y.NYB")
 
-    if dxy is None or len(dxy) < 10:
+    if dxy is None or "Close" not in dxy.columns or len(dxy["Close"].dropna()) < 20:
         return 0, 0, "No Data"
 
     try:
         close_series = dxy["Close"].dropna()
-        if len(close_series) < 10:
-            return 0, 0, "Insufficient Data"
-            
         latest = close_series.iloc[-1]
-        ma = close_series.rolling(10).mean().iloc[-1]
-
-        score = -1 if latest > ma else 1  # Rising dollar = risk off
+        score = calculate_z_score_signal(close_series, inverse=True)
         signal = "Dollar Rising" if score == -1 else "Dollar Stable"
 
         return float(latest), score, signal
@@ -445,26 +471,16 @@ def calculate_dollar_trend_signal(market_data):
 
 
 def calculate_yield_trend_signal(market_data):
-    """Calculate 10Y Yield trend signal"""
+    """Calculate 10Y Yield trend signal using Z-score logic."""
     y10 = market_data.get("^TNX")
 
-    if y10 is None or len(y10) < 10:
+    if y10 is None or "Close" not in y10.columns or len(y10["Close"].dropna()) < 20:
         return 0, 0, "No Data"
 
-    if "Close" not in y10.columns:
-        return 0, 0, "No Close Data"
-
     try:
-        # Get clean series
         close_series = y10["Close"].dropna()
-
-        if len(close_series) < 10:
-            return 0, 0, "Insufficient Data"
-
         latest = close_series.iloc[-1]
-        ma = close_series.rolling(10).mean().iloc[-1]
-
-        score = -1 if latest > ma else 1  # Rising yields = tightening
+        score = calculate_z_score_signal(close_series, inverse=True)
         signal = "Yields Rising" if score == -1 else "Yields Stable"
 
         return float(latest), score, signal

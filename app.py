@@ -44,7 +44,7 @@ else:
 st.subheader("🎯 Recommended Flow")
 flow_items = [
     "1) Global + Liquidity\n\nRead risk backdrop",
-    "2) Macro Risk\n\nSet bias: Risk On / Neutral / Risk Off",
+    "2) Macro Risk\n\nSet bias: Risk On / Selective / Defensive / Crisis",
     "3) NSE Dashboard\n\nPick setups with gates",
     "4) Portfolio Risk\n\nCheck concentration/exposure",
     "5) Journal\n\nLog and review execution",
@@ -86,11 +86,24 @@ with st.expander("🗂 Pages & Configuration", expanded=False):
     - `data_fetch.py` (data pipeline, fallback paths)
     """)
 
-st.subheader("Additional Modules")
+st.subheader("🏛️ Core Strategy Modules")
+core_items = [
+    ("pages/17_NIFTY_Strategy_Engine.py", "🎯 Nifty Strategy Engine", "Strategy Selector: Mean Rev, Trend, Gamma Flip, Vanna, Charm"),
+    ("pages/18_NSE_Monthly_Engine.py", "🏛️ NSE Monthly Engine", "Institutional Term Structure: GEX Surface, Vega Curves, Strike Heatmap"),
+]
+core_cols = 1 if is_mobile else 2
+for i in range(0, len(core_items), core_cols):
+    cols = st.columns(core_cols)
+    for col, (path, label, text) in zip(cols, core_items[i:i + core_cols]):
+        with col:
+            st.page_link(path, label=label, icon="🛰️")
+            st.caption(text)
+
+st.subheader("🌐 Additional Context")
 module_items = [
-    ("pages/13_India_Macro_Context.py", "🇮🇳 India Macro Context", "Global headwinds/tailwinds for Indian equities via FRED"),
+    ("pages/13_India_Macro_Context.py", "🇮🇳 India Macro Context", "Global headwinds/tailwinds for equities via FRED"),
     ("pages/14_News_Feed.py", "📰 News Feed", "Live RSS headlines from Indian & global sources"),
-    ("pages/15_Stock_Fundamentals.py", "📊 Stock EOD Profile", "EOD snapshot first; fundamentals only when provider allows"),
+    ("pages/15_Stock_Fundamentals.py", "📊 Stock EOD Profile", "EOD snapshot first; fundamentals on-demand"),
 ]
 module_cols = 1 if is_mobile else 3
 for i in range(0, len(module_items), module_cols):
