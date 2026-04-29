@@ -77,6 +77,7 @@ with st.expander("🗂 Pages & Configuration", expanded=False):
     - `13_India_Macro_Context.py`
     - `14_News_Feed.py`
     - `15_Stock_Fundamentals.py`
+    - `19_Arbitrage_Scanner.py`
 
     **Core files**
     - `NSE_Config.py` (universe/categories/watchlists)
@@ -90,6 +91,7 @@ st.subheader("🏛️ Core Strategy Modules")
 core_items = [
     ("pages/17_NIFTY_Strategy_Engine.py", "🎯 Nifty Strategy Engine", "Strategy Selector: Mean Rev, Trend, Gamma Flip, Vanna, Charm"),
     ("pages/18_NSE_Monthly_Engine.py", "🏛️ NSE Monthly Engine", "Institutional Term Structure: GEX Surface, Vega Curves, Strike Heatmap"),
+    ("pages/19_Arbitrage_Scanner.py", "⚖️ Arbitrage Scanner", "Institutional Mispricing: Cash-Futures Basis, PCP Scanner, Implied Rates"),
 ]
 core_cols = 1 if is_mobile else 2
 for i in range(0, len(core_items), core_cols):

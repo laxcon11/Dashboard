@@ -61,7 +61,7 @@ def append_immutable(path: Path, rows: pd.DataFrame, key_col: str, columns: list
 def load_predictions() -> pd.DataFrame:
     cols = [
         "prediction_id", "date_issued", "target_date", "horizon_days", "pred_regime_probs",
-        "pred_score_range_low", "pred_score_range_high", "pred_score_mid", "confidence",
+        "pred_score_range_low", "pred_score_range_high", "pred_score_mid", "macro_score", "liquidity_score", "confidence",
         "model_version", "input_signature", "created_at",
     ]
     return _read_parquet(PREDICTIONS_FILE, cols)
@@ -69,8 +69,11 @@ def load_predictions() -> pd.DataFrame:
 
 def load_outcomes() -> pd.DataFrame:
     cols = [
-        "prediction_id", "evaluated_at", "actual_regime", "actual_score", "brier_score", "log_loss",
-        "score_mae", "in_band", "regime_correct",
+        "prediction_id", "evaluated_at", "actual_regime", "predicted_regime", 
+        "actual_score", "prob_actual", "edge", "brier_score", "log_loss",
+        "score_mae", "in_band", "regime_correct", "sharpness",
+        "model_version", "horizon_days", "raw_score", "ema_score",
+        "macro_weight", "vol_factor", "switch_type", "regime_persistence_age"
     ]
     return _read_parquet(OUTCOMES_FILE, cols)
 

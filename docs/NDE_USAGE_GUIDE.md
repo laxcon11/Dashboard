@@ -11,14 +11,20 @@ The engine is split into two primary modules:
 
 ---
 
-## 🌐 2. Data Ingestion (The NSE v3 Handshake)
-The NDE uses a hardened **NSE v3 Client** to bypass traditional security blocks.
-- **🚀 Fetch Live Chains**: Click this in the sidebar to perform a multi-stage handshake with the NSE. It shards data into `Weekly Near`, `Weekly Next`, and `Monthly Near` automatically.
-- **📂 Manual Upload**: If the API is rate-limited, you can upload an NSE-style CSV. The engine will automatically clean the data and center it around the current Nifty ATR.
+## 🌐 2. Data Ingestion (Institutional Pipeline)
+The NDE prioritizes **Sensibull-derived institutional Greeks** for maximum analytical trust.
+
+1. **📥 Sensibull Flow**: Export the option chain from Sensibull as a CSV and place it in the `data/option_chain` directory. The engine will automatically detect and convert these into institutional GEX sidecars.
+2. **📂 Manual Hub**: Use the "Data Operations Hub" in the Strategy Engine sidebar to trigger a manual scan of the local folder or to purge expired data.
+3. **🛡️ Central Governance**: Data ingestion is strictly gated by the **`NDEGovernance`** authority, enforcing high-trust resolution across UI and headless automation.
 
 ---
 
-## 📊 3. Understanding Core Metrics
+## 🏛️ 3. Decision-First UI (Cockpit)
+The NDE UI is designed for **execution-speed decision making**:
+- **Systematic Trade Action**: The primary hero headline is the explicit directive (e.g., FADE WALLS, FOLLOW MOMENTUM).
+- **Actionable Level Map**: A unified horizontal axis showing Spot, Flip, Pain, and Walls in a single coordinate system.
+- **"What Changed" Benchmarking**: Formally compares current state to the **Previous Day's Close** (Last dated snapshot) to identify Daily Drift.
 
 ### ✦ Gamma Flip (The Critical Pivot)
 The price level where the dealer regime switches from **Long Gamma** (Supportive/Mean Reverting) to **Short Gamma** (Accelerative/Volatile).
@@ -36,21 +42,31 @@ The ratio of **Theta to Vega**.
 
 ---
 
-## 🎯 4. Strategy Selection Logic
-The engine automatically grades strategies based on a **Confidence Hierarchy**:
+## 🎯 4. Strategy Selection & Governance
+The NDE uses an **Institutional Transition Gate** (Hysteresis) to prevent intraday strategy flip-flopping while allowing valid pivots.
 
-| Strategy | Ideal Conditions | Logic Trigger |
-| :--- | :--- | :--- |
-| **Trend Acceleration** | Below Flip + Negative Vanna | `spot < flip` + `vanna_bias == Negative` |
-| **Mean Reversion** | Above Flip + High TV Ratio | `spot > flip` + `tv_norm > 1.2` |
-| **Gamma Flip Trade** | Spot within 0.25% of Flip | `flip_dist < 0.0025` + `High delta GEX` |
+### ⚖️ The Transition Gate (Governance)
+A strategy shift is only permitted if one of the following "Hard-Breach" rules is met:
+1. **Conviction Jump**: `New Quality Score - Current Quality Score >= 1.5` (on a 10-point scale).
+2. **Priority Trigger**: `New Strategy == "GAMMA_FLIP"`.
+3. **Regime Cross**: `Sign(New GEX Norm) != Sign(Current GEX Norm)` (e.g., flipping from positive to negative Gamma).
 
-> [!IMPORTANT]
-> **Institutional Gate**: If the Monthly Engine detects **Fragility** in the next week's expiry (W2), Mean Reversion trades for W1 are automatically downgraded or blocked to prevent "Pinning Failure" risk.
+> [!NOTE]
+> **Audit Trail**: Every rejected candidate is logged to `notes/nde_strategy_log.jsonl` with the rejection reason (e.g., "Delta 0.8 < 1.5"). This ensures full institutional traceability.
 
 ---
 
-## 🏛️ 5. Using the Monthly Engine
+## 🕵️ 5. Data Trust & Provenance
+Analytical integrity is anchored by our **Multi-Stage Metadata Resolution**:
+
+1. **PROVENANCE (HIGH)**: `spot_at_fetch` from the original sidecar JSON. This is the institutional anchor for historical audit.
+2. **STALE TRUSTED**: Metadata-anchored spot within a 24h window; preferred over live low-trust fallbacks when data drift is high.
+3. **LIVE (TRUSTED)**: Real-time spot from exchange data (strictly gated by High-Trust metadata source verification).
+4. **DEGRADED (WARNING)**: `df["strike"].mean()` fallback. Used ONLY when no other anchor is available; accompanied by a **red banner** alert.
+
+---
+
+## 🏛️ 6. Using the Monthly Engine
 Navigating to `NSE Monthly Engine` gives you a 3D view of market risk:
 
 ### 🧭 Surface State Summary
@@ -66,10 +82,9 @@ Visualizes the "Walls" across all expiries:
 
 ---
 
-## 🛠️ 6. Pro Tips for Execution
-1. **The Pro Toggle**: Switch to **Pro Mode (Per-Lot)** in the Monthly Engine to see GEX normalized by lot size. This lets you compare a Weekly expiry directly to a Monthly expiry fairly.
-2. **Migration Tracking**: In the Monthly Engine, look for `( +12 Cr )` next to GEX levels. This shows intraday positioning shifts. Positive migration at a support level is a high-conviction "Long" signal.
-3. **Execution Mode**: Use the sidebar in the Strategy Engine to toggle between **Defensive** (targets farther strikes) and **Aggressive** (targets tighter strikes).
+## 🛠️ 7. Maintenance & Operations
+- **🗑️ Cleanup**: Expired chains are automatically purged during **Headless Automation** runs. For manual operators, a "Cleanup Expired" button is available in the sidebar to prevent disk-thrashing.
+- **🧹 Cache**: Use "Clear Cache" only if data feels stuck; otherwise, the engine uses efficient session-scoped vector caching.
 
 ---
 **Institutional Grade | Lot-Invariant | Surface Aware**

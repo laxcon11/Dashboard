@@ -83,14 +83,26 @@ def convert_sensibull_csv(src: Path) -> str | None:
     # Normalise column names
     df.columns = [c.strip() for c in df.columns]
 
+    iv_mode = "UNKNOWN"
     out_rows = []
     for _, row in df.iterrows():
         strike = _safe_float(row.get("Strike"), default=None)
         if strike is None:
             continue
 
-        # IV in middle (single column in some CSVs, double in others)
-        iv_val = _safe_float(row.get("IV"), default=15.0)
+        # IV handling: prefer separate CE/PE IV columns, fall back to shared
+        ce_iv_val = _safe_float(row.get("Call IV"), default=None)
+        pe_iv_val = _safe_float(row.get("Put IV"), default=None)
+        shared_iv = _safe_float(row.get("IV"), default=15.0)
+        
+        if ce_iv_val is not None and pe_iv_val is not None:
+            iv_mode = "SEPARATE_CE_PE"
+            call_iv = ce_iv_val if ce_iv_val > 0 else shared_iv
+            put_iv = pe_iv_val if pe_iv_val > 0 else shared_iv
+        else:
+            iv_mode = "SHARED_IV"
+            call_iv = shared_iv
+            put_iv = shared_iv
         
         out_rows.append({
             # ── Core fields expected by parse_nse_option_chain_csv ──
@@ -98,12 +110,12 @@ def convert_sensibull_csv(src: Path) -> str | None:
 
             # Call side
             "OI":       _safe_float(row.get("Call OI")),
-            "IV":       iv_val,
+            "IV":       call_iv,
             "LTP":      _safe_float(row.get("Call LTP")),
 
             # Put side
             "OI.1":     _safe_float(row.get("Put OI")),
-            "IV.1":     iv_val,
+            "IV.1":     put_iv,
             "LTP.1":    _safe_float(row.get("Put LTP")),
 
             # ── Institutional Greeks (sensi_* override fields) ──
@@ -130,6 +142,21 @@ def convert_sensibull_csv(src: Path) -> str | None:
 
     out_df = pd.DataFrame(out_rows)
 
+    # Derive Spot at Fetch (Phase 42 Hardening)
+    # Spot = Call Intrinsic Value(Spot) + Strike (for ITM calls)
+    spot_at_fetch = None
+    if "Call Intrinsic Value(Spot)" in df.columns:
+        # Filter for rows where Intrinsic Value is > 0 to avoid OTM noise
+        itm_calls = df[df["Call Intrinsic Value(Spot)"].apply(_safe_float) > 0]
+        if not itm_calls.empty:
+            # Take the median to avoid single-row anomalies
+            spots = itm_calls["Call Intrinsic Value(Spot)"].apply(_safe_float) + itm_calls["Strike"].apply(_safe_float)
+            spot_at_fetch = float(spots.median())
+    
+    if spot_at_fetch is None:
+        # Fallback to ATM strike median if column missing
+        spot_at_fetch = float(out_df["STRIKE"].median())
+
     # Validate Data Quality (Density)
     quality_score = 1.0
     validation_flags = []
@@ -148,14 +175,39 @@ def convert_sensibull_csv(src: Path) -> str | None:
         validation_flags.append("NON_MONOTONIC_STRIKES")
         
     # IV Fidelity Check (Phase 42)
-    iv_vals = out_df["IV"].tolist()
+    iv_vals = out_df["IV"].tolist() + out_df["IV.1"].tolist()
     real_iv_count = sum(1 for v in iv_vals if v != 15.0 and v > 0)
     iv_is_synthetic = real_iv_count == 0
     if iv_is_synthetic:
         quality_score -= 0.2
         validation_flags.append("IV_SYNTHETIC")
 
+    # ATM Density Check: at least 3 strikes within ±2% of median must have non-zero Greeks
+    median_strike = out_df["STRIKE"].median()
+    atm_band = median_strike * 0.02
+    atm_rows = out_df[(out_df["STRIKE"] >= median_strike - atm_band) & (out_df["STRIKE"] <= median_strike + atm_band)]
+    if len(atm_rows) > 0:
+        atm_greek_count = ((atm_rows["CE_GAMMA"].abs() > 0) | (atm_rows["PE_GAMMA"].abs() > 0)).sum()
+        if atm_greek_count < 3:
+            quality_score -= 0.3
+            validation_flags.append("ATM_GREEK_SPARSE")
+
+    # Delta Symmetry Check: CE deltas should roughly mirror PE deltas (sum ≈ -1 per strike near ATM)
+    if len(atm_rows) > 0 and atm_rows["CE_DELTA"].abs().sum() > 0:
+        ce_delta_sum = atm_rows["CE_DELTA"].sum()
+        pe_delta_sum = atm_rows["PE_DELTA"].sum()
+        if abs(ce_delta_sum + pe_delta_sum) > len(atm_rows) * 0.3:
+            validation_flags.append("DELTA_ASYMMETRY")
+
+    # Derive integrity status
     if quality_score < 0.5:
+        integrity_status = "FAIL"
+    elif validation_flags:
+        integrity_status = "WARN"
+    else:
+        integrity_status = "PASS"
+
+    if integrity_status == "FAIL":
         print(f"❌ Failed Quality Check {src.name}: {validation_flags}")
         shutil.move(str(src), str(QUARANTINE_DIR / src.name))
         return None
@@ -173,11 +225,14 @@ def convert_sensibull_csv(src: Path) -> str | None:
         "expiry":       expiry_str,
         "source_file":  src.name,
         "source_mode":  "SENSIBULL_VENDOR_GREEKS" if "MISSING_VENDOR_GREEKS" not in validation_flags else "FAILED_VENDOR_FALLBACK",
+        "iv_mode":      iv_mode,
         "strikes":      len(out_rows),
         "data_quality_score": quality_score,
+        "integrity_status": integrity_status,
         "iv_is_synthetic": iv_is_synthetic,
         "validation_flags": validation_flags,
-        "engine_version": "1.3"
+        "spot_at_fetch": spot_at_fetch,
+        "engine_version": "1.4"
     }
     meta_path = OPTION_CHAIN_DIR / out_name.replace(".csv", "_meta.json")
     meta_path.write_text(json.dumps(meta, indent=2))

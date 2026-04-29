@@ -12,7 +12,7 @@ def calculate_z_score_sentiment(series: pd.Series, lookback: int = 180, inverse:
     Z = (x - mu) / sigma
     """
     s = series.dropna()
-    if len(s) < 20:
+    if len(s) < 6:
         return 0.0, "Neutral"
         
     tail = s.tail(lookback)

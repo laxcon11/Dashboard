@@ -39,6 +39,7 @@ def _from_eod_snapshot(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     
     return {
         "regime_label": regime if regime else "Unknown",
+        "current_regime": regime if regime else "Unknown",
         "confidence": None,
         "final_score": v1_score,
         "pillar_scores": macro_ctx.get("pillars", {}),

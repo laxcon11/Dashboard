@@ -110,6 +110,7 @@ if main_regime_result.get("is_pending"):
 with st.expander("📊 Detailed Pillar Performance", expanded=True):
     p1, p2, p3, p4 = _responsive_cols(4)
     with p1:
+        # Metrics now show the raw Pillar score (from -1.0 to +1.0)
         st.metric("Global Pillar", f"{pillar_scores['Global']:+.2f}")
         st.caption(f"Weight: {blend.get('global_weight', 0.40):.0%}")
     with p2:
@@ -188,6 +189,7 @@ render_key_observations(observations, max_items=8)
 # Publish canonical regime payload for cross-page consistency.
 regime_payload = {
     "regime_label": regime_label,
+    "current_regime": regime_label,
     "confidence": round(float(confidence), 4),
     "final_score": round(float(final_score), 4),
     "pillar_scores": pillar_scores,
@@ -218,8 +220,12 @@ render_regime_timeline_strip(timeline_rows, key="institutional_regime_timeline_9
 if view_mode == "Detail":
     with st.expander("🧮 Pillar Scoring Formulas", expanded=True):
         st.markdown("### Weighted Blending Formula")
-        st.latex(r"Score_{Final} = G \cdot 0.40 + GR \cdot 0.20 + L \cdot 0.25 + R \cdot 0.15")
-        st.caption("G: Global, GR: India Growth, L: Liquidity, R: Market Risk")
+        w_g = blend.get("global_weight", 0.40)
+        w_gr = blend.get("macro_weight", 0.20)
+        w_l = blend.get("liquidity_weight", 0.25)
+        w_r = blend.get("risk_weight", 0.15)
+        st.latex(rf"Score_{{Final}} = G_{{raw}} \cdot {w_g:.2f} + GR_{{raw}} \cdot {w_gr:.2f} + L_{{raw}} \cdot {w_l:.2f} + R_{{raw}} \cdot {w_r:.2f}")
+        st.caption("G: Global, GR: India Growth, L: Liquidity, R: Market Risk (Raw scores from -1 to +1)")
         
         st.markdown("---")
         for p, s in pillar_scores.items():

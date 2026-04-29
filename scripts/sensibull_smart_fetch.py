@@ -12,6 +12,7 @@ import sys
 import time
 import shutil
 import subprocess
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -21,27 +22,46 @@ TARGET = PROJECT_ROOT / "data" / "option_chain"
 CHROME_PROFILE = Path.home() / "Library/Application Support/Google/Chrome"
 
 # =========================================================
-# EXPIRY CALCULATOR
+# DYNAMIC HOLIDAY MANAGEMENT (Phase 3 Resilience)
 # =========================================================
-# Known NSE trading holidays (add more as needed)
-NSE_HOLIDAYS_2026 = {
-    datetime(2026, 1, 26),  # Republic Day
-    datetime(2026, 3, 25),  # Holi
-    datetime(2026, 4, 14),  # Dr. Ambedkar Jayanti / Good Friday
-    datetime(2026, 4, 2),   # Good Friday
-    datetime(2026, 5, 1),   # Maharashtra Day
-    datetime(2026, 8, 15),  # Independence Day
-    datetime(2026, 10, 2),  # Gandhi Jayanti
-    datetime(2026, 11, 4),  # Diwali Laxmi Pujan
-    datetime(2026, 11, 5),  # Diwali Balipratipada
-    datetime(2026, 12, 25), # Christmas
-}
+
+def load_trading_holidays() -> set[datetime]:
+    """Loads holidays from centralized JSON config with internal fallback."""
+    hol_file = PROJECT_ROOT / "data" / "config" / "trading_holidays.json"
+    holidays = set()
+    
+    # Internal Fallback for 2026 (Safety)
+    fallback_2026 = [
+        "2026-01-26", "2026-03-25", "2026-04-02", "2026-04-14",
+        "2026-05-01", "2026-08-15", "2026-10-02", "2026-11-04",
+        "2026-11-05", "2026-12-25"
+    ]
+    
+    try:
+        if hol_file.exists():
+            data = json.loads(hol_file.read_text())
+            for year, months in data.items():
+                for month, days in months.items():
+                    for day in days.keys():
+                        holidays.add(datetime(int(year), int(month), int(day)))
+        else:
+            # use fallback if file is missing
+            for d in fallback_2026: holidays.add(datetime.strptime(d, "%Y-%m-%d"))
+    except Exception as e:
+        print(f"Warning: Holiday loader error {e}, using minimal fallback.")
+        for d in fallback_2026: holidays.add(datetime.strptime(d, "%Y-%m-%d"))
+        
+    return holidays
+
+# Cache global holidays for current execution
+TRADING_HOLIDAYS = load_trading_holidays()
 
 def _is_trading_day(d: datetime) -> bool:
     """Returns True if the date is a weekday and not an NSE holiday."""
     if d.weekday() >= 5:  # Saturday or Sunday
         return False
-    return d.replace(hour=0, minute=0, second=0, microsecond=0) not in NSE_HOLIDAYS_2026
+    return d.replace(hour=0, minute=0, second=0, microsecond=0) in TRADING_HOLIDAYS
+
 
 def _adjust_for_holiday(d: datetime) -> datetime:
     """If expiry date is a holiday, roll back to the previous trading day."""

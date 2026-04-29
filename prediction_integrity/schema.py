@@ -22,6 +22,8 @@ class PredictionRecord:
     pred_score_range_low: float
     pred_score_range_high: float
     pred_score_mid: float
+    macro_score: float
+    liquidity_score: float
     confidence: str
     model_version: str
     input_signature: str
@@ -33,7 +35,10 @@ class OutcomeRecord:
     prediction_id: str
     evaluated_at: str
     actual_regime: str
+    predicted_regime: str
     actual_score: float
+    prob_actual: float
+    edge: float
     brier_score: float
     log_loss: float
     score_mae: float
@@ -50,13 +55,31 @@ def canonical_date(value: Any) -> str:
 
 
 def canonical_regime(value: str) -> str:
-    v = str(value or "").upper().strip().replace(" ", "_")
-    if "RISK" in v and "ON" in v:
-        return "RISK_ON"
-    if "RISK" in v and "OFF" in v:
-        return "CRISIS"
-    if v in REGIMES:
-        return v
+    """Map raw regime labels to canonical regime classes."""
+    v = str(value or "")
+
+    # remove emoji and non-ascii characters
+    clean = "".join(c for c in v if c.isascii())
+    clean = clean.upper().strip().replace(" ", "_")
+
+    # explicit alias mapping
+    REGIME_ALIASES = {
+        "NEUTRAL": "SELECTIVE",
+        "BULLISH": "RISK_ON",
+        "RISK_ON": "RISK_ON",
+        "BEARISH": "DEFENSIVE",
+        "RISK_OFF": "DEFENSIVE",
+        "PANIC": "CRISIS",
+        "CRISIS": "CRISIS",
+    }
+
+    for alias, mapped in REGIME_ALIASES.items():
+        if alias in clean:
+            return mapped
+
+    if clean in REGIMES:
+        return clean
+
     return "SELECTIVE"
 
 

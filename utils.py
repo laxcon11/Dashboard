@@ -34,6 +34,7 @@ def _render_grouped_sidebar_nav() -> None:
             ("Macro & Regime Decision", "pages/3_Macro_Risk.py"),
             ("Nifty Strategy Engine", "pages/17_NIFTY_Strategy_Engine.py"),
             ("NSE Monthly Engine", "pages/18_NSE_Monthly_Engine.py"),
+            ("Arbitrage Scanner", "pages/19_Arbitrage_Scanner.py"),
         ],
         "Market": [
             ("Global Markets", "pages/1_Global_Markets.py"),

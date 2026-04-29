@@ -30,6 +30,16 @@ def sort_expiries(expiries: list[str]) -> list[str]:
     def try_parse(x):
         try:
             return datetime.strptime(x, "%d-%b-%Y")
-        except:
+        except (ValueError, IndexError):
             return datetime.max
     return sorted(expiries, key=try_parse)
+
+def get_dte_from_string(expiry_date: str) -> int:
+    """Calculates days from today to the given DD-Mon-YYYY expiry."""
+    try:
+        dt = datetime.strptime(expiry_date, "%d-%b-%Y")
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        delta = (dt - today).days
+        return max(0, delta)
+    except (ValueError, TypeError):
+        return 7 # Default to weekly fallback if parsing fails

@@ -133,6 +133,26 @@ def process_all_downloads(extra_dir: Path = None) -> int:
                 continue
                 
             out_df = pd.DataFrame(out_rows)
+
+            # Derive Spot at Fetch (Phase 42 Hardening)
+            spot_at_fetch = None
+            intrinsic_col = "call intrinsic value(spot)"
+            if intrinsic_col in cols:
+                col_idx = cols.index(intrinsic_col)
+                # Filter for ITM calls
+                itm_spots = []
+                for _, row in df.iterrows():
+                    try:
+                        iv_val = float(str(row.iloc[col_idx]).replace(',', ''))
+                        strike_val = float(str(row.iloc[strike_idx]).replace(',', ''))
+                        if iv_val > 0:
+                            itm_spots.append(iv_val + strike_val)
+                    except: continue
+                if itm_spots:
+                    spot_at_fetch = float(np.median(itm_spots))
+            
+            if spot_at_fetch is None:
+                spot_at_fetch = float(out_df["STRIKE"].median())
             
             # Validate Data Quality
             quality_score = 1.0
@@ -150,15 +170,24 @@ def process_all_downloads(extra_dir: Path = None) -> int:
                 quality_score -= 1.0
                 validation_flags.append("NON_MONOTONIC_STRIKES")
                 
-            # ATM structural density check
-            atm_idx = out_df["OI.1"].idxmax() if "OI.1" in out_df else 0
-            atm_slice = out_df.iloc[max(0, atm_idx-3) : min(len(out_df), atm_idx+4)]
-            if len(atm_slice) > 0 and atm_slice["CE_GAMMA"].sum() == 0 and atm_slice["PE_GAMMA"].sum() == 0:
-                 quality_score -= 0.5
-                 validation_flags.append("ATM_GREEK_COLLAPSE")
+            # ATM structural density check (enhanced: ±2% band)
+            median_strike = out_df["STRIKE"].median()
+            atm_band = median_strike * 0.02
+            atm_rows = out_df[(out_df["STRIKE"] >= median_strike - atm_band) & (out_df["STRIKE"] <= median_strike + atm_band)]
+            if len(atm_rows) > 0:
+                atm_greek_count = ((atm_rows["CE_GAMMA"].abs() > 0) | (atm_rows["PE_GAMMA"].abs() > 0)).sum()
+                if atm_greek_count < 3:
+                    quality_score -= 0.3
+                    validation_flags.append("ATM_GREEK_SPARSE")
+
+            # Delta Symmetry Check
+            if len(atm_rows) > 0 and atm_rows["CE_DELTA"].abs().sum() > 0:
+                ce_delta_sum = atm_rows["CE_DELTA"].sum()
+                pe_delta_sum = atm_rows["PE_DELTA"].sum()
+                if abs(ce_delta_sum + pe_delta_sum) > len(atm_rows) * 0.3:
+                    validation_flags.append("DELTA_ASYMMETRY")
 
             # IV Fidelity Check (Phase 42: separate trust dimension)
-            # Check if any real IV was extracted vs all rows falling back to 15.0
             iv_vals = out_df["IV"].tolist() + out_df["IV.1"].tolist()
             real_iv_count = sum(1 for v in iv_vals if v != 15.0 and v > 0)
             iv_is_synthetic = real_iv_count == 0
@@ -166,7 +195,15 @@ def process_all_downloads(extra_dir: Path = None) -> int:
                 quality_score -= 0.2
                 validation_flags.append("IV_SYNTHETIC")
 
+            # Derive integrity status
             if quality_score < 0.5:
+                integrity_status = "FAIL"
+            elif validation_flags:
+                integrity_status = "WARN"
+            else:
+                integrity_status = "PASS"
+
+            if integrity_status == "FAIL":
                 print(f"❌ Failed Quality Check {f.name}: {validation_flags}")
                 shutil.move(str(f), str(QUARANTINE_DIR / f.name))
                 continue
@@ -205,9 +242,11 @@ def process_all_downloads(extra_dir: Path = None) -> int:
                 "source_mode": "SENSIBULL_VENDOR_GREEKS" if "MISSING_VENDOR_GREEKS" not in validation_flags else "FAILED_VENDOR_FALLBACK",
                 "strikes": len(out_rows),
                 "data_quality_score": quality_score,
+                "integrity_status": integrity_status,
                 "iv_is_synthetic": iv_is_synthetic,
                 "validation_flags": validation_flags,
-                "engine_version": "1.3"
+                "spot_at_fetch": spot_at_fetch,
+                "engine_version": "1.4"
             }
             meta_path = TARGET / out_path.name.replace(".csv", "_meta.json")
             meta_path.write_text(json.dumps(meta, indent=2))

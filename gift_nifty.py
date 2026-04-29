@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -25,6 +26,7 @@ from config import (
 
 
 IST = ZoneInfo("Asia/Kolkata")
+logger = logging.getLogger(__name__)
 
 
 def now_ist() -> datetime:
@@ -96,7 +98,8 @@ def _from_local_snapshot() -> Optional[dict]:
             payload["_source"] = f"local:{p.name}"
             return payload
         return None
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to read local GIFT snapshot %s: %s", p, exc)
         return None
 
 
@@ -116,7 +119,8 @@ def _from_api() -> Optional[dict]:
             payload["_source"] = "api"
             return payload
         return None
-    except Exception:
+    except Exception as exc:
+        logger.debug("GIFT API fetch failed for %s: %s", GIFT_NIFTY_API_URL, exc)
         return None
 
 
@@ -168,7 +172,8 @@ def _from_moneycontrol_scrape() -> Optional[dict]:
             "_source": "moneycontrol_scrape",
             "_unverified": True,
         }
-    except Exception:
+    except Exception as exc:
+        logger.debug("Moneycontrol GIFT scrape failed: %s", exc)
         return None
 
 
@@ -269,7 +274,8 @@ def _from_groww_scrape() -> Optional[dict]:
                 "_unverified": True,
             }
         return None
-    except Exception:
+    except Exception as exc:
+        logger.debug("Groww GIFT scrape failed: %s", exc)
         return None
 
 

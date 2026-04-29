@@ -15,7 +15,7 @@ def test_walls():
         print("FAILURE: DataFrame is empty")
         return
         
-    call_wall, put_wall = calculate_option_walls(df)
+    call_wall, put_wall, sec_c, sec_p = calculate_option_walls(df)
     print(f"Extracted Expiry: {expiry}")
     print(f"Detected Call Wall (Max OI): {call_wall}")
     print(f"Detected Put Wall (Max OI): {put_wall}")

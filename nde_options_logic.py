@@ -34,7 +34,7 @@ def _parse_nse_date(date_str):
             return None
         year = int(parts[2])
         return datetime(year, month, day)
-    except:
+    except Exception:
         return None
 
 # ==================== PROCESS CONFIG ====================
@@ -50,24 +50,49 @@ DIVIDEND_YIELD = NSE_Config.DIVIDEND_YIELD
 OPTION_CHAIN_DIR = Path("data/option_chain")
 OPTION_CHAIN_DIR.mkdir(parents=True, exist_ok=True)
 
+def calculate_synthetic_forward(df: pd.DataFrame, spot: float) -> float:
+    """
+    Refines ATM anchoring using Put-Call Parity: F = Strike + Call - Put.
+    Removes cost-of-carry and dividend skew for cleaner Greeks.
+    """
+    if df.empty: return spot
+    
+    # 1. Find the strike nearest to spot
+    df_copy = df.copy()
+    df_copy["dist"] = (df_copy["strike"] - spot).abs()
+    nearest = df_copy.sort_values("dist").iloc[0]["strike"]
+    
+    # 2. Extract C and P for that strike
+    strike_data = df[df["strike"] == nearest]
+    c_price = strike_data[strike_data["type"] == "call"]["ltp"].mean()
+    p_price = strike_data[strike_data["type"] == "put"]["ltp"].mean()
+    
+    if pd.isna(c_price) or pd.isna(p_price):
+        return spot # Fallback to spot
+        
+    synthetic_f = nearest + c_price - p_price
+    return float(round(synthetic_f, 2))
+
+
 EPS = 1e-8
 
-def format_institutional_metric(val: float, unit: str = "Cr") -> str:
+def format_institutional_metric(val: float, unit: str = "AUTO") -> str:
     """
     Standardizes raw engine values into human-readable institutional strings.
-    Phase 41: Assumes input val is in MILLION INR (Engine Native Unit).
+    Assumes input val is in MILLION INR (Engine Native Unit).
     10 Million = 1 Crore (Cr).
     """
-    if unit == "Cr":
+    sign = "-" if val < 0 else ""
+    abs_val = abs(val)
+    
+    if unit == "Cr" or (unit == "AUTO" and abs_val >= 1.0):
         # 1 Cr = 10 Million INR. 
-        # Since 'val' is already in Millions, we divide by 10.0.
-        scaled = val / 10.0
-        return f"{scaled:,.1f} Cr"
-    elif unit == "M":
-        # Since 'val' is already in Millions, we divide by 1.0.
-        scaled = val / 1.0
-        return f"{scaled:,.1f} M"
-    return f"{val:,.0f}"
+        scaled = abs_val / 10.0
+        return f"{sign}{scaled:,.2f} Cr"
+    elif unit == "M" or (unit == "AUTO" and abs_val < 1.0):
+        return f"{sign}{abs_val:,.2f} M"
+    
+    return f"{sign}{abs_val:,.0f}"
 
 def safe_iv(iv):
     return np.maximum(iv, 0.01)
@@ -79,9 +104,22 @@ def safe_T(T):
     return np.maximum(T, 1/365.0)
 
 def compute_atm_iv(df: pd.DataFrame, spot: float) -> float:
-    """3-strike inverse-distance weighted ATM IV (v3 Robust)"""
+    """3-strike inverse-distance weighted ATM IV (v5 Skew-Aware)"""
     if df is None or df.empty: return 15.0
-    df_grouped = df.groupby("strike", as_index=False)["iv"].mean()
+    
+    # Market Convention: Use Put IV for strikes <= spot, Call IV for strikes > spot
+    # This prevents skew from being understated by averaging OTM vs ITM components
+    df_skew = df.copy()
+    mask_put = (df_skew["strike"] <= spot) & (df_skew["type"] == "put")
+    mask_call = (df_skew["strike"] > spot) & (df_skew["type"] == "call")
+    
+    df_convention = df_skew[mask_put | mask_call].copy()
+    if df_convention.empty:
+        # Fallback to simple mean if convention filter fails
+        df_grouped = df.groupby("strike", as_index=False)["iv"].mean()
+    else:
+        df_grouped = df_convention.groupby("strike", as_index=False)["iv"].mean()
+        
     df_grouped["dist"] = (df_grouped["strike"] - spot).abs()
     # Get 3 nearest unique strikes
     atm = df_grouped.sort_values("dist").head(3)
@@ -91,6 +129,24 @@ def compute_atm_iv(df: pd.DataFrame, spot: float) -> float:
     weights = 1.0 / (atm["dist"] + 1.0)
     avg_iv = np.average(atm["iv"], weights=weights)
     return float(avg_iv)
+
+def calculate_expected_move(spot: float, iv: float, dte: int) -> dict:
+    """
+    Computes 1-Standard Deviation Expected Move (1SD).
+    Formula: Spot * (IV/100) * sqrt(DTE/365)
+    """
+    if dte <= 0: dte = 1 # Minimum 1 day for floor
+    
+    # 1SD Calculation
+    move_pct = (iv / 100.0) * np.sqrt(dte / 365.0)
+    move_points = spot * move_pct
+    
+    return {
+        "points": float(round(move_points, 2)),
+        "upper": float(round(spot + move_points, 2)),
+        "lower": float(round(spot - move_points, 2)),
+        "percentage": float(round(move_pct * 100, 2))
+    }
 
 def compute_iv_rank(current_iv: float, history: pd.Series, label_prefix: str = "") -> dict:
     """Compute IV Rank logic (Invariant to lot size)"""
@@ -144,7 +200,6 @@ def calculate_dte_fractional(expiry_str: str) -> float:
     diff = (exp_date - now).total_seconds() / 86400.0
     return max(0.01, diff)
 
-import re
 
 # ==================== CONFIGURATION ====================
 STRIKE_INTEL_CONFIG = {
@@ -268,7 +323,7 @@ def calculate_greeks(S, K, T, r, iv, q=0.0, option_type="call"):
         "charm": float(charm)
     }
 
-def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK_FREE_RATE, q: float = DIVIDEND_YIELD):
+def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK_FREE_RATE, q: float = DIVIDEND_YIELD, tv_ema_fast: float = None, tv_ema_slow: float = None, atr: float = 250.0):
     """
     Compute aggregate GEX, VEX, CEX in Million INR.
     v3: Institutional stability + Normalized metrics (lot-invariant logic).
@@ -277,8 +332,12 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
         return {
             "total_gex": 0.0, "total_gex_abs": 0.0, "total_vega": 0.0, 
             "total_theta": 0.0, "total_delta": 0.0, "total_volume": 0.0, "total_oi_chng": 0.0,
+            "gex_norm": 0.0, "gex_tw_norm": 0.0, "vega_norm": 0.0, "theta_norm": 0.0,
+            "vex_norm": 0.0, "vex_tw_norm": 0.0, "cex_norm": 0.0, "cex_tw_norm": 0.0,
             "tv_ratio": 0.0, "tv_label": "N/A", "flow_regime_label": "Unknown",
-            "intelligence": {}, "raw_exposures": pd.DataFrame()
+            "gamma_flip_level": 0.0, "gamma_regime": "NEUTRAL",
+            "vanna_bias": "Neutral", "charm_flow": "Neutral",
+            "intelligence": {}, "institutional_iq": {}, "raw_exposures": pd.DataFrame()
         }
         
     # Phase 41: Vectorized Greeks computation with stability guards
@@ -324,19 +383,22 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
     charm = np.where(is_call, charm_call, charm_put)
     
     # ── Exposure calculations ────────────────────────────────────────────────
-    # GEX: gamma_per_point × OI_contracts × LOT_shares × spot
+    # GEX: gamma_per_point × OI_contracts × spot
     #   = total INR delta change per 1-point NIFTY move (the correct index GEX unit)
     #   Do NOT use spot² — gamma is already per-index-point, not per-dollar.
-    gex_signed   = gamma * oi_arr * LOT * spot * flow_sign   # +calls, -puts
-    gex_magnitude= gamma * oi_arr * LOT * spot               # always ≥ 0
-
-    # DEX: delta × OI × LOT  (delta is dimensionless 0-1; ×LOT gives shares equivalent)
-    # Reporting in ₹-crore: ×spot / 1e7 later during aggregation
-    dex      = delta * oi_arr * LOT * spot   # INR notional delta exposure
-    vega_exp = vega  * oi_arr * LOT          # INR vega per 1% IV move
-    tex      = theta * oi_arr * LOT          # INR theta per day
-    cex      = charm * oi_arr * LOT
-    vanna_exp= vanna * oi_arr * LOT * flow_sign
+    # ── Exposure calculations (Phase 46: Standardized Unit Correction) ────────
+    # OI from Sensibull/NSE is in SHARES (Units). 
+    # Aggregate Notional = Greek * OI * [Spot]
+    # We NO LONGER multiply by LOT here to avoid 65x over-calculation.
+    
+    gex_signed   = gamma * oi_arr * spot * flow_sign   # INR notional gex per point
+    gex_magnitude= gamma * oi_arr * spot
+    
+    dex      = delta * oi_arr * spot   # INR notional delta exposure
+    vega_exp = vega  * oi_arr          # INR vega per 1% IV move
+    tex      = theta * oi_arr          # INR theta per day
+    cex      = charm * oi_arr
+    vanna_exp= vanna * oi_arr * flow_sign
 
     df_exp = pd.DataFrame({
         "strike": K_arr, "type": types, "gamma": gamma, "vanna": vanna,
@@ -363,16 +425,16 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
         if target_col in df.columns:
             df_exp[g_col] = df[target_col].values.astype(float)
             if g_col == "gamma":
-                df_exp["gex_magnitude"] = df_exp[g_col] * df_exp["oi"] * LOT * spot
+                df_exp["gex_magnitude"] = df_exp[g_col] * df_exp["oi"] * spot
                 df_exp["gex_signed"]    = df_exp["gex_magnitude"] * flow_sign
                 df_exp["gex_net"]       = df_exp["gex_signed"]
                 df_exp["gex"]           = df_exp["gex_signed"]
             elif g_col == "vega":
-                df_exp["vega_exp"] = df_exp[g_col] * df_exp["oi"] * LOT
+                df_exp["vega_exp"] = df_exp[g_col] * df_exp["oi"]
             elif g_col == "theta":
-                df_exp["tex"] = df_exp[g_col] * df_exp["oi"] * LOT
+                df_exp["tex"] = df_exp[g_col] * df_exp["oi"]
             elif g_col == "delta":
-                df_exp["dex"] = df_exp[g_col] * df_exp["oi"] * LOT * spot
+                df_exp["dex"] = df_exp[g_col] * df_exp["oi"] * spot
 
     # ── Aggregate Totals (Millions of INR) ───────────────────────────────────
     MILLION = 1_000_000.0   # 1 Million INR
@@ -387,42 +449,117 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
     total_delta = df_exp["dex"].sum() / MILLION
     total_vega  = df_exp["vega_exp"].sum() / MILLION
     total_theta = df_exp["tex"].sum() / MILLION
+    
+    # DEBUG: Analytical Trace
+    # print(f"[DEBUG] Total Theta: {total_theta:.2f}M, Total Vega: {total_vega:.2f}M")
     total_cex   = df_exp["cex"].sum() / MILLION
     total_vex   = df_exp["vanna_exp"].sum() / MILLION
 
-    # Lot-normalized (per-lot crore)
-    total_gex_norm   = total_gex_net  / LOT
-    total_vega_norm  = total_vega     / LOT
-    total_theta_norm = total_theta    / LOT
-    total_vex_norm   = total_vex      / LOT
-    total_cex_norm   = total_cex      / LOT
+    # V3 (Phase 3 Audit): Duration Weighting (Analytical Depth)
+    # T is in years. 1/sqrt(T) scaling for pinning pressure normalization.
+    t_years = max(df_exp["t_days"].iloc[0] if "t_days" in df_exp.columns else 0.05, 0.02) / 365.0
+    time_weight = 1.0 / (math.sqrt(t_years) + 1e-9)
+    # Scaled to a 10-day baseline for readability (arbitrary but consistent denominator)
+    baseline_wt = math.sqrt(10.0 / 365.0)
+    final_wt = time_weight * baseline_wt
+
+    # Lot-normalized (Phase 46 Recovery: Restore Aggregate Intensity)
+    # The strategy thresholds (25.0, 3.0, etc.) are calibrated to the AGGREGATE millions 
+    # of the whole chain after removing the lot multiplier.
+    total_gex_norm   = total_gex_net
+    total_vega_norm  = total_vega
+    total_theta_norm = total_theta
+    total_vex_norm   = total_vex
+    total_cex_norm   = total_cex
+
+    # Time-Weighted Normalized Metrics (Analytical Depth)
+    # Represents "Current Pinning Gravity"
+    gex_tw_norm = total_gex_norm * final_wt
+    vex_tw_norm = total_vex_norm * final_wt
+    cex_tw_norm = total_cex_norm * final_wt
 
     # Aggregate Volume & OI Change (Phase 42: Institutional Flow)
     total_volume = df_exp["volume"].sum() if "volume" in df_exp.columns else 0.0
     total_oi_chng = df_exp["oi_chng"].sum() if "oi_chng" in df_exp.columns else 0.0
+
+    # Gamma Flip Level Identification (Phase 5.6: Adaptive Institutional Model)
+    # 1. Local Flip (Execution Pivot): Zero-crossing of Net GEX per strike
+    # 2. Global Bias (Regime Context): Cumulative total of the whole chain
     
-    # Normalized for regime detection
-    vol_oi_ratio = total_volume / max(df_exp["oi"].sum(), 1.0)
-    oi_chng_pct = total_oi_chng / max(df_exp["oi"].sum(), 1.0)
-
-
-    # Gamma Flip Level Identification
-    # Cross-over point of cumulative NET GEX
-    df_sorted = df_exp.groupby("strike")["gex_net"].sum().sort_index().reset_index()
-    df_sorted["cum_gex_net"] = df_sorted["gex_net"].cumsum()
+    df_net = df_exp.groupby("strike").apply(
+        lambda x: x[x["type"] == "call"]["gex_signed"].sum() + x[x["type"] == "put"]["gex_signed"].sum(),
+        include_groups=False
+    ).sort_index().reset_index()
+    df_net.columns = ["strike", "net_gex"]
+    
+    # Adaptive Proximity Window (Phase 5.6: f(IV, ATR))
+    # We dynamically scale the search window based on the IV regime.
+    # Higher IV -> tighter window (focus on immediate hedging), Lower IV -> wider window.
+    iv_baseline = 15.0
+    # Use 15% as neutral baseline. Note: current_iv would ideally come from a global state.
+    # We assume a default of 1.0 multiplier if external state is unavailable.
+    iv_factor = 1.0 
+    
+    # Window = 2.5x ATR adjusted by IV factor (range 1.8x to 3.2x)
+    window_multiplier = 2.5 * iv_factor
+    _atr = atr if atr > 0 else 250.0
+    window_min = spot - (window_multiplier * _atr)
+    window_max = spot + (window_multiplier * _atr)
     
     flip_level = 0.0
-    # Find where it crosses zero
-    for i in range(len(df_sorted)-1):
-        if (df_sorted.iloc[i]["cum_gex_net"] * df_sorted.iloc[i+1]["cum_gex_net"]) < 0:
-            flip_level = df_sorted.iloc[i]["strike"]
-            break
+    flip_strength_norm = 0.0 
+    
+    # Relative Magnitude Guard (2% of total Absolute GEX)
+    rel_mag_threshold = total_gex_abs * 0.02
+    
+    crossovers = []
+    for i in range(len(df_net)-1):
+        x0, y0 = df_net.iloc[i]["strike"], df_net.iloc[i]["net_gex"]
+        x1, y1 = df_net.iloc[i+1]["strike"], df_net.iloc[i+1]["net_gex"]
+        
+        if x0 < window_min or x0 > window_max: continue
             
+        if (y0 * y1) < 0:
+            cross = x0 + (-y0) * (x1 - x0) / (y1 - y0 + 1e-9)
+            
+            # Magnitude Guard (Relative to Chain Volume)
+            mag_y0 = df_exp[df_exp["strike"] == x0]["gex_magnitude"].sum() / MILLION
+            mag_y1 = df_exp[df_exp["strike"] == x1]["gex_magnitude"].sum() / MILLION
+            
+            if (mag_y0 + mag_y1) > rel_mag_threshold:
+                # Normalized Strength: slope / total_gex_abs
+                slope = (y1 - y0) / (x1 - x0 + 1e-9)
+                strength = abs(slope) / (total_gex_abs + EPS)
+                crossovers.append({"level": cross, "strength": strength})
+            
+    if crossovers:
+        best_flip = min(crossovers, key=lambda x: abs(x["level"] - spot))
+        flip_level = best_flip["level"]
+        flip_strength_norm = best_flip["strength"]
+    
+    if flip_level == 0.0 and not df_net.empty:
+        df_window = df_net[(df_net["strike"] >= window_min) & (df_net["strike"] <= window_max)]
+        if not df_window.empty:
+            idx = df_window["net_gex"].abs().idxmin()
+            flip_level = df_window.iloc[idx]["strike"]
+            flip_strength_norm = 0.01
+
+    # High-Fidelity Distance & Skew Metrics
+    dist_to_flip_atr = abs(spot - flip_level) / (_atr + EPS)
+    
+    total_call_gex = df_exp[df_exp["type"] == "call"]["gex_signed"].sum() / MILLION
+    total_put_gex  = df_exp[df_exp["type"] == "put"]["gex_signed"].sum() / MILLION
+    gex_skew = (total_call_gex - abs(total_put_gex)) / (total_gex_abs + EPS)
+
     # Vega/Theta Cluster Detection (Phase 29.2: Use pre-computed exposure columns)
-    def calculate_greek_clusters(df, greek_field, top_n=5):
+    def calculate_greek_clusters(df, greek_field, top_n=None):
         if df.empty:
             return []
         
+        # Adaptive Top N: Based on strike count (Dynamic Phase 5)
+        if top_n is None:
+            top_n = max(3, min(8, int(len(df) / 10)))
+            
         # Determine the correct exposure column mapping
         col_map = {"vega": "vega_exp", "theta": "tex", "vanna": "vanna_exp"}
         exp_col = col_map.get(greek_field, greek_field)
@@ -437,31 +574,53 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
     theta_clusters = calculate_greek_clusters(df_exp, "theta")
     intelligence = analyze_strike_intelligence(df_exp, spot)
 
+    # Phase 45: Institutional IQ Ingestion
+    max_pain = calculate_max_pain(df_exp)
+    pcr = calculate_pcr(df_exp)
+    v_profile = calculate_volume_profile(df_exp)
+    exp_move = calculate_straddle_expected_move(df_exp, spot)
+    c_wall, p_wall, sec_c, sec_p = calculate_option_walls(df_exp)
+    
+    # Near-ATM Analysis
+    band_half = 200 # +/- 200 points
+    atm_band_df = df_exp[(df_exp["strike"] >= spot - band_half) & (df_exp["strike"] <= spot + band_half)]
+    atm_oi_share = (atm_band_df["oi"].sum() / max(df_exp["oi"].sum(), 1.0)) * 100.0
+    
+    inst_iq = {
+        "max_pain": float(max_pain),
+        "pcr_oi": float(round(pcr["oi"], 3)),
+        "pcr_vol": float(round(pcr["vol"], 3)),
+        "poc": float(v_profile["poc"]) if v_profile["poc"] is not None else None,
+        "va_low": float(v_profile["va_low"]) if v_profile["va_low"] is not None else None,
+        "va_high": float(v_profile["va_high"]) if v_profile["va_high"] is not None else None,
+        "expected_move": exp_move,
+        "call_wall_sec": float(sec_c),
+        "put_wall_sec": float(sec_p),
+        "atm_oi_share": float(round(atm_oi_share, 2)),
+        "cvd_proxy": float(total_oi_chng),
+        "synthetic_forward": calculate_synthetic_forward(df_exp, spot)
+    }
+
     # Phase 37: Continuous Entry Gate (Theta/Vega Carry Ratio)
-    import math
     t_days = df_exp["t_days"].iloc[0] if "t_days" in df_exp.columns else 3.0
     
-    # TV Ratio Calibration (v3: Normalized units for safety)
-    vega_eff = max(total_vega, 1e-9)
-    tv_ratio = (abs(total_theta) / math.sqrt(t_days + 1)) / vega_eff
+    # TV Ratio Calibration (v3.5: Stabilized Denominator)
+    # Applied dampening to prevent runaway ratios in low-vega regimes.
+    vega_eff = max(total_vega, 1e-4) # Higher floor for calculation stability
+    tv_raw = (abs(total_theta) / math.sqrt(t_days + 1)) / vega_eff
+    
+    # TV Clipping (Phase 3 Hardening): Prevent state corruption while preserving audit fidelity
+    tv_ratio = min(tv_raw, 10.0) 
     
     # Risk 2: TV Regime Drift Dual Baseline (Fast 5 EWMA vs Slow 20 EWMA)
-    import json
-    from pathlib import Path
-    state_file = Path("notes/strategy_state.json")
-    tv_ema_fast = 1.0
-    tv_ema_slow = 1.0
-    if state_file.exists():
-        try:
-            sd = json.loads(state_file.read_text())
-            tv_ema_fast = float(sd.get("tv_ratio_ema_fast", tv_ratio) or 1.0)
-            tv_ema_slow = float(sd.get("tv_ratio_ema_slow", tv_ratio) or 1.0)
-        except: pass
+    # tv_ema_fast/slow are injected by caller (generate_engine_context) to avoid circular file I/O
+    _tv_ema_fast = tv_ema_fast if tv_ema_fast is not None else 1.0
+    _tv_ema_slow = tv_ema_slow if tv_ema_slow is not None else 1.0
             
     # v2: Absolute Safety Gating (Phase 42 Hardening)
-    tv_norm = tv_ratio / max(abs(tv_ema_slow), 0.1)
+    tv_norm = tv_ratio / max(abs(_tv_ema_slow), 0.1)
     tv_norm = min(tv_norm, 5.0)  
-    tv_regime_shift = abs(tv_ema_fast - tv_ema_slow)
+    tv_regime_shift = abs(_tv_ema_fast - _tv_ema_slow)
     
     # Absolute Gates (independent of EMA history)
     if tv_ratio >= 2.5:
@@ -493,21 +652,38 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
         "total_oi_chng": float(total_oi_chng),
         
         "gex_norm": float(round(total_gex_norm, 4)),
+        "gex_tw_norm": float(round(gex_tw_norm, 4)),
         "vega_norm": float(round(total_vega_norm, 4)),
         "theta_norm": float(round(total_theta_norm, 4)),
         "vex_norm": float(round(total_vex_norm, 4)),
+        "vex_tw_norm": float(round(vex_tw_norm, 4)),
         "cex_norm": float(round(total_cex_norm, 4)),
+        "cex_tw_norm": float(round(cex_tw_norm, 4)),
         
         "tv_ratio": float(round(tv_ratio, 4)),
         "tv_label": tv_label,
         "flow_regime_label": flow_regime,
         "gamma_flip_level": float(round(flip_level, 2)),
+        "gamma_flip_strength": float(round(flip_strength_norm, 4)),
+        "dist_to_flip_atr": float(round(dist_to_flip_atr, 2)),
+        "gex_skew": float(round(gex_skew, 3)),
         "gamma_regime": "LONG GAMMA (Supportive)" if total_gex_net > 0 else "SHORT GAMMA (Volatile)",
-        "vanna_bias": "Positive (Supportive)" if total_vex > 0 else "Negative (Destabilizing)",
-        "charm_flow": "Bullish Drift" if total_cex > 0 else "Bearish Pressure",
+        "vanna_bias": (
+            "Strong Bullish (Put-Writing Flow)" if total_vex > 500 else
+            "Mild Bullish (Supportive)" if total_vex > 0 else
+            "Mild Bearish (Headwind)" if total_vex > -500 else
+            "Strong Bearish (Destabilizing)"
+        ),
+        "charm_flow": (
+            "Strong Bullish Drift" if total_cex > 500 else
+            "Mild Bullish Drift" if total_cex > 0 else
+            "Mild Bearish Pressure" if total_cex > -500 else
+            "Strong Bearish Pressure"
+        ),
         "vega_clusters": vega_clusters,
         "theta_clusters": theta_clusters,
         "intelligence": intelligence,
+        "institutional_iq": inst_iq,
         "raw_exposures": df_exp
     }
 
@@ -534,14 +710,15 @@ def classify_flow_regime(df: pd.DataFrame, spot: float, total_vol: float, total_
     # Calculate ratio (weighted towards ATM for higher fidelity)
     ratio = atm_vol / max(atm_oi, 1.0)
     
+    # Pre-compute OI change for all tiers (prevents NameError in lower branches)
+    atm_oi_chng = atm_df["oi_chng"].sum() if "oi_chng" in atm_df.columns else 0.0
+    
     # 1. Extreme Churn Check (Ratio > 0.4)
     if ratio > 0.4:
         return "Institutional Churn"
         
     # 2. High Activity Buildup / Liquidation (Ratio > 0.25)
     if ratio > 0.25:
-        # Check if OI Change is also high (+ or -)
-        atm_oi_chng = atm_df["oi_chng"].sum() if "oi_chng" in atm_df.columns else 0.0
         if abs(atm_oi_chng) / max(atm_oi, 1.0) > 0.05:
             return "Active Accumulation" if atm_oi_chng > 0 else "Active Liquidation"
         return "Directional Engagement"
@@ -655,7 +832,7 @@ def select_optimal_strikes(df: pd.DataFrame, spot: float, flow_metrics: dict = N
     
     if work_df.empty:
         # Fallback 1: Return Wall Strikes
-        call_wall, put_wall = calculate_option_walls(df)
+        call_wall, put_wall, _, _ = calculate_option_walls(df)
         return {
             "put": {"strike": float(put_wall), "score": 0.0},
             "call": {"strike": float(call_wall), "score": 0.0}
@@ -701,7 +878,7 @@ def select_optimal_strikes(df: pd.DataFrame, spot: float, flow_metrics: dict = N
         
     # 4.5. MAX OI WALL BONUS (Phase 35)
     # Dealers heavily defend Max OI strikes (Call/Put Walls), granting them natural intrinsic resistance.
-    call_wall, put_wall = calculate_option_walls(df)
+    call_wall, put_wall, _, _ = calculate_option_walls(df)
     work_df.loc[work_df["strike"] == call_wall, "score"] += 1.5
     work_df.loc[work_df["strike"] == put_wall, "score"] += 1.5
 
@@ -712,7 +889,7 @@ def select_optimal_strikes(df: pd.DataFrame, spot: float, flow_metrics: dict = N
     res = {}
     if puts.empty or calls.empty:
         # Fallback 2: Mixed Fallback
-        call_wall, put_wall = calculate_option_walls(df)
+        call_wall, put_wall, _, _ = calculate_option_walls(df)
         if not puts.empty:
             res["put"] = {"strike": float(puts.iloc[0]["strike"]), "score": float(puts.iloc[0]["score"])}
         else:
@@ -794,26 +971,180 @@ def calculate_option_walls(df: pd.DataFrame) -> tuple[float, float]:
     """
     Find strikes with max OI. Robust case-insensitive comparison (Phase 29.2).
     """
-    if df.empty: return 0.0, 0.0
-    df_copy = df.copy()
-    df_copy["type_lower"] = df_copy["type"].astype(str).str.lower()
-    
-    call_df = df_copy[df_copy["type_lower"] == "call"]
-    put_df = df_copy[df_copy["type_lower"] == "put"]
+    if df.empty: return 0.0, 0.0, 0.0, 0.0
+    # Type is pre-normalized to lowercase in parse_nse_option_chain_csv
+    call_df = df[df["type"] == "call"]
+    put_df = df[df["type"] == "put"]
     
     call_wall = 0.0
+    put_wall = 0.0
     if not call_df.empty:
         # idxmax() returns the first index of the max value. 
         # Using .loc[idx] can return a series if indices are non-unique.
         full_row = call_df.loc[call_df["oi"].idxmax()]
         call_wall = full_row["strike"].iloc[0] if isinstance(full_row, pd.DataFrame) else full_row["strike"]
         
-    put_wall = 0.0
     if not put_df.empty:
         full_row = put_df.loc[put_df["oi"].idxmax()]
         put_wall = full_row["strike"].iloc[0] if isinstance(full_row, pd.DataFrame) else full_row["strike"]
         
-    return float(call_wall), float(put_wall)
+    # Phase 45: Secondary Wall Detection
+    call_sorted = call_df.sort_values("oi", ascending=False)
+    put_sorted = put_df.sort_values("oi", ascending=False)
+    
+    sec_call = call_sorted.iloc[1]["strike"] if len(call_sorted) > 1 else 0.0
+    sec_put = put_sorted.iloc[1]["strike"] if len(put_sorted) > 1 else 0.0
+
+    return float(call_wall), float(put_wall), float(sec_call), float(sec_put)
+
+def calculate_max_pain(df: pd.DataFrame) -> float:
+    """
+    Find the strike where option buyers' collective loss is minimized.
+    Loss(K) = sum(OI_call * max(0, K_exp - K_strike)) + sum(OI_put * max(0, K_strike - K_exp))
+    """
+    if df.empty or "strike" not in df.columns:
+        return 0.0
+        
+    strikes = sorted(df["strike"].unique())
+    pain_map = {}
+    
+    # Pre-split (type already normalized to lowercase during parsing)
+    calls = df[df["type"] == "call"]
+    puts = df[df["type"] == "put"]
+    
+    # Max Pain = strike where option WRITERS pay out the LEAST
+    # (equivalently: the strike of maximum collective LOSS for option BUYERS)
+    for target in strikes:
+        # Writer payout on calls: for each call with strike < target, writers pay (target - strike) * OI
+        c_loss = (calls[calls["strike"] < target]["oi"] * (target - calls[calls["strike"] < target]["strike"])).sum()
+        # Writer payout on puts: for each put with strike > target, writers pay (strike - target) * OI
+        p_loss = (puts[puts["strike"] > target]["oi"] * (puts[puts["strike"] > target]["strike"] - target)).sum()
+        pain_map[target] = c_loss + p_loss
+        
+    if not pain_map:
+        return 0.0
+    # The strike where writers pay the LEAST is Max Pain.
+    # From a buyer's perspective, this is the strike of maximum collective loss.
+    # From an institutional perspective, this is the 'Pinning Target' where the market 
+    # is most likely to gravitate on expiry to minimize writer liability.
+    return min(pain_map, key=pain_map.get)
+
+def calculate_pcr(df: pd.DataFrame) -> dict:
+    """Returns PCR (OI) and PCR (Volume)."""
+    if df.empty:
+        return {"oi": 1.0, "vol": 1.0}
+    
+    # Type already normalized to lowercase during parsing
+    calls = df[df["type"] == "call"]
+    puts = df[df["type"] == "put"]
+    
+    c_oi = calls["oi"].sum()
+    p_oi = puts["oi"].sum()
+    c_vol = calls["volume"].sum() if "volume" in calls.columns else 1.0
+    p_vol = puts["volume"].sum() if "volume" in puts.columns else 1.0
+    
+    return {
+        "oi": p_oi / max(c_oi, 1.0),
+        "vol": p_vol / max(c_vol, 1.0)
+    }
+
+def calculate_volume_profile(df: pd.DataFrame) -> dict:
+    """
+    Computes POC (Point of Control) and Value Area (VA) - 70% Volume Range.
+    """
+    if df.empty or "volume" not in df.columns:
+        return {"poc": None, "va_low": None, "va_high": None}
+        
+    # Group by strike to combine Call + Put volume
+    v_profile = df.groupby("strike")["volume"].sum().sort_index()
+    if v_profile.empty or v_profile.sum() == 0:
+        return {"poc": None, "va_low": None, "va_high": None}
+        
+    total_vol = v_profile.sum()
+    target_va_vol = total_vol * 0.70
+    
+    poc = v_profile.idxmax()
+    
+    # Expand from POC to find VA
+    strikes = v_profile.index.tolist()
+    poc_idx = strikes.index(poc)
+    
+    low_idx = poc_idx
+    high_idx = poc_idx
+    current_va_vol = v_profile.iloc[poc_idx]
+    
+    while current_va_vol < target_va_vol:
+        can_go_lower = low_idx > 0
+        can_go_higher = high_idx < len(strikes) - 1
+        
+        if not can_go_lower and not can_go_higher:
+            break
+            
+        vol_lower = v_profile.iloc[low_idx - 1] if can_go_lower else -1
+        vol_higher = v_profile.iloc[high_idx + 1] if can_go_higher else -1
+        
+        if vol_lower >= vol_higher:
+            low_idx -= 1
+            current_va_vol += vol_lower
+        else:
+            high_idx += 1
+            current_va_vol += vol_higher
+            
+    return {
+        "poc": float(poc),
+        "va_low": float(strikes[low_idx]),
+        "va_high": float(strikes[high_idx])
+    }
+
+def calculate_straddle_expected_move(df: pd.DataFrame, spot: float) -> dict:
+    """
+    Range = Spot +/- (ATM Call + ATM Put).
+    """
+    if df.empty or spot <= 0:
+        return {"low": spot, "high": spot, "straddle": 0.0}
+        
+    # Find 2 nearest ATM strikes to interpolate between them
+    df_copy = df.copy()
+    df_copy["dist"] = (df_copy["strike"] - spot).abs()
+    atm_strikes = df_copy.sort_values("dist")["strike"].unique()[:2]
+    
+    if len(atm_strikes) == 0:
+        return {"low": spot, "high": spot, "straddle": 0.0}
+    
+    # Average straddle price across the 2 nearest strikes for accuracy
+    straddle_sum = 0.0
+    valid_count = 0
+    for atm_strike in atm_strikes:
+        atm_data = df[df["strike"] == atm_strike]
+        # Type already normalized to lowercase during parsing
+        call_ltp = atm_data[atm_data["type"] == "call"]["ltp"].mean()
+        put_ltp = atm_data[atm_data["type"] == "put"]["ltp"].mean()
+        s = (call_ltp if pd.notna(call_ltp) else 0) + (put_ltp if pd.notna(put_ltp) else 0)
+        if s > 0:
+            straddle_sum += s
+            valid_count += 1
+    
+    straddle = straddle_sum / max(valid_count, 1)
+    return {
+        "low": spot - straddle,
+        "high": spot + straddle,
+        "straddle": straddle
+    }
+
+def classify_option_buildup(strike_row):
+    """
+    Classifies strike activity using Price and OI change.
+    Note: Requires 'ltp_chng' which is currently derived as 0 if missing.
+    """
+    oi_chng = strike_row.get("oi_chng", 0)
+    # Using sensi_chng or similar if available, else 0
+    price_chng = strike_row.get("p_chng", 0) 
+    
+    if oi_chng > 0 and price_chng > 0: return "Long Build-up"
+    if oi_chng > 0 and price_chng < 0: return "Short Build-up"
+    if oi_chng < 0 and price_chng > 0: return "Short Covering"
+    if oi_chng < 0 and price_chng < 0: return "Long Unwinding"
+    return "Neutral"
 
 # ==================== CSV PARSING LAYER ====================
 
@@ -864,6 +1195,10 @@ def parse_nse_option_chain_csv(file_path: Path) -> tuple[pd.DataFrame, str]:
         # 3. Dynamic Column Identification
         cols = [str(c).upper().strip() for c in df.columns]
         
+        # Cleanup column names (whitespaces/caps)
+        cols = [str(c).strip().upper() for c in df.columns]
+        df.columns = cols 
+
         # Find Strike column
         strike_col_idx = -1
         for i, c in enumerate(cols):
@@ -907,6 +1242,12 @@ def parse_nse_option_chain_csv(file_path: Path) -> tuple[pd.DataFrame, str]:
             for idx in ltp_indices:
                 if idx < strike_col_idx: ce_ltp_idx = idx
                 if idx > strike_col_idx: pe_ltp_idx = idx
+        
+        # High-Fidelity Discovery (v1.4)
+        c_vol_idx = cols.index("CE_VOLUME") if "CE_VOLUME" in cols else -1
+        p_vol_idx = cols.index("PE_VOLUME") if "PE_VOLUME" in cols else -1
+        c_oic_idx = cols.index("CE_OI_CHNG") if "CE_OI_CHNG" in cols else -1
+        p_oic_idx = cols.index("PE_OI_CHNG") if "PE_OI_CHNG" in cols else -1
                 
         processed = []
         for _, row in df.iterrows():
@@ -935,23 +1276,38 @@ def parse_nse_option_chain_csv(file_path: Path) -> tuple[pd.DataFrame, str]:
                     p_ltp = float(str(row.iloc[pe_ltp_idx]).replace(",", "").replace("-", "0") or 0)
                 
                 # Capture Institutional Greeks if present
-                c_data = {"strike": strike, "type": "call", "oi": c_oi, "iv": c_iv, "ltp": c_ltp}
-                p_data = {"strike": strike, "type": "put", "oi": p_oi, "iv": p_iv, "ltp": p_ltp}
+                # Phase 32: Normalize type centered in parser for O(1) downstream access
+                c_data = {"strike": strike, "type": "call", "oi": c_oi, "iv": c_iv, "ltp": c_ltp, "volume": 0.0, "oi_chng": 0.0}
+                p_data = {"strike": strike, "type": "put", "oi": p_oi, "iv": p_iv, "ltp": p_ltp, "volume": 0.0, "oi_chng": 0.0}
                 
-                # Check for Sensibull columns in the original CSV row
-                if "CE_GAMMA" in cols: c_data["sensi_gamma"] = float(row.get("CE_GAMMA", 0))
-                if "CE_DELTA" in cols: c_data["sensi_delta"] = float(row.get("CE_DELTA", 0))
-                if "CE_THETA" in cols: c_data["sensi_theta"] = float(row.get("CE_THETA", 0))
-                if "CE_VEGA" in cols: c_data["sensi_vega"] = float(row.get("CE_VEGA", 0))
+                # Discovery Utility for numeric strings
+                def _safe_float(val_raw):
+                    if pd.isna(val_raw): return 0.0
+                    v = str(val_raw).replace(",", "").replace("-", "0").strip()
+                    try: return float(v) if v else 0.0
+                    except: return 0.0
 
-                if "PE_GAMMA" in cols: p_data["sensi_gamma"] = float(row.get("PE_GAMMA", 0))
-                if "PE_DELTA" in cols: p_data["sensi_delta"] = float(row.get("PE_DELTA", 0))
-                if "PE_THETA" in cols: p_data["sensi_theta"] = float(row.get("PE_THETA", 0))
-                if "PE_VEGA" in cols: p_data["sensi_vega"] = float(row.get("PE_VEGA", 0))
+                # Check for Sensibull columns in the original CSV row
+                if "CE_GAMMA" in cols: c_data["sensi_gamma"] = _safe_float(row.iloc[cols.index("CE_GAMMA")])
+                if "CE_DELTA" in cols: c_data["sensi_delta"] = _safe_float(row.iloc[cols.index("CE_DELTA")])
+                if "CE_THETA" in cols: c_data["sensi_theta"] = _safe_float(row.iloc[cols.index("CE_THETA")])
+                if "CE_VEGA" in cols:  c_data["sensi_vega"]  = _safe_float(row.iloc[cols.index("CE_VEGA")])
+                
+                if c_vol_idx != -1: c_data["volume"] = _safe_float(row.iloc[c_vol_idx])
+                if c_oic_idx != -1: c_data["oi_chng"] = _safe_float(row.iloc[c_oic_idx])
+
+                # Puts
+                if "PE_GAMMA" in cols: p_data["sensi_gamma"] = _safe_float(row.iloc[cols.index("PE_GAMMA")])
+                if "PE_DELTA" in cols: p_data["sensi_delta"] = _safe_float(row.iloc[cols.index("PE_DELTA")])
+                if "PE_THETA" in cols: p_data["sensi_theta"] = _safe_float(row.iloc[cols.index("PE_THETA")])
+                if "PE_VEGA" in cols:  p_data["sensi_vega"]  = _safe_float(row.iloc[cols.index("PE_VEGA")])
+                
+                if p_vol_idx != -1: p_data["volume"] = _safe_float(row.iloc[p_vol_idx])
+                if p_oic_idx != -1: p_data["oi_chng"] = _safe_float(row.iloc[p_oic_idx])
 
                 processed.append(c_data)
                 processed.append(p_data)
-            except Exception:
+            except (ValueError, IndexError, KeyError):
                 continue
                 
         return pd.DataFrame(processed), expiry_date_str
@@ -990,7 +1346,8 @@ def load_latest_option_chain_csv(filename: str | None = None) -> tuple[pd.DataFr
                     match = date_pattern.search(f.name)
                     if match:
                         expiry = match.group(1)
-        except: pass
+        except Exception:
+            pass
         chains.append({"file": f, "expiry": expiry})
 
     # Sort chronological
@@ -1057,6 +1414,14 @@ def list_available_option_chains() -> list[dict]:
         if not expiry or not date_pattern.match(expiry):
             continue
 
+        dt = _parse_nse_date(expiry)
+        is_expired = False
+        if dt:
+            now = datetime.now()
+            market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            is_expired = (dt < today_start) or (dt == today_start and now > market_close)
+
         # Freshness Check (Phase 42): Only include 'sensi' files if updated in last 24h
         if "sensi" in f.name:
             age_hrs = (datetime.now() - datetime.fromtimestamp(f.stat().st_mtime)).total_seconds() / 3600
@@ -1071,6 +1436,7 @@ def list_available_option_chains() -> list[dict]:
                 "expiry":   expiry,
                 "type":     nde_expiry_helper.get_expiry_type(expiry),
                 "mtime":    datetime.fromtimestamp(f.stat().st_mtime),
+                "is_expired": is_expired,
                 "_priority": priority,
             }
 
@@ -1081,10 +1447,17 @@ def list_available_option_chains() -> list[dict]:
     # Sort chronologically
     try:
         chains.sort(key=lambda x: _parse_nse_date(x["expiry"]) or datetime.max)
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        now = datetime.now()
+        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        
         for c in chains:
             dt = _parse_nse_date(c["expiry"])
-            if dt and dt >= today:
+            if not dt:
+                continue
+                
+            is_expired = (dt < today_start) or (dt == today_start and now > market_close)
+            if not is_expired:
                 c["is_near_active"] = True
                 break
     except Exception:
@@ -1127,19 +1500,36 @@ def ingest_live_option_chain_v3(symbol: str = "NIFTY", current_atr: float = 250.
     expiries = raw_json["records"].get("expiryDates", [])
     if not expiries:
         return {"status": "error", "files": []}
+    
+    # ROOT FIX (Phase 5.8): Extract raw underlyingValue BEFORE parse_v3_chain re-labels it
+    raw_underlying_value = raw_json.get("records", {}).get("underlyingValue", 0.0)
         
     full_df, spot = parse_v3_chain(raw_json)
+    
+    # Compute Synthetic Forward from ATM options as the best available futures proxy
+    synthetic_fwd = calculate_synthetic_forward(full_df, spot)
     
     # Identify Shards
     weekly_near = expiries[0]
     weekly_next = expiries[1] if len(expiries) > 1 else None
     monthly_near = next((e for e in expiries if nde_expiry_helper.is_monthly_expiry(e)), expiries[-1])
     
-    shards = filter(None, [weekly_near, weekly_next, monthly_near])
+    # Identify Monthly Next (the next monthly after monthly_near)
+    monthly_next = None
+    try:
+        m_near_idx = expiries.index(monthly_near)
+        monthly_next = next((e for e in expiries[m_near_idx+1:] if nde_expiry_helper.is_monthly_expiry(e)), None)
+    except (ValueError, StopIteration):
+        pass
+
+    shards = filter(None, [weekly_near, weekly_next, monthly_near, monthly_next])
     saved_files = []
     
     for exp in shards:
         df_exp = full_df[full_df["expiry"] == exp].copy()
+        
+        # Compute per-expiry synthetic forward for accurate futures reference
+        exp_synthetic = calculate_synthetic_forward(df_exp, spot)
         
         # Apply Volatility-Dynamic Cleaning
         df_clean = clean_chain(df_exp, spot, atr=current_atr, aggressive=aggressive)
@@ -1150,6 +1540,8 @@ def ingest_live_option_chain_v3(symbol: str = "NIFTY", current_atr: float = 250.
             "expiry": exp,
             "type": nde_expiry_helper.get_expiry_type(exp),
             "spot_at_fetch": spot,
+            "underlyingValue": exp_synthetic,  # Per-expiry synthetic forward (true futures proxy)
+            "raw_nse_underlying": raw_underlying_value,  # Raw NSE field for audit
             "atr_at_cleaning": current_atr,
             "aggressive_mode": aggressive
         }
@@ -1221,7 +1613,7 @@ def load_nifty_v3_data(filename: str | None = None) -> tuple[pd.DataFrame, str, 
         try:
             with open(meta_path, "r") as f:
                 meta = json.load(f)
-        except:
+        except (json.JSONDecodeError, OSError):
             pass
 
     # Source-mode priority
@@ -1239,6 +1631,28 @@ def load_nifty_v3_data(filename: str | None = None) -> tuple[pd.DataFrame, str, 
             "source_mode": source,
             "validation_flags": []
         }
+            
+    # Task 16: Data Quality Validator (Staleness Check)
+    if meta and "timestamp" in meta:
+        try:
+            from datetime import datetime
+            dt_obj = datetime.strptime(meta["timestamp"], "%d-%b-%Y %H:%M:%S")
+            age_seconds = (datetime.now() - dt_obj).total_seconds()
+            
+            _now_hour = datetime.now().hour
+            _now_min = datetime.now().minute
+            time_decimal = _now_hour + (_now_min / 60.0)
+            _is_market_hours = 9.25 <= time_decimal <= 15.5  # 09:15 to 15:30
+            
+            if _is_market_hours and age_seconds > 300:
+                meta["data_quality"] = "LOW"
+                meta["staleness_seconds"] = int(age_seconds)
+                source = "DEGRADED (STALE)"
+            else:
+                meta["data_quality"] = "HIGH"
+                meta["staleness_seconds"] = int(age_seconds)
+        except Exception:
+            pass
             
     return df, expiry, source, meta, fname
 
@@ -1277,7 +1691,8 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
     if snap_path.exists():
         try:
             old_snap = json.loads(snap_path.read_text())
-        except: pass
+        except Exception:
+            pass
     
     # We need a spot price. 
     if spot is None:
@@ -1285,7 +1700,7 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
             import data_fetch
             n_df = data_fetch.batch_download(["^NSEI"], period="1d").get("^NSEI")
             spot = n_df["Close"].iloc[-1]
-        except:
+        except Exception:
             spot = 22000.0 # Worst case fallback
             
     for c in active_chains:
@@ -1339,7 +1754,7 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
         # UI Hydration (Phase 41 Consistency)
         ui_display = {
             "gex_net": format_institutional_metric(metrics["total_gex"], "Cr"),
-            "gex_net_norm": f"{metrics['total_gex']/LOT/1_000_000.0:.1f} M/lot",
+            "gex_net_norm": f"{metrics['total_gex']/LOT:.1f} M/lot",
             "delta_gex": f"({'+' if delta_gex > 0 else ''}{format_institutional_metric(delta_gex, 'Cr')})" if abs(delta_gex) > 100_000 else ""
         }
         
@@ -1364,8 +1779,11 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
             # Lot-Normalized (Logic Invariant)
             "gex_abs_norm": metrics["total_gex_abs"] / LOT,
             "gex_net_norm": metrics["total_gex"] / LOT,
+            "gex_tw_norm": metrics["gex_tw_norm"],
             "vega_norm": metrics["total_vega"] / LOT,
             "theta_norm": metrics["total_theta"] / LOT,
+            "vex_tw_norm": metrics["vex_tw_norm"],
+            "cex_tw_norm": metrics["cex_tw_norm"],
             
             "flip": flip,
             "flip_dist": round(flip_dist, 2),
@@ -1388,21 +1806,22 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
             indent=2,
             default=lambda x: float(x) if hasattr(x, '__float__') else str(x)
         ))
-    except: pass
+    except Exception:
+        pass
     
     return term_data
 
 def classify_term_structure(row: dict, iv_adj: float = 1.0) -> str:
     """
-    Deterministic State Classification using Lot-Invariant Thresholds.
+    Deterministic State Classification using Time-Weighted (TW) GEX.
     Adjusted by IV regime: High IV requires more GEX for 'Stability'.
     """
-    # GEX-based logic
-    gex_net_norm = row["gex_net_norm"]
+    # TW GEX handles duration-weighting (Analytical Depth)
+    gex_tw = row.get("gex_tw_norm", row["gex_net_norm"])
     gex_abs_norm = row["gex_abs_norm"]
     
-    # Baseline Thresholds (Normalized to 1 Lot, in Millions-of-INR)
-    # v3 Alignment: 15.0 represents 15M per lot.
+    # Baseline Thresholds (Normalized to 1 Lot, Millions-of-INR TW-Scaled)
+    # v3.5 Alignment: 15.0 represents ~15M of TW pinning pressure.
     BASE_STABLE = 15.0  
     BASE_ANCHOR = 12.0
     
@@ -1413,10 +1832,345 @@ def classify_term_structure(row: dict, iv_adj: float = 1.0) -> str:
     if row["is_monthly"] and gex_abs_norm > gex_anchor_adj:
         return "Anchor"
         
-    if gex_abs_norm > gex_stable_adj and gex_net_norm >= 0:
+    if gex_tw > gex_stable_adj:
         return "Stable"
         
-    if gex_net_norm < 0:
-        return "Fragile"
-        
     return "Neutral"
+
+def cleanup_expired_chains() -> int:
+    """
+    Canonical Garbage Collector (Phase 4.2): 
+    Deletes mathematically expired files and sidecars.
+    Triggered only by explicit Automation or Manual Ops tasks.
+    """
+    count = 0
+    date_pattern = re.compile(r"(\d{1,2}-[a-zA-Z]{3}-\d{4})")
+    files = list(OPTION_CHAIN_DIR.glob("*.csv"))
+    
+    for f in files:
+        expiry = None
+        try:
+            with open(f, "r") as src:
+                headline = src.readline()
+                if "EXPIRY DATE:" in headline:
+                    expiry = headline.split(":")[1].strip()
+                else:
+                    match = date_pattern.search(f.name)
+                    if match:
+                        expiry = match.group(1)
+        except Exception:
+            continue
+            
+        if not expiry:
+            continue
+            
+        dt = _parse_nse_date(expiry)
+        if dt:
+            now = datetime.now()
+            market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            if (dt < today_start) or (dt == today_start and now > market_close):
+                try:
+                    f.unlink()
+                    logger.info(f"Garbage Collector: Deleted expired chain -> {f.name}")
+                    # Delete the orphaned metadata sidecar
+                    meta_file = f.parent / f.name.replace(".csv", "_meta.json")
+                    if meta_file.exists():
+                        meta_file.unlink()
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete {f.name}: {e}")
+                    
+    return count
+
+# ==================== ARBITRAGE LOGIC LAYER (PHASE 5.2 HARDENING) ====================
+
+def compute_basis_metrics(spot: float, futures_price: float, t_days: float, r: float = 0.07) -> dict:
+    """
+    Alpha 5.7: Decision-Ready Basis Analysis.
+    Calculates Basis Score (1-10) and Strength (Weak/Moderate/Strong).
+    """
+    if spot <= 0 or futures_price <= 0:
+        return {"signal": "DATA_ERROR", "basis": 0, "score": 0, "strength": "N/A"}
+
+    T = max(t_days, 0.5) / 365.0
+    fair_futures = spot * np.exp(r * T)
+    
+    basis = futures_price - spot
+    fair_basis = fair_futures - spot
+    basis_error = basis - fair_basis
+    
+    annualised_basis_pct = (basis / spot) * (365 / max(t_days, 0.5)) * 100
+    r_pct = r * 100
+    
+    # Basis Score Calculation (1-10)
+    # Based on annualized deviation from RFR
+    deviation_pct = abs(annualised_basis_pct - r_pct)
+    # Thresholds: 40bps (Score 3), 100bps (Score 7), 200bps (Score 10)
+    score = min(10, int((deviation_pct / 0.2) + 1)) if deviation_pct > 0.4 else 0
+    
+    if annualised_basis_pct > (r_pct + 0.40):
+        signal = "RICH"
+        strength = "STRONG" if score >= 7 else "MODERATE" if score >= 4 else "WEAK"
+    elif annualised_basis_pct < (r_pct - 0.40):
+        signal = "CHEAP"
+        strength = "STRONG" if score >= 7 else "MODERATE" if score >= 4 else "WEAK"
+    else:
+        signal = "FAIR"
+        strength = "NEUTRAL"
+        
+    return {
+        "spot": round(spot, 2),
+        "futures_price": round(futures_price, 2),
+        "fair_futures": round(fair_futures, 2),
+        "basis": round(basis, 2),
+        "fair_basis": round(fair_basis, 2),
+        "basis_error_pts": round(basis_error, 2),
+        "annualised_basis_pct": round(annualised_basis_pct, 2),
+        "signal": signal,
+        "strength": strength,
+        "score": score
+    }
+
+def compute_pcp_violations(df: pd.DataFrame, futures_price: float, r: float = 0.07, t_days: float = 7.0) -> pd.DataFrame:
+    """
+    Alpha 5.7: Put-Call Parity with Execution Confidence.
+    """
+    if df.empty or futures_price <= 0: return pd.DataFrame()
+
+    T = max(t_days, 0.5) / 365.0
+    
+    if "type" in df.columns:
+        df_calls = df[df["type"] == "call"][["strike", "ltp", "oi", "volume"]].rename(columns={"ltp": "call_ltp", "oi": "call_oi", "volume": "call_vol"})
+        df_puts  = df[df["type"] == "put" ][["strike", "ltp", "oi", "volume"]].rename(columns={"ltp": "put_ltp", "oi": "put_oi", "volume": "put_vol"})
+    else:
+        return pd.DataFrame()
+
+    if df_calls.empty or df_puts.empty: return pd.DataFrame()
+    
+    merged = pd.merge(df_calls, df_puts, on="strike")
+    if merged.empty: return pd.DataFrame()
+        
+    merged["synthetic"] = merged["call_ltp"] - merged["put_ltp"] + merged["strike"] * np.exp(-r * T)
+    merged["deviation"] = merged["synthetic"] - futures_price
+    
+    friction_pts = futures_price * 0.0005 
+    merged["net_edge"] = merged["deviation"].abs() - friction_pts
+    merged["flag"] = merged["net_edge"] > 0
+    
+    # Execution Confidence (1-10)
+    # f(liquidity, net_edge)
+    min_oi = 500
+    merged["confidence"] = (np.clip((merged["call_oi"] + merged["put_oi"]) / 1000, 1, 5) + 
+                             np.clip(merged["net_edge"] / 2, 1, 5)).astype(int)
+    merged["confidence_label"] = np.where(merged["confidence"] >= 8, "HIGH", 
+                                          np.where(merged["confidence"] >= 5, "MEDIUM", "LOW"))
+    
+    # Strategy 1 (Phase 5.8): Synthetic Futures Arb Action
+    merged["arb_action"] = np.where(
+        merged["synthetic"] < futures_price - friction_pts,
+        "BUY SYNTHETIC + SELL FUTURES",
+        np.where(
+            merged["synthetic"] > futures_price + friction_pts,
+            "SELL SYNTHETIC + BUY FUTURES",
+            "FAIR"
+        )
+    )
+    
+    return merged.sort_values("net_edge", ascending=False)
+
+def compute_calendar_spread_opportunity(term_data: dict, historical_mean: float = 1.5) -> dict:
+    """
+    Alpha 5.7: Directional Calendar Spread.
+    """
+    if not term_data or len(term_data) < 2:
+        return {"opportunity": 0.0, "signal": "INSUFFICIENT_DATA"}
+        
+    expiries = list(term_data.keys())
+    near_iv = term_data[expiries[0]].get("atm_iv", 0.0)
+    far_iv = term_data[expiries[-1]].get("atm_iv", 0.0)
+    
+    current_spread = near_iv - far_iv
+    deviation = current_spread - historical_mean
+    
+    signal = "NEUTRAL"
+    action = "STAND_ASIDE"
+    if deviation > 2.0: 
+        signal = "NEAR_IV_OVERVALUED"
+        action = "SELL NEAR / BUY FAR"
+    elif deviation < -2.0: 
+        signal = "NEAR_IV_UNDERVALUED"
+        action = "BUY NEAR / SELL FAR"
+    
+    return {
+        "near_iv": round(near_iv, 2),
+        "far_iv": round(far_iv, 2),
+        "current_spread": round(current_spread, 2),
+        "historical_mean": historical_mean,
+        "deviation": round(deviation, 2),
+        "signal": signal,
+        "action": action
+    }
+
+def get_arbitrage_transaction_costs(spot: float, lots: int = 1) -> float:
+    """
+    Estimates total friction (STT, Brokerage, Fees) for index arbitrage.
+    """
+    notional = spot * LOT * lots
+    friction = notional * 0.0005 # 5 bps proxy
+    return round(friction, 2)
+
+def fetch_futures_price(symbol: str = "NIFTY") -> float:
+    """
+    Canonical accessor for current futures price from metadata.
+    """
+    _, _, _, meta, _ = load_nifty_v3_data()
+    return meta.get("underlyingValue", meta.get("spot_at_fetch", 0.0))
+
+def compute_implied_borrowing_rate(spot: float, futures: float, dte: float) -> float:
+    """
+    Calculates annualized implied rate from basis.
+    """
+    if spot <= 0 or futures <= 0 or dte <= 0: return 0.0
+    T = dte / 365.0
+    return (np.log(futures / spot) / T) * 100
+
+# ==================== STRATEGY 2: BOX SPREAD SCANNER (Phase 5.8) ====================
+
+def compute_box_spreads(df: pd.DataFrame, r: float = 0.07, t_days: float = 7.0, spread_width: int = 100) -> pd.DataFrame:
+    """
+    Scans adjacent strike pairs for riskless box spread arbitrage.
+    Box = Bull Call Spread(K1,K2) + Bear Put Spread(K1,K2)
+    Payoff at expiry = K2 - K1 (always).
+    Fair value today = (K2 - K1) × exp(-rT).
+    Edge = Fair - Cost - Friction.
+    """
+    if df.empty: return pd.DataFrame()
+    
+    T = max(t_days, 0.5) / 365.0
+    
+    # Build strike-level pivot
+    if "type" not in df.columns: return pd.DataFrame()
+    
+    calls = df[df["type"] == "call"][["strike", "ltp", "oi"]].rename(
+        columns={"ltp": "c_ltp", "oi": "c_oi"}
+    )
+    puts = df[df["type"] == "put"][["strike", "ltp", "oi"]].rename(
+        columns={"ltp": "p_ltp", "oi": "p_oi"}
+    )
+    pivot = pd.merge(calls, puts, on="strike").sort_values("strike").reset_index(drop=True)
+    
+    if len(pivot) < 2: return pd.DataFrame()
+    
+    # Minimum OI per leg for liquidity
+    min_oi_leg = 500
+    
+    # 4-leg friction: ~12 bps of notional
+    friction_rate = 0.0012
+    
+    rows = []
+    strikes = pivot["strike"].values
+    
+    for i in range(len(pivot)):
+        k1 = strikes[i]
+        k2 = k1 + spread_width
+        
+        # Find K2 row
+        k2_rows = pivot[pivot["strike"] == k2]
+        if k2_rows.empty: continue
+        
+        k1_row = pivot[pivot["strike"] == k1].iloc[0]
+        k2_row = k2_rows.iloc[0]
+        
+        # Liquidity check: all 4 legs must have OI > min
+        if min(k1_row["c_oi"], k1_row["p_oi"], k2_row["c_oi"], k2_row["p_oi"]) < min_oi_leg:
+            continue
+        
+        # Box Cost = (C_K1 - C_K2) + (P_K2 - P_K1)
+        box_cost = (k1_row["c_ltp"] - k2_row["c_ltp"]) + (k2_row["p_ltp"] - k1_row["p_ltp"])
+        
+        # Fair Box = (K2 - K1) × exp(-rT)
+        fair_box = spread_width * np.exp(-r * T)
+        
+        # Friction for 4 legs
+        avg_spot = (k1 + k2) / 2
+        friction = avg_spot * LOT * friction_rate
+        friction_pts = friction / LOT  # Convert back to per-share points
+        
+        net_edge = fair_box - box_cost - friction_pts
+        
+        action = "BUY BOX" if net_edge > 2.0 else ("SELL BOX" if net_edge < -2.0 else "FAIR")
+        
+        rows.append({
+            "K1": int(k1),
+            "K2": int(k2),
+            "box_cost": round(box_cost, 2),
+            "fair_box": round(fair_box, 2),
+            "friction": round(friction_pts, 2),
+            "net_edge": round(net_edge, 2),
+            "action": action,
+            "min_leg_oi": int(min(k1_row["c_oi"], k1_row["p_oi"], k2_row["c_oi"], k2_row["p_oi"]))
+        })
+    
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values("net_edge", ascending=False)
+    return result
+
+# ==================== STRATEGY 3: ROLL ARBITRAGE (Phase 5.8) ====================
+
+def compute_roll_arbitrage(term_data: dict, spot: float, r: float = 0.07) -> dict:
+    """
+    Detects inter-expiry synthetic mispricing.
+    Compares actual near-far synthetic spread against carry-cost expected spread.
+    Roll Edge = Actual Spread - Expected Spread.
+    """
+    if not term_data or len(term_data) < 2:
+        return {"signal": "INSUFFICIENT_DATA"}
+    
+    expiries = list(term_data.keys())
+    near_exp = expiries[0]
+    far_exp = expiries[-1]
+    
+    near_data = term_data[near_exp]
+    far_data = term_data[far_exp]
+    
+    near_dte = max(near_data.get("dte", 1), 0.5)
+    far_dte = max(far_data.get("dte", 30), 0.5)
+    
+    # Compute synthetic forward for each expiry from raw exposures
+    near_raw = near_data.get("raw_exposures", pd.DataFrame())
+    far_raw = far_data.get("raw_exposures", pd.DataFrame())
+    
+    near_synth = calculate_synthetic_forward(near_raw, spot) if not near_raw.empty else spot
+    far_synth = calculate_synthetic_forward(far_raw, spot) if not far_raw.empty else spot
+    
+    # Expected spread based on cost-of-carry between the two expiry dates
+    T_near = near_dte / 365.0
+    T_far = far_dte / 365.0
+    expected_spread = near_synth * (np.exp(r * (T_far - T_near)) - 1)
+    
+    actual_spread = far_synth - near_synth
+    roll_edge = actual_spread - expected_spread
+    
+    signal = "NEUTRAL"
+    action = "STAND_ASIDE"
+    if roll_edge > 5:
+        signal = "FAR_EXPENSIVE"
+        action = f"SELL {far_exp} SYNTHETIC + BUY {near_exp} SYNTHETIC"
+    elif roll_edge < -5:
+        signal = "NEAR_EXPENSIVE"
+        action = f"SELL {near_exp} SYNTHETIC + BUY {far_exp} SYNTHETIC"
+    
+    return {
+        "near_exp": near_exp,
+        "far_exp": far_exp,
+        "near_synth": round(near_synth, 2),
+        "far_synth": round(far_synth, 2),
+        "expected_spread": round(expected_spread, 2),
+        "actual_spread": round(actual_spread, 2),
+        "roll_edge": round(roll_edge, 2),
+        "signal": signal,
+        "action": action
+    }
