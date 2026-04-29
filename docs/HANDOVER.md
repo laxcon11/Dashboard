@@ -110,14 +110,19 @@ python scripts/prediction_integrity_cycle.py  # Daily prediction cycle
 The NDE is a specialized sub-system for options microstructure analysis.
 
 ### Core Logic Units
-- **`nde_options_logic.py`**: Institutional exposure formulas (GEX/Vanna/Charm) and TV-ratio calculations.
-- **`nde_strategy_logic.py`**: Master strategy selection and **Transition Governance**.
+- **`nde_options_logic.py`**: Institutional exposure formulas (GEX/Vanna/Charm), TV-ratio calculations, and **Data Staleness Validation** (5-min market hour gating).
+- **`nde_strategy_logic.py`**: Master strategy selection, **Risk Pre-Filter Governance** (halting execution when within 1.5 ATR of Gamma Flip), and explicit **Strict API Trade Schema Generation**.
 - **`nde_automation_logic.py`**: Headless snapshot generator and metadata resolution.
 
 ### Governance & Data Trust
-- **Audit Log**: All strategy transitions and rejections are logged to `notes/nde_strategy_log.jsonl`.
+- **Data Quality Validator**: Dynamically intercepts stale files (`>5 mins` lag) and forcefully degrades the UI to prevent blind execution.
+- **Audit Log**: All strategy transitions and rejections are logged to `notes/nde_strategy_log.jsonl`. Safely handles corrupted JSON lines via `JSONDecodeError` catches.
 - **Hysteresis**: Intraday transitions are gated by a **1.5-point Quality Score delta** or **Regime Sign Cross**.
-- **Maintenance**: Canonical file cleanup is owned by `nde_automation_logic` or the manual sidebar tool; normal page loads are read-only.
+- **API Contracts**: The engine now outputs strict `api_schema` JSON dictionaries mapped to the `STRATEGY_REGISTRY`, acting as the foundation for the decoupled `TradingDashPro` backend.
+
+### 🛣️ Next-Gen Architecture Migration
+A comprehensive **JIRA-style blueprint** has been established to migrate this Streamlit monolithic logic into a decoupled React/FastAPI stack (`TradingDashPro`).
+**Read [AGENT_EXECUTION_ROADMAP.md](./AGENT_EXECUTION_ROADMAP.md) before building new features.** It enforces explicit Interface Contracts, Data Adapters, and Circuit Breaker logic that must be adhered to.
 
 ### 🧪 Testing and Verification
 The dashboard uses `pytest` for logic verification:
