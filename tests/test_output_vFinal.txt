@@ -1,0 +1,347 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.0, pytest-9.0.3, pluggy-1.6.0
+rootdir: /Users/laxmanacharya/Desktop/BhavCopy/Dashboard
+plugins: mock-3.15.1
+collected 26 items
+
+tests/test_nde_logic.py ...............FFFF....FFF                       [100%]
+
+=================================== FAILURES ===================================
+_________________________ test_playbook_mapping_rules __________________________
+
+    def test_playbook_mapping_rules():
+        """Verifies strategy playbook mappings for different regimes."""
+        # Mock raw_exp for viability
+        raw_exp = pd.DataFrame([
+            {"strike": 22700, "type": "CALL", "ltp": 50.0, "oi": 50000},
+            {"strike": 22300, "type": "PUT", "ltp": 50.0, "oi": 50000}
+        ])
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "NORMAL", "flow_regime_label": "Long Gamma", "raw_exposures": raw_exp}
+        auto_metrics = {"drift": 0.05, "stability": 70}
+        spot = 22500
+        walls = (22700, 22300)
+        iv_data = {"iv_rank": 45.0}
+        quality_score = 8.5
+        size = 1.0
+        bias_obj = {"bias": "Bullish"}
+        rev_score_obj = {"score": 7.5, "label": "HIGH_REVERSION", "reason": ["Away from flip"]}
+    
+        # 1. Long Gamma + Mid-range (Stability 70 < 75) -> WAIT
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, spot, walls, iv_data,
+            quality_score, size, bias_obj, rev_score_obj, dte=3
+        )
+        assert playbook["action"] == "WAIT"
+        assert "Wait for Extremes" in playbook["strategy"]
+        assert playbook["strike_plan"]["suppressed"] is True
+    
+        # 2. Long Gamma + Near Upper Wall -> Fade Resistance
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, 22695, walls, iv_data,
+            quality_score, size, bias_obj, rev_score_obj, dte=3
+        )
+>       assert playbook["action"] == "FADE_RESISTANCE"
+E       AssertionError: assert 'WAIT' == 'FADE_RESISTANCE'
+E         
+E         - FADE_RESISTANCE
+E         + WAIT
+
+tests/test_nde_logic.py:561: AssertionError
+___________________________ test_playbook_guardrails ___________________________
+
+    def test_playbook_guardrails():
+        """Verifies Phase 47 strict guardrails."""
+        raw_exp = pd.DataFrame([
+            {"strike": 22700, "type": "CALL", "ltp": 50.0, "oi": 50000},
+            {"strike": 22300, "type": "PUT", "ltp": 50.0, "oi": 50000}
+        ])
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "NORMAL", "gamma_flip_level": 22480, "raw_exposures": raw_exp}
+        auto_metrics = {"drift": 0.05, "stability": 80}
+        spot = 22500
+        walls = (22700, 22300)
+        iv_data = {"iv_rank": 45.0}
+        quality_score = 8.5
+        size = 1.0
+        bias_obj = {"bias": "Bullish"}
+        rev_score_obj = {"score": 7.5, "label": "HIGH_REVERSION"}
+    
+        # 1. Gamma Flip Guardrail (Spot 22500 vs Flip 22480 = < 0.2% dist)
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, spot, walls, iv_data,
+            quality_score, size, bias_obj, rev_score_obj
+        )
+        assert playbook["action"] == "WAIT_CONFIRMATION"
+>       assert "Wait for Confirmation" in playbook["strategy"]
+E       AssertionError: assert 'Wait for Confirmation' in 'MEAN_REVERSION'
+
+tests/test_nde_logic.py:601: AssertionError
+_________________ test_wait_state_suppresses_execution_strikes _________________
+
+    def test_wait_state_suppresses_execution_strikes():
+        """Verifies that WAIT state suppresses executable strikes."""
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "NORMAL"}
+        auto_metrics = {"drift": 0.05, "stability": 70}
+        spot = 24250
+        walls = (26000, 23000)
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, spot, walls, {},
+            8.5, 1.0, {"bias": "Neutral"}, {"score": 5.0, "label": "WAIT"}
+        )
+        assert playbook["action"] == "WAIT"
+        # New logic: strike_plan dict always contains sell_ce etc but they are None if suppressed
+>       assert playbook["strike_plan"].get("sell_ce") is None
+E       AssertionError: assert 26000 is None
+E        +  where 26000 = <built-in method get of dict object at 0x123bf37c0>('sell_ce')
+E        +    where <built-in method get of dict object at 0x123bf37c0> = {'buy_ce': 26200, 'buy_pe': 22800, 'reason': '', 'schema': 'IRON_CONDOR', ...}.get
+
+tests/test_nde_logic.py:652: AssertionError
+_______________ test_far_otm_weekly_walls_fail_premium_viability _______________
+
+    def test_far_otm_weekly_walls_fail_premium_viability():
+        """Verifies that low premium OTM walls block execution."""
+        raw_exp = pd.DataFrame([
+            {"strike": 26000, "type": "CALL", "ltp": 2.0, "oi": 10000},
+            {"strike": 23000, "type": "PUT", "ltp": 3.0, "oi": 10000}
+        ])
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "NORMAL", "raw_exposures": raw_exp}
+        auto_metrics = {"drift": 0.1, "stability": 80}
+        spot = 24250
+        walls = (26000, 23000)
+        # Spot near wall (27950) would trigger FADE_RESISTANCE
+        # Wall is at 28000. dist = 50. dist% = 0.17%. Passes dist check.
+        # But LTP 2.0 < 5.0 on weekly (DTE 3) -> Should block if we enforce min_premium.
+        # Wait, if dist is small, it PASSES. I need to be far away.
+        # Spot = 24250, Wall = 26000. dist% = 7.2%.
+        # To trigger mapping, I need to be near wall.
+        # OK, let's use: Spot = 25950, Wall = 26000. dist% = 0.19%.
+        # This won't trigger the distance-based premium block.
+        # I need to test the distance-based block: dist > 7% AND ltp < 5.
+        # But FADE is only triggered when NEAR wall.
+        # So FADE_RESISTANCE will only check viability when near.
+        # If we are NEAR, we don't care about the 7% rule.
+        # BUT we still have the absolute floor ltp < 1.0.
+    
+        # Spot near wall (25950) would trigger FADE_RESISTANCE (wall at 26000)
+        # But LTP 0.5 < 1.0 (absolute floor) -> Should block and revert to WAIT with suffix.
+        raw_exp = pd.DataFrame([
+            {"strike": 26000, "type": "CALL", "ltp": 0.5, "oi": 10000},
+            {"strike": 23000, "type": "PUT", "ltp": 3.0, "oi": 10000}
+        ])
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "NORMAL", "raw_exposures": raw_exp}
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, 25950, (26000, 23000), {},
+            8.5, 1.0, {"bias": "Neutral"}, {"score": 5.0}, dte=3
+        )
+>       assert playbook["action"] == "WAIT"
+E       AssertionError: assert 'ENTER' == 'WAIT'
+E         
+E         - WAIT
+E         + ENTER
+
+tests/test_nde_logic.py:691: AssertionError
+___________________ test_non_trade_actions_suppress_strikes ____________________
+
+    def test_non_trade_actions_suppress_strikes():
+        """Verifies that STAND ASIDE, HEDGE_ONLY, etc. suppress strikes."""
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "AVOID"} # Forces STAND ASIDE
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, {}, 22500, (22700, 22300), {},
+            8.0, 1.0, {}, {}
+        )
+        assert playbook["action"] == "STAND ASIDE"
+        assert playbook["strike_plan"]["suppressed"] is True
+>       assert "Data integrity failure" in playbook["strike_plan"]["reason"] or "Structural Risk" in playbook["strike_plan"]["reason"]
+E       AssertionError: assert ('Data integrity failure' in '' or 'Structural Risk' in '')
+
+tests/test_nde_logic.py:759: AssertionError
+__________________ test_directional_debit_returns_debit_legs ___________________
+
+    def test_directional_debit_returns_debit_legs():
+        """Verifies that FOLLOW_TREND returns debit spread schema."""
+        raw_exp = pd.DataFrame([
+            {"strike": 24250, "type": "CALL", "ltp": 50.0, "oi": 50000},
+            {"strike": 24350, "type": "CALL", "ltp": 20.0, "oi": 50000}
+        ])
+        gamma_metrics = {"gex_norm": -5.0, "raw_exposures": raw_exp} # Negative Gamma
+        auto_metrics = {"drift": 0.5} # Strong Trend
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "FOLLOW_TREND", gamma_metrics, auto_metrics, 24240, (26000, 23000), {},
+            8.5, 1.0, {}, {}
+        )
+>       assert playbook["action"] == "FOLLOW_TREND"
+E       AssertionError: assert 'WAIT' == 'FOLLOW_TREND'
+E         
+E         - FOLLOW_TREND
+E         + WAIT
+
+tests/test_nde_logic.py:773: AssertionError
+___________________ test_strategy_specific_viability_checks ____________________
+
+    def test_strategy_specific_viability_checks():
+        """Verifies that FADE_RESISTANCE only checks call wall viability."""
+        # Call wall illiquid, Put wall liquid
+        raw_exp = pd.DataFrame([
+            {"strike": 22700, "type": "CALL", "ltp": 0.5, "oi": 100}, # Illiquid
+            {"strike": 22300, "type": "PUT", "ltp": 50.0, "oi": 50000} # Liquid
+        ])
+        gamma_metrics = {"gex_norm": 5.0, "raw_exposures": raw_exp}
+    
+        # FADE_RESISTANCE should FAIL (checks call wall)
+>       playbook = nde_strategy_logic.generate_strategy_playbook(
+            "FADE_RESISTANCE", gamma_metrics, {}, 22695, (22700, 22300), {},
+            8.5, 1.0, {}, {}
+        )
+
+tests/test_nde_logic.py:788: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+strategy_code = 'FADE_RESISTANCE'
+gamma_metrics = {'gex_norm': 5.0, 'raw_exposures':    strike  type   ltp     oi
+0   22700  CALL   0.5    100
+1   22300   PUT  50.0  50000}
+auto_metrics = {}, spot = 22695, walls = (22700, 22300), iv_data = {}
+quality_score = 8.5, size = 1.0, bias_obj = {}, reversion_score_obj = {}
+mode = 'Balanced', term_data = None, source_mode = 'TRUSTED', expiry = None
+dte = 7, vol_ctx = None, trans_score = None, market_state = None
+
+    def generate_strategy_playbook(
+        strategy_code, gamma_metrics, auto_metrics, spot, walls, iv_data,
+        quality_score, size, bias_obj, reversion_score_obj, mode="Balanced",
+        term_data=None, source_mode="TRUSTED", expiry=None, dte=None,
+        vol_ctx=None, trans_score=None, market_state=None
+    ):
+        """
+        V5 Strategy Engine Logic.
+        """
+        dte = dte if dte is not None else 7
+        if bias_obj is None: bias_obj = {"bias": "Neutral"}
+        gex_norm = gamma_metrics.get("gex_norm", 0.0)
+        c_wall = walls[0] if len(walls) >= 1 else spot + 300
+        p_wall = walls[1] if len(walls) >= 2 else spot - 300
+        atr = gamma_metrics.get("atr_proxy", 250.0)
+    
+        vol_regime = vol_ctx.get("regime", "NORMAL") if vol_ctx else "NORMAL"
+        tv_label = gamma_metrics.get("tv_label", "NORMAL")
+    
+        # Institutional Default: If tactical metrics are missing (e.g. in legacy tests), we assume Full Confidence
+        t_score = trans_score.get("score", 1.0) if trans_score else 1.0
+        trans_label = trans_score.get("label", "CONFIRMED") if trans_score else "CONFIRMED"
+        m_state = market_state.get("state", "NEUTRAL DRIFT") if market_state else "NEUTRAL DRIFT"
+        m_why = market_state.get("why", "") if market_state else ""
+    
+        # 0. Canonical Hardening: If quality_score is passed as 0, it means it wasn't calculated.
+        # For unit tests, we allow bypassing the 4.0 floor if it's exactly 0 (missing).
+        eff_quality = quality_score if quality_score > 0 else 10.0
+        vol_block = False
+        vol_reason = ""
+    
+        if vol_regime == "EXPLOSIVE" and strategy_code in ["MEAN_REVERSION", "CHARM", "VANNA"]:
+            vol_block = True
+            vol_reason = "VOL GATE: Explosive IV blocks premium selling. (Breakout Risk)"
+        elif vol_regime == "CRUSHED" and strategy_code in ["TREND_ACCELERATION", "GAMMA_FLIP"]:
+            vol_block = True
+            vol_reason = "VOL GATE: Crushed IV blocks breakout trades. (Mean Reversion expected)"
+    
+        # 2. DECISION RESOLUTION (Gate-First)
+        if strategy_code == "FOLLOW_TREND": action = "FOLLOW_TREND"
+        elif strategy_code == "FADE_RESISTANCE": action = "FADE_RESISTANCE"
+        elif strategy_code == "MEAN_REVERSION": action = "ENTER" # Legacy compatibility for IC
+        else: action = "ENTER"
+    
+        setup_name = strategy_code
+        why = [m_why] if m_why else []
+        triggers = []
+    
+        if vol_block:
+            action = "STAND ASIDE"
+            setup_name = f"WAIT (Vol Block) - {strategy_code}"
+            why.append(vol_reason)
+        elif tv_label == "AVOID":
+            action = "STAND ASIDE"
+            why.append("Structural policy (TV_Ratio AVOID) requires standing aside.")
+        elif t_score < 0.6 or eff_quality < 4.0 or reversion_score_obj.get("label") == "WAIT":
+            action = "WAIT"
+            setup_name = f"Wait for Extremes ({strategy_code})"
+            why.append("Tactical convergence (Transition/Quality) insufficient for immediate entry.")
+            triggers.append("Transition Score > 0.6")
+            triggers.append(f"Spot breaks Pivot {walls[0] if gex_norm < 0 else walls[1]} & Sustains")
+    
+        # 2. PRIORITY 2: INTRADAY FLIP GUARDRAIL (Phase 47)
+        flip = gamma_metrics.get("gamma_flip_level", 0)
+        dist_flip = abs(spot - flip) / spot * 100 if flip else 1.0
+        if dist_flip < 0.2:
+            action = "WAIT_CONFIRMATION"
+            why.append(f"Spot too near Gamma Flip ({int(flip)}). Risk of whipsaw.")
+            triggers.append("Spot sustains 0.2% distance from Flip")
+        elif dist_flip > 3.0:
+            why.append(f"Gamma flip level ({int(flip)}) is outside active tactical range.")
+    
+        elif trans_label == "IMMINENT":
+            action = "ENTER (HIGH PRIORITY)"
+            why.append("Regime shift imminent. Aligning with Pivot logic.")
+            triggers.append("Immediate Execution Recommended (Threshold Met)")
+    
+        # 3. ALPHA SCORING
+        rev_strength = calculate_reversion_strength(gex_norm, gamma_metrics.get("cex_norm", 0.0), auto_metrics.get("stability", 50.0))
+        exec_conf = calculate_execution_confidence(quality_score/10.0, t_score, vol_ctx or {})
+    
+        # 4. STRIKE RESOLUTION
+        strike_plan = {"suppressed": (action in ["WAIT", "WAIT_CONFIRMATION", "STAND ASIDE"]), "reason": "", "schema": "NONE"}
+    
+        if strategy_code == "MEAN_REVERSION" or (strategy_code == "NO_TRADE" and gex_norm > 5.0):
+            tpl = STRATEGY_TEMPLATES["IRON_CONDOR"]
+            strike_plan["schema"] = "IRON_CONDOR"
+            strike_plan.update({
+                "template": tpl["name"],
+                "sell_ce": int(round(c_wall / 50.0) * 50.0),
+                "sell_pe": int(round(p_wall / 50.0) * 50.0),
+                "buy_ce": int(round((c_wall + 200) / 50.0) * 50.0),
+                "buy_pe": int(round((p_wall - 200) / 50.0) * 50.0),
+                "why": tpl["why"]
+            })
+        elif strategy_code == "FOLLOW_TREND":
+            tpl = STRATEGY_TEMPLATES["DEBIT_SPREAD"]
+            strike_plan["schema"] = "DEBIT_SPREAD"
+            atm = int(round(spot / 50.0) * 50.0)
+            offset = 150 if auto_metrics.get("drift", 0) > 0 else -150
+            strike_plan.update({
+                "template": tpl["name"],
+                "buy_leg": atm,
+                "sell_leg": int(atm + offset),
+                "why": tpl["why"]
+            })
+        elif strategy_code == "TREND_ACCELERATION" or (strategy_code == "NO_TRADE" and abs(auto_metrics.get("drift", 0)) > 0.3):
+            tpl = STRATEGY_TEMPLATES["DEBIT_SPREAD"]
+            atm = int(round(spot / 50.0) * 50.0)
+            offset = 150 if auto_metrics.get("drift", 0) > 0 else -150
+            strike_plan.update({
+                "template": tpl["name"],
+                "buy_leg": atm,
+                "sell_leg": int(atm + offset),
+                "why": tpl["why"]
+            })
+        elif strategy_code == "GAMMA_FLIP" or trans_label == "IMMINENT":
+            tpl = STRATEGY_TEMPLATES["STRADDLE"]
+            strike_plan["schema"] = "STRADDLE"
+            atm = int(round(spot / 50.0) * 50.0)
+            strike_plan.update({
+                "template": tpl["name"],
+                "buy_ce": atm,
+                "buy_pe": atm,
+                "why": tpl["why"]
+            })
+        elif strategy_code == "FADE_RESISTANCE":
+>           tpl = STRATEGY_TEMPLATES["CREDIT_SPREAD"]
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'CREDIT_SPREAD'
+
+nde_strategy_logic.py:1632: KeyError
+=========================== short test summary info ============================
+FAILED tests/test_nde_logic.py::test_playbook_mapping_rules - AssertionError:...
+FAILED tests/test_nde_logic.py::test_playbook_guardrails - AssertionError: as...
+FAILED tests/test_nde_logic.py::test_wait_state_suppresses_execution_strikes
+FAILED tests/test_nde_logic.py::test_far_otm_weekly_walls_fail_premium_viability
+FAILED tests/test_nde_logic.py::test_non_trade_actions_suppress_strikes - Ass...
+FAILED tests/test_nde_logic.py::test_directional_debit_returns_debit_legs - A...
+FAILED tests/test_nde_logic.py::test_strategy_specific_viability_checks - Key...
+========================= 7 failed, 19 passed in 1.30s =========================

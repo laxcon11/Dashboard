@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 safe = lambda s: html.escape(str(s)) if s else ""
+_VALID_COLORS = {"#00C805","#FF3B30","#FF9500","#8E8E93","#007AFF","#5AC8FA","#ffd600","#2979ff","#00c853","#ff1744","#FFFFFF","#121212","#444","gray","transparent"}
+safe_color = lambda c: c if c in _VALID_COLORS else "#8E8E93"
 
 # v3 Calibration Core (Moved to top to prevent circularity)
 import NSE_Config
@@ -31,10 +33,18 @@ with st.sidebar:
     mode = st.radio("Execution Bias", ["Defensive", "Balanced", "Aggressive"], index=1, help="Adjusts strike widening/tightness.")
     st.caption(f"Engine: `{CONFIG_VERSION}`")
 
+    available_chains = nde_options_logic.list_available_option_chains()
+    selected_filename = None
+    if available_chains:
+        nearest = next((c for c in available_chains if c.get("is_near_active")), available_chains[0])
+        selected_filename = nearest["filename"]
+        st.info(f"📅 **{nearest['expiry']}**")
+    else:
+        st.error("No Data")
+
     with st.expander("🛠️ Data Operations Hub", expanded=False):
         st.subheader("🌐 Greeks Ingestion")
         
-        # ── Auto-convert check ─
         if "auto_convert_checked" not in st.session_state:
             _converted = nde_automation_logic.auto_convert_raw_files()
             if _converted:
@@ -60,16 +70,6 @@ with st.sidebar:
         with col2:
             if st.button("🗑️ Purge", use_container_width=True):
                 nde_options_logic.cleanup_expired_chains(); st.rerun()
-
-        st.divider()
-        available_chains = nde_options_logic.list_available_option_chains()
-        if available_chains:
-            nearest = next((c for c in available_chains if c.get("is_near_active")), available_chains[0])
-            selected_filename = nearest["filename"]
-            st.info(f"📅 **{nearest['expiry']}**")
-        else:
-            st.error("No Data")
-            selected_filename = None
     st.write("---")
 
 
@@ -116,7 +116,9 @@ def render_institutional_option_chain(df_exp: pd.DataFrame, spot: float, intel: 
     closest_strike = strikes[np.abs(strikes - spot).argmin()]
     idx_closest = chain[chain["strike"] == closest_strike].index[0]
     
-    center_idx = chain.index.get_loc(idx_closest)
+    loc = chain.index.get_loc(idx_closest)
+    center_idx = loc.start if isinstance(loc, slice) else (loc.argmax() if hasattr(loc, 'argmax') else loc)
+    
     start_idx = max(0, center_idx - 12)
     end_idx = min(len(chain), center_idx + 13)
     chain_filtered = chain.iloc[start_idx:end_idx].copy()
@@ -269,7 +271,12 @@ try:
     # Updated: v3 Multi-source data loader (Live/Cached)
     raw_chain, used_expiry, source, meta, fname = nde_options_logic.load_nifty_v3_data(selected_filename)
     
+    # 1.1 Secure Spot Extraction (Hardening for NaN/Missing data)
     spot = nifty_df["Close"].iloc[-1]
+    if pd.isna(spot) or spot <= 0:
+        spot = 24000.0 # Emergency UI fallback for NIFTY
+    else:
+        spot = float(spot)
     
     # 2. UNIFIED ENGINE CONTEXT (Phase 41 Hardening)
     from nde_strategy_logic import generate_engine_context
@@ -303,7 +310,7 @@ try:
     atr = ctx["atr"]
     t_days = ctx["t_days"]
     quality_score = ctx["quality_score"]
-    state = ctx["state"]
+
     
     bias_conv = master_setup.get("bias_conviction", {})
     vol_trend = master_setup.get("vol_trend", {})
@@ -311,7 +318,7 @@ try:
 
     # 3. Status Telemetry & Health Check
     ts = meta.get("timestamp", "N/A")
-    ui = ctx["ui_display"]
+    ui = ctx.get("ui_display", {}) # Fallback for derived metrics only
 
     # ⚠️ SYSTEM WARNING BANNER (Phase 1 Hardening)
     if meta.get("data_quality") == "LOW":
@@ -329,178 +336,107 @@ try:
             **DO NOT EXECUTE** without manual chain verification.
         """)
 
-    # 🏆 HERO ACTION COCKPIT (V5 - TEST)
-    playbook = master_setup.get("playbook", {})
-    risk_data = playbook.get('risk', 'N/A')
-    risk_name = risk_data.get('risk_type', 'N/A') if isinstance(risk_data, dict) else risk_data
-    strategy_name = playbook.get("strategy", master_setup.get("name", "NO TRADE"))
-    market_state = playbook.get("market_state", "NEUTRAL DRIFT")
+    # ==================== 🥇 OPERATOR ACTION CENTER (SINGLE SOURCE OF TRUTH) ====================
+    cockpit = master_setup.get("cockpit", {})
+    details = cockpit.get("details", {})
+    # --- EXPLICIT DETERMINISTIC DECISION PIPELINE ---
+    from nde_narrative_engine import build_narrative
+    from nde_execution_compiler import build_execution, build_payoff
     
-    trans_score = playbook.get("transition_score", 0.0)
-    trans_label = "IMMINENT" if trans_score >= 0.8 else "PRE-TRANSITION" if trans_score >= 0.6 else "WATCH" if trans_score >= 0.3 else "IGNORE"
-    trans_color = "#FF3B30" if trans_score >= 0.6 else "#FF9500" if trans_score >= 0.3 else "#8E8E93"
+    narrative = build_narrative(ctx)
+    execution_plan = build_execution(ctx, narrative)
+    payoff_summary = build_payoff(execution_plan)
     
-    vol_regime = playbook.get("vol_regime", "NORMAL")
-    vol_color = "#FF3B30" if vol_regime == "EXPLOSIVE" else "#00C805" if vol_regime == "QUIET" else "#FF9500"
+    narrative["execution_plan"] = execution_plan
+    narrative["payoff_summary"] = payoff_summary
     
-    final_size = playbook.get("position_size", master_setup.get("size", 0.0))
-    bias_label = playbook.get("bias", bias_conv.get("bias", "Neutral")).upper()
+    master_setup = ctx.get("master_setup", {})
+    flow_metrics = ctx.get("flow_metrics", {})
+    
+    if not isinstance(execution_plan, dict):
+        execution_plan = {}
+
     conflict = bias_conv.get("conflict_reason", "")
-    bias_colors = {"BULLISH": "#00C805", "BEARISH": "#FF3B30", "NEUTRAL": "#8E8E93"}
-    bias_color = bias_colors.get(bias_label, "#8E8E93")
     
-    # Action Signal (ENTER/WAIT/EXIT)
-    action_signal = playbook.get("action", "WAIT").upper()
-    action_color = "#00C805" if action_signal == "ENTER" else "#FF3B30" if action_signal == "EXIT" else "#FF9500"
-    
-    # Enforce WAIT state in top UI
-    is_waiting = (playbook.get("action") == "WAIT")
-    ui_action_label = "WAIT (No Active Trade)" if is_waiting else f"{bias_label} / {strategy_name}"
-    ui_action_color = "#8E8E93" if is_waiting else "#FFFFFF"
-    display_size = 0.0 if is_waiting else final_size
 
-    st.markdown(f"""
-        <div style="background: linear-gradient(180deg, rgba(30,30,30,0.95), rgba(20,20,20,0.98)); padding: 35px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 20px 40px rgba(0,0,0,0.4); -webkit-font-smoothing: antialiased;">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                <div>
-                    <span style="font-size: 0.85em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 2px;">Market State & Tactical Logic</span>
-                    <div style="margin-top: 10px; display: flex; align-items: center; gap: 15px;">
-                        <span style="font-size: 1.2em; color: {ui_action_color if is_waiting else bias_color}; font-weight: 800; letter-spacing: 1px; text-transform: uppercase;">{safe(ui_action_label)}</span>
-                    </div>
-                </div>
-                <div style="text-align: right; display: flex; gap: 20px;">
-                    <div style="background: rgba(255,255,255,0.03); padding: 18px 25px; border-radius: 12px; border-top: 5px solid {vol_color}; box-shadow: inset 0 0 20px rgba(0,0,0,0.2);">
-                        <span style="font-size: 0.75em; color: #8E8E93; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Volatility</span><br>
-                        <span style="font-size: 1.8em; font-weight: 900; color: {vol_color};">{vol_regime}</span>
-                    </div>
-                    <div style="background: rgba(255,255,255,0.03); padding: 18px 25px; border-radius: 12px; border-top: 5px solid {trans_color}; box-shadow: inset 0 0 20px rgba(0,0,0,0.2);">
-                        <span style="font-size: 0.75em; color: #8E8E93; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Transition</span><br>
-                        <span style="font-size: 1.8em; font-weight: 900; color: {trans_color};">{trans_score:.2f}</span>
-                        <span style="font-size: 0.75em; color: {trans_color}; display: block; font-weight: 800;">{trans_label}</span>
-                    </div>
-                </div>
-            </div>
-            <div style="margin-top: 30px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 20px;">
-                <div style="display: flex; gap: 40px;">
-                    <div>
-                        <span style="font-size: 0.7em; color: #8E8E93; text-transform: uppercase; font-weight: 600;">Optimal Sizing</span><br>
-                        <span style="font-size: 1.6em; font-weight: 800; color: {'#8E8E93' if is_waiting else '#00C805'};">{display_size:.2f}X</span>
-                    </div>
-                    <div>
-                        <span style="font-size: 0.7em; color: #8E8E93; text-transform: uppercase; font-weight: 600;">Time Decay</span><br>
-                        <span style="font-size: 1.4em; font-weight: 800; color: #007AFF;">{playbook.get('time_decay', 'Moderate')}</span>
-                    </div>
-                    <div>
-                        <span style="font-size: 0.7em; color: #8E8E93; text-transform: uppercase; font-weight: 600;">Confidence</span><br>
-                        <span style="font-size: 1.4em; font-weight: 800; color: #FFFFFF;">{playbook.get('confidence', 0):.2f}</span>
-                    </div>
-                </div>
-                <div style="text-align: right;">
-                    <span style="font-size: 0.75em; color: #8E8E93; text-transform: uppercase; font-weight: 600;">Primary Exposure Risk</span><br>
-                    <span style="font-size: 1.15em; font-weight: 700; color: #FF3B30;">{risk_name}</span>
-                </div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
     
-    # 🕵️ DATA TRUST & TRUST INDICATORS
-    source_label = ctx.get("source_mode", "UNKNOWN")
-    trust_color = "#00C805" if "TRUSTED" in source_label or "INSTITUTIONAL" in source_label else "#FF9500"
-    if "DEGRADED" in source_label: trust_color = "#FF3B30"
-    
-    # CSS for Pulse Animation (Phase 5 Polish)
-    st.markdown("""
-        <style>
-        @keyframes pulse-green {
-            0% { box-shadow: 0 0 0 0 rgba(0, 200, 5, 0.4); }
-            70% { box-shadow: 0 0 0 10px rgba(0, 200, 5, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(0, 200, 5, 0); }
-        }
-        .trust-pulse {
-            width: 8px; height: 8px; border-radius: 50%;
-            display: inline-block;
-            animation: pulse-green 2s infinite;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-    
-    st.markdown(f"""
-        <div style="display: flex; gap: 12px; margin-bottom: 25px; padding: 0 10px; -webkit-font-smoothing: antialiased; flex-wrap: wrap;">
-            <div style="background: rgba(255,255,255,0.03); padding: 6px 12px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.05); font-size: 0.85em; color: #8E8E93; display: flex; align-items: center; gap: 8px;">
-                <div class="{'trust-pulse' if trust_color == '#00C805' else ''}" style="width: 8px; height: 8px; border-radius: 50%; background: {trust_color};"></div>
-                Source: <span style="color: {trust_color}; font-weight: 800; text-shadow: 0 0 10px {trust_color}33;">{source_label}</span>
-            </div>
-            <div style="background: rgba(0,122,255,0.05); padding: 6px 12px; border-radius: 20px; border: 1px solid rgba(0,122,255,0.1); font-size: 0.85em; color: #8E8E93; display: flex; align-items: center; gap: 8px;">
-                <div style="width: 8px; height: 8px; border-radius: 50%; background: #007AFF;"></div>
-                Persistence: <span style="color: #007AFF; font-weight: 800; text-shadow: 0 0 10px #007AFF33;">{state.get('persistence_days', 1)}d</span>
-            </div>
-            <div style="background: rgba(255,149,0,0.05); padding: 6px 12px; border-radius: 20px; border: 1px solid rgba(255,149,0,0.1); font-size: 0.85em; color: #8E8E93; display: flex; align-items: center; gap: 8px;">
-                <div style="width: 8px; height: 8px; border-radius: 50%; background: {trans_color};"></div>
-                Analytical Drift: <span style="color: {trans_color}; font-weight: 800; text-shadow: 0 0 10px {trans_color}33;">{drift:+.2f} u</span>
-            </div>
-            <div style="background: rgba(90,200,250,0.05); padding: 6px 12px; border-radius: 20px; border: 1px solid rgba(90,200,250,0.1); font-size: 0.85em; color: #8E8E93; display: flex; align-items: center; gap: 8px;">
-                <div style="width: 8px; height: 8px; border-radius: 50%; background: #5AC8FA;"></div>
-                Synthetic Forward: <span style="color: #5AC8FA; font-weight: 800;">{intel.get('synthetic_forward', spot):,.1f}</span>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    # Dominant Decision (Single Authority)
+    action = narrative.get("dominant_action", "WAIT")
+    state = narrative.get("dominant_state", "NEUTRAL")
+    confidence = narrative.get("confidence", 0.0)
 
+    
+    # Action Colors & State
+    action_colors = {"ENTER": "#00C805", "EXIT": "#FF3B30", "WAIT": "#FF9500", "STAND ASIDE": "#8E8E93"}
+    action_color = safe_color(action_colors.get(action, "#8E8E93"))
+    
+    # Authoritative Alignment Visualization (Computed from Source)
+    alignment = master_setup.get("alignment", "ALIGNED")
+    alignment_color = safe_color("#00C805" if alignment == "ALIGNED" else "#FF9500" if alignment == "DIVERGENT" else "#FF3B30")
+    
+    # Upgrade: System is tradeable if we are entering OR exiting
+    is_tradeable = action in ("ENTER", "EXIT")
+
+    conf = narrative.get("execution_confidence", {})
+    conf_val = conf.get("value", 0.0)
+    conf_color = safe_color("#FF3B30" if conf_val < 0.4 else "#007AFF" if conf_val < 0.7 else "#00C805")
+    
+    # Operator Action Center (Authoritative View)
+    reasons_html = "".join([f'<div style="color: #E0E0E0; font-size: 1.1em; font-weight: 600; margin-bottom: 12px; display: flex; gap: 10px;"><span>✅</span> {safe(r)}</div>' for r in narrative.get('reasoning', [])])
+    triggers_html = "<br>• ".join([safe(t) for t in narrative.get('triggers', ["Maintain thesis monitoring."])])
+
+    st.markdown(f"""<div style="background: linear-gradient(180deg, rgba(30,30,30,0.95), rgba(20,20,20,0.98)); padding: 40px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 30px 60px rgba(0,0,0,0.5); margin-bottom: 30px;"><div style="display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 25px; margin-bottom: 25px;"><div style="flex: 2;"><span style="font-size: 0.9em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 2px;">Structural Authority State</span><div style="margin-top: 10px;"><span style="font-size: 2.8em; color: #FFFFFF; font-weight: 900; letter-spacing: -1.5px; text-transform: uppercase;">{safe(state)}</span></div></div><div style="flex: 1; text-align: right;"><span style="font-size: 0.9em; color: {action_color}; text-transform: uppercase; font-weight: 900; letter-spacing: 2px;">Required Action</span><div style="margin-top: 10px;"><span style="font-size: 3.5em; color: {action_color}; font-weight: 950; letter-spacing: 2px; text-shadow: 0 0 30px {action_color}44;">{safe(action)}</span></div></div></div><div style="display: flex; gap: 40px;"><div style="flex: 1.5; border-right: 1px solid rgba(255,255,255,0.05); padding-right: 30px;"><span style="font-size: 0.8em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Why This Action?</span><div style="margin-top: 15px;">{reasons_html}</div></div><div style="flex: 1.2; border-right: 1px solid rgba(255,255,255,0.05); padding-right: 30px;"><span style="font-size: 0.8em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Next Strategy Target</span><div style="margin-top: 15px; background: rgba(0,122,255,0.05); border: 1px solid rgba(0,122,255,0.1); padding: 15px; border-radius: 12px;"><span style="color: #007AFF; font-weight: 800; font-size: 1.2em;">{safe(narrative.get('next_trade'))}</span></div><div style="margin-top: 20px;"><span style="font-size: 0.75em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Activation Triggers</span><div style="margin-top: 8px; color: #AAAAAA; font-size: 0.9em; font-style: italic;">• {triggers_html}</div></div></div><div style="flex: 0.8;"><span style="font-size: 0.8em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Execution Confidence</span><div style="margin-top: 15px; text-align: center;"><div style="font-size: 2.2em; font-weight: 900; color: {conf_color};">{safe(conf.get('label'))}</div><div style="font-size: 1.1em; color: #FFFFFF; opacity: 0.6; margin-top: 2px;">{conf_val:.2f}</div><div style="margin-top: 15px; height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden;"><div style="width: {conf_val*100}%; height: 100%; background: {conf_color}; box-shadow: 0 0 15px {conf_color};"></div></div><div style="margin-top: 10px; font-size: 0.75em; color: #8E8E93; line-height: 1.3;">{safe(conf.get('reason'))}</div></div></div></div></div>""", unsafe_allow_html=True)
+
+    # ==================== 🧩 2. SUPPORTING MARKET LOGIC ====================
+    st.markdown("### 🧩 Supporting Market Logic")
+    c_beh, c_snap = st.columns([1.2, 1])
+    
+    with c_beh:
+        st.markdown("##### 🧩 Dealer Behavior Panel")
+        behaviors = cockpit.get("dealer_behavior", [])
+        beh_html = ""
+        for b in behaviors:
+            state_color = safe_color("#00C805" if b['state'] in ["LONG", "POSITIVE"] else "#FF3B30" if b['state'] in ["SHORT", "NEGATIVE"] else "#8E8E93")
+            beh_html += f'<div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 15px;">'
+            beh_html += f'<div style="flex: 0 0 80px; text-align: center; border-right: 1px solid rgba(255,255,255,0.1); padding-right: 10px;">'
+            beh_html += f'<span style="font-size: 0.7em; color: #8E8E93; text-transform: uppercase; font-weight: 800;">{safe(b["label"])}</span><br>'
+            beh_html += f'<span style="font-size: 1em; font-weight: 900; color: {state_color};">{safe(b["state"])}</span></div>'
+            beh_html += f'<div style="flex: 1; color: #5AC8FA; font-size: 1em; font-weight: 700;">{safe(b["behavior"])}</div></div>'
+        st.markdown(beh_html, unsafe_allow_html=True)
+
+    with c_snap:
+        st.markdown("##### 🧠 Greek Snapshot")
+        snapshot = cockpit.get("greek_snapshot", [])
+        snap_html = '<div style="background: rgba(255,255,255,0.03); border-radius: 12px; padding: 20px; border: 1px solid rgba(255,255,255,0.05);">'
+        for s in snapshot:
+            val_color = safe_color("#00C805" if s['color'] == "green" else "#FF3B30" if s['color'] == "red" else "#007AFF" if s['color'] == "blue" else "#FF9500")
+            snap_html += f'<div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">'
+            snap_html += f'<span style="color: #8E8E93; font-weight: 600; font-size: 0.9em;">{safe(s["label"])}</span>'
+            snap_html += f'<div style="text-align: right;"><span style="color: {val_color}; font-weight: 900; font-size: 1.1em;">{safe(s["value"])}</span><br>'
+            snap_html += f'<span style="color: #666; font-size: 0.7em; text-transform: uppercase; font-weight: 800;">{safe(s["meaning"])}</span></div></div>'
+        snap_html += '</div>'
+        st.markdown(snap_html, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    
     if conflict:
-        st.error(f"⚠️ **FLOW CONFLICT DETECTED**: {bias_conv.get('conflict_reason', 'Macro and GEX signals are diverging.')}")
+        st.error(f"⚠️ **FLOW CONFLICT DETECTED**: {safe(bias_conv.get('conflict_reason', 'Macro and GEX signals are diverging.'))}")
         
-    # --- SECTION: STRATEGY PLAYBOOK (V5) ---
-    st.write("### 📖 STRATEGY PLAYBOOK")
+    # --- SECTION: TACTICAL EXECUTION PLAN (CONSOLIDATED) ---
+    st.write("### 📖 TACTICAL EXECUTION PLAN")
     
-    # Calculate Alpha Metrics Highlights (Heat-mapped Phase 5)
-    conf = playbook.get('confidence', 0.0)
-    rev = playbook.get('reversion_strength', 0.0)
-    conf_color = "#FF3B30" if conf < 0.4 else "#007AFF" if conf < 0.7 else "#00C805"
-    rev_color = "#8E8E93" if rev < 0.4 else "#007AFF" if rev < 0.7 else "#5AC8FA"
+    if not is_tradeable:
+        st.info(f"🛡️ **STANDBY MODE**: {safe(narrative.get('next_trade', 'No target'))} is currently being monitored. Execution legs are hidden until activation triggers are met.")
     
     p1, p2 = st.columns([1, 1.2])
     with p1:
-        st.markdown(f"""<div style="background: linear-gradient(145deg, rgba(20, 20, 25, 0.98), rgba(30, 30, 35, 0.95)); padding: 25px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); border-left: 5px solid #007AFF; -webkit-font-smoothing: antialiased; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
-<span style="font-size: 0.85em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Structural Setup</span><br>
-<span style="font-size: 2.2em; font-weight: 900; color: #FFFFFF; line-height: 1.1; letter-spacing: -1px; text-shadow: 0 2px 10px rgba(0,0,0,0.3);">{playbook.get('setup', strategy_name)}</span><br>
-<div style="margin-top: 15px;">
-    <span style="font-size: 0.85em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Tactical Action</span><br>
-    <div style="display: inline-block; margin-top: 5px; background: {action_color}; color: black; padding: 5px 15px; border-radius: 8px; font-weight: 900; font-size: 1.1em; letter-spacing: 1.5px; box-shadow: 0 4px 15px {action_color}44;">{action_signal}</div>
-</div>
-<div style="display: flex; gap: 15px; margin-top: 30px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 20px;">
-<div style="flex: 1; background: rgba(255,255,255,0.03); padding: 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.05); box-shadow: inset 0 0 15px rgba(0,0,0,0.2); position: relative; overflow: hidden;">
-<span style="font-size: 0.7em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Confidence</span><br>
-<span style="font-size: 1.5em; font-weight: 900; color: {conf_color}; text-shadow: 0 0 20px {conf_color}66;">{conf:.2f}</span>
-<div style="position: absolute; bottom: 0; left: 0; height: 3px; width: {conf*100}%; background: {conf_color}; box-shadow: 0 0 10px {conf_color}AA;"></div>
-</div>
-<div style="flex: 1; background: rgba(255,255,255,0.03); padding: 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.05); box-shadow: inset 0 0 15px rgba(0,0,0,0.2); position: relative; overflow: hidden;">
-<span style="font-size: 0.7em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Reversion Str</span><br>
-<span style="font-size: 1.5em; font-weight: 900; color: {rev_color}; text-shadow: 0 0 20px {rev_color}66;">{rev:.2f}</span>
-<div style="position: absolute; bottom: 0; left: 0; height: 3px; width: {rev*100}%; background: {rev_color}; box-shadow: 0 0 10px {rev_color}AA;"></div>
-</div>
-</div>
-</div>""", unsafe_allow_html=True)
-        
-        # 3. Decision Trails (Heat-mapped)
-        trail = playbook.get('decision_trail', [])
-        
-        # [P2 Fix] Suppression Logic for Legs
-        is_actionable = playbook.get("action") not in ("WAIT", "STAND ASIDE", "DECISION_ONLY")
-        is_suppressed = master_setup.get("strike_plan", {}).get("suppressed", False)
-        
-        if is_suppressed or not is_actionable:
-            st.warning(f"🛡️ **PLAN SUPPRESSED**: {master_setup.get('strike_plan', {}).get('reason', 'Conditions not met for active execution.')}")
-            st.info("The legs below are for **Reference Only** and should not be traded in current conditions.")
-
         st.markdown("**Decision Trail**")
-        for step in trail:
+        for step in narrative.get('decision_trail', []):
             st.caption(f"🔍 {step}")
             
-        st.markdown("**Why This Trade**")
-        for w in playbook.get("why", []):
-            st.markdown(f"✅ {w}")
-            
         st.markdown("**Primary Risk**")
-        risk_obj = playbook.get("risk", "Theta Decay / Whipsaw")
+
+        risk_obj = narrative.get("risk", "Standard Greek Decay / Whipsaw")
         if isinstance(risk_obj, dict):
             st.markdown(f"⚠️ **{risk_obj.get('risk_type', 'Market Noise')}**")
             st.caption(f"**Invalidation**: {risk_obj.get('invalidation', 'Thesis holds.')}")
@@ -508,58 +444,36 @@ try:
             st.markdown(f"⚠️ {risk_obj}")
 
     with p2:
-        # Dynamic Styling for Legibility
-        is_waiting = (playbook.get("action") == "WAIT")
-        action_state = "PLAN (Not Active)" if is_waiting else "ACTIVE EXECUTION"
-        
-        # Force a Dark Slate background for the box to ensure visibility on light themes
-        plan_bg = "rgba(20, 20, 25, 0.95)" if is_waiting else "rgba(0, 40, 5, 0.95)"
-        plan_border = "rgba(255, 255, 255, 0.1)" if is_waiting else "rgba(0, 200, 5, 0.3)"
-        accent_color = "#8E8E93" if is_waiting else "#00C805"
-        text_color = "#E0E0E0" # High contrast silver/white
+        if is_tradeable:
+            # Dynamic Styling for Legibility
+            action_state = "ACTIVE EXECUTION" if action == "ENTER" else "EXIT / UNWIND"
+            plan_bg = "rgba(0, 40, 5, 0.95)" if action == "ENTER" else "rgba(40, 5, 0, 0.95)"
+            plan_border = "rgba(0, 200, 5, 0.3)" if action == "ENTER" else "rgba(200, 5, 0, 0.3)"
+            accent_color = "#00C805" if action == "ENTER" else "#FF3B30"
+            text_color = "#E0E0E0"
 
-        strike_plan = playbook.get("strike_plan", {})
-        is_waiting = (playbook.get("action") in ("WAIT", "DECISION_ONLY", "STAND ASIDE"))
-        is_suppressed = strike_plan.get("suppressed", False)
-        
-        rows = ""
-        for key, label in [("sell_ce", "SELL"), ("sell_pe", "SELL"), ("buy_leg", "BUY"), 
-                            ("sell_leg", "SELL"), ("buy_ce", "BUY"), ("buy_pe", "BUY")]:
-            val = strike_plan.get(key)
-            if val:
-                suffix = "CE" if "ce" in key else "PE" if "pe" in key else "LEG"
-                # [P2 Fix] Explicit State Visualization
-                status_text = "EXECUTE"
-                status_color = text_color
-                if is_suppressed:
-                    status_text = "N/A (BLOCKED)"
-                    status_color = "#FF3B30"
-                elif is_waiting:
-                    status_text = "WATCHING"
-                    status_color = "#FF9500"
+            # [AUTHORITATIVE FIX] Source strike plan ONLY from narrative-sanctioned execution plan
+            
+            st.markdown(f"### <span style='color:{accent_color}'>{action_state}</span>", unsafe_allow_html=True)
+            if isinstance(execution_plan, dict):
+                st.caption(f"**{execution_plan.get('template', 'TACTICAL TEMPLATE').upper()}**")
+                for leg in execution_plan.get("legs", []):
+                    st.markdown(f"- **{leg['type']} {leg['opt']}** → `{leg['strike']}`")
+            else:
+                st.caption("**TACTICAL TEMPLATE**")
+                st.write("No trade structure viable for current state.")
                 
-                rows += f'<tr><td style="color: #AAAAAA; padding: 5px 0;">{label} {val} {suffix}</td><td style="text-align: right; color: {status_color}; font-weight: 900; letter-spacing: 1px;">{ status_text }</td></tr>'
-
-        st.markdown(f"""<div style="background: {plan_bg}; padding: 25px; border-radius: 15px; border: 1px solid {plan_border}; -webkit-font-smoothing: antialiased; box-shadow: 0 8px 30px rgba(0,0,0,0.5);">
-<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-<span style="font-size: 0.9em; color: {accent_color}; font-weight: 900; letter-spacing: 2px;">{action_state}</span>
-<span style="font-size: 0.75em; color: #FFFFFF; background: rgba(255,255,255,0.15); padding: 4px 10px; border-radius: 6px; font-weight: 800; text-transform: uppercase;">{strike_plan.get('template', 'NO TEMPLATE')}</span>
-</div>
-<table style="width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', 'Roboto Mono', monospace; font-size: 1.25em;">
-{rows if rows else f'<tr><td colspan="2" style="color: #8E8E93; text-align: center; padding: 20px;">No trade structure viable for current state.</td></tr>'}
-</table>
-<div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1);">
-<span style="font-size: 0.85em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Activation Trigger</span><br>
-<div style="color: {text_color}; font-weight: 700; margin-top: 5px; font-size: 1.1em;">
-{' • ' + '<br> • '.join(playbook.get('triggers', ['Maintain thesis monitoring.'])) if playbook.get('triggers') else 'Manual confirmation required.'}
-</div>
-</div>
-</div>""", unsafe_allow_html=True)
+            st.markdown("---")
+            st.markdown("**Activation Trigger**")
+            for t in narrative.get('triggers', ['Manual confirmation required.']):
+                st.markdown(f"* {safe(t)}")
+        else:
+            st.caption("Execution legs are suppressed. Clear the activation triggers to view strike details.")
             
         st.markdown("### 🎯 Threat Invalidation")
-        st.error(f"**STOP THESIS**: {playbook.get('invalidation', 'Thesis holds in current regime.')}")
-        if playbook.get("avoid"):
-            for a in playbook.get("avoid", []):
+        st.error(f'**STOP THESIS**: {narrative.get("invalidation", "Thesis holds in current regime.")}')
+        if narrative.get('avoid'):
+            for a in narrative.get('avoid', []):
                 st.markdown(f"⚠️ **GUARDRAIL**: {a}")
         else:
             st.write("No active guardrail violations.")
@@ -586,13 +500,14 @@ try:
     for l in sorted_levels:
         is_spot = (l["label"] == "SPOT")
         # Contrast handling for text
-        text_color = "#FFFFFF" if l['label'] in ("CALL WALL", "PUT WALL", "SPOT") else "#121212"
+        text_color = safe_color("#FFFFFF" if l['label'] in ("CALL WALL", "PUT WALL", "SPOT") else "#121212")
+        l_color = safe_color(l['color'])
         
         strip_html += f"""
-        <div style="flex: 1; background: {l['color']}; padding: 15px 5px; border-radius: 6px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.3); position: relative; min-width: 80px;">
-            <div style="font-size: 0.65em; font-weight: 900; color: {text_color}; opacity: 0.9; text-transform: uppercase; letter-spacing: 1px;">{l['label']}</div>
+        <div style="flex: 1; background: {l_color}; padding: 15px 5px; border-radius: 6px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.3); position: relative; min-width: 80px;">
+            <div style="font-size: 0.65em; font-weight: 900; color: {text_color}; opacity: 0.9; text-transform: uppercase; letter-spacing: 1px;">{safe(l['label'])}</div>
             <div style="font-size: 1.15em; font-weight: 900; color: {text_color}; font-family: 'JetBrains Mono', monospace; margin-top: 4px;">{l['val']:,.0f}</div>
-            {"<div style='position: absolute; top: -10px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 10px solid " + l['color'] + ";'></div>" if is_spot else ""}
+            {"<div style='position: absolute; top: -10px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 10px solid " + l_color + ";'></div>" if is_spot else ""}
         </div>
         """
     strip_html += '</div>'
@@ -602,17 +517,18 @@ try:
     st.markdown(strip_html, unsafe_allow_html=True)
     
     # Reversion Signal Details
-    rev_label = playbook.get('reversion_label', 'WAIT')
-    rev_color = "#00C805" if rev_label == "HIGH_REVERSION" else "#FF9500" if rev_label == "MODERATE_REVERSION" else "gray"
+    rev_data = narrative.get("reversion", {})
+    rev_label = safe(rev_data.get("label", "NEUTRAL"))
+    rev_color = safe_color("#00C805" if rev_label == "HIGH_REVERSION" else "#FF9500" if rev_label == "MODERATE_REVERSION" else "gray")
     
     c_rev1, c_rev2 = st.columns([1, 1])
     with c_rev1:
         st.markdown(f"**Reversion Signal**: <span style='color:{rev_color}; font-weight:700;'>{rev_label}</span>", unsafe_allow_html=True)
-        st.caption(f"Score: `{playbook.get('reversion_score', 0.0)}/10` | Proxy: `{playbook.get('vwap_proxy', 'N/A')}`")
+        st.caption(f"Score: `{rev_data.get('score', 0.0)}/10`")
     with c_rev2:
-        if playbook.get('reversion_reasons'):
+        if rev_data.get("reasons"):
             st.markdown("**Drivers**")
-            st.caption(", ".join(playbook.get('reversion_reasons')))
+            st.caption(", ".join(rev_data.get("reasons")))
 
     # Spot Drift Warning
     if source == "CACHED" and meta.get("spot_at_fetch"):
@@ -743,10 +659,9 @@ try:
             st.markdown("### 1️⃣ DECISION CARD")
             # --- PHASE 4: EXPLICIT ACTION LABEL SURFACING ---
             st.markdown(f"""
-                <div style="background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; border-left: 5px solid {ui['trade_action'].get('color', '#2979ff')}; margin-bottom: 12px;">
-                    <span style="font-size: 0.8em; color: gray; text-transform: uppercase;">Operator Action</span><br>
-                    <span style="font-size: 1.3em; font-weight: 800; color: white;">{safe(ui['trade_action']['label'].upper())}</span>
-                </div>
+                <div style="background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; border-left: 5px solid {action_color}; margin-bottom: 12px;">
+                    <span style="font-size: 0.75em; color: #8E8E93; text-transform: uppercase; font-weight: 800;">Dominant Strategy Action</span><br>
+                    <span style="font-size: 1.3em; font-weight: 900; color: white;">{action.upper()}</span>
             """, unsafe_allow_html=True)
             
             flip_lvl = flow_metrics.get("gamma_flip_level", None)
@@ -762,23 +677,24 @@ try:
             if pnl:
                 st.markdown(f"**Est. Yield**: ₹{int(pnl.get('net',0)):,} <span style='color:gray; font-size:0.8em'>(Gross: ₹{int(pnl.get('gross',0)):,})</span>", unsafe_allow_html=True)
 
-            st.markdown(f"**Alignment**: <span style='color:{ui['alignment_color']}; font-weight:bold'>{safe(master_setup.get('alignment', 'ALIGNED'))}</span>", unsafe_allow_html=True)
+            st.markdown(f"**Alignment**: <span style='color:{alignment_color}; font-weight:bold'>{safe(master_setup.get('alignment', 'ALIGNED'))}</span>", unsafe_allow_html=True)
             gamma_regime = str(flow_metrics.get("gamma_regime", "UNKNOWN")).split("(")[0].strip()
-            st.caption(f"State: {gamma_regime} | {ui['tv_ratio']['label']}")
+            st.caption(f"State: {gamma_regime} | {narrative.get('reversion', {}).get('label', 'Neutral')}")
 
         with d_cols[1]:
             st.markdown("### 2️⃣ ENVIRONMENT PANEL")
-            rb = ui["regime_badge"]
+            rb = master_setup.get('regime_badge', {'label': 'Passive', 'color': 'gray'})
             vix_val = vix_df["Close"].iloc[-1] if vix_df is not None else 0
             vix_badge = f"<span style='background-color:#444; color:white; padding:2px 6px; border-radius:4px; font-size:0.7em; margin-left:10px'>VIX: {vix_val:.1f}</span>"
-            st.markdown(f"**Regime**: <span style='color:{rb['color']}; font-weight:bold; font-size:1.1em'>{rb['label']}</span>{vix_badge}", unsafe_allow_html=True)
+            st.markdown(f"**Regime**: <span style='color:{safe_color(rb['color'])}; font-weight:bold; font-size:1.1em'>{safe(rb['label'])}</span>{vix_badge}", unsafe_allow_html=True)
             
             vt_label = vol_trend.get("vol_trend", "Stable")
             vt_color = "#FF3B30" if "Rising" in vt_label else "#00C805" if "Falling" in vt_label else "gray"
-            st.markdown(f"**Vol Trend**: <span style='color:{vt_color};'>{vt_label}</span>", unsafe_allow_html=True)
+            st.markdown(f"**Vol Trend**: <span style='color:{safe_color(vt_color)};'>{safe(vt_label)}</span>", unsafe_allow_html=True)
             st.markdown(f"**ATM IV**: `{current_atm_iv:.1f}%` (Rank: `{iv_data.get('iv_rank', 50.0)}%`)")
             st.markdown(f"**Flow Label**: `{flow_metrics.get('flow_regime_label', 'Passive')}`")
-            st.markdown(f"**TV Ratio**: `{ui['tv_ratio']['val']}` <span style='color:{ui['tv_ratio']['color']}; font-weight:bold'>({ui['tv_ratio']['label']})</span>", unsafe_allow_html=True)
+            rev_data = narrative.get('reversion', {})
+            st.markdown(f'**Reversion**: `{rev_data.get("score", 0.0)}/10` <span style="color:{safe_color(vt_color)}; font-weight:bold">({safe(rev_data.get("label", "Neutral"))})</span>', unsafe_allow_html=True)
             
             iq = flow_metrics.get("institutional_iq", {})
             if iq:
@@ -807,33 +723,28 @@ try:
             st.markdown("#### ⚡ EXECUTION INSTRUCTIONS")
             st.markdown(f"**Mode**: **{mode}**")
             
-            # FIX 10 (Phase 5.8 Review): Unified execution display using playbook strike_plan
-            # This is the single source of truth for trade legs, with suppression logic applied
-            template = master_setup.get("template")
-            pb_plan = playbook.get("strike_plan", {})
-            pb_suppressed = pb_plan.get("suppressed", False)
+             # This is the single source of truth for trade legs, with suppression logic applied
+
+
+
             
-            if pb_plan.get("template"):
-                st.info(f"**Structure**: {pb_plan.get('template', 'N/A')} | Schema: `{pb_plan.get('schema', 'NONE')}`")
+            if is_tradeable and execution_plan.get("template"):
+                st.info(f"**Structure**: {execution_plan.get('template', 'N/A')} | Schema: `{execution_plan.get('schema', 'NONE')}`")
             
             st.markdown("**EXECUTION LEGS:**")
             _leg_shown = False
             for key, label in [("sell_ce", "Sell Call"), ("sell_pe", "Sell Put"), 
                                ("buy_ce", "Buy Call"), ("buy_pe", "Buy Put"),
                                ("sell_leg", "Sell Leg"), ("buy_leg", "Buy Leg")]:
-                val = pb_plan.get(key)
+                val = execution_plan.get(key)
                 if val and isinstance(val, (int, float)) and val > 0:
-                    if pb_suppressed:
-                        st.markdown(f"- **{label}** → `—` *(blocked)*")
-                    else:
-                        st.markdown(f"- **{label}** → `{int(val)}`")
+                    st.markdown(f"- **{label}** → `{int(val)}`")
                     _leg_shown = True
             
             if not _leg_shown:
                 st.markdown("- No trade structure viable for current state.")
             
-            if pb_suppressed:
-                st.warning(f"🛡️ **BLOCKED**: {pb_plan.get('reason', 'Conditions not met.')}")
+
 
 
             st.divider()
@@ -859,35 +770,20 @@ try:
             st.markdown("**Executive Summary**")
             st.info(master_setup.get("executive_summary", {}).get("rationale", "Follow primary bias rules for the current regime."))
                     
-            payoff = template.get("payoff_summary", {})
-            if payoff:
+            payoff = narrative.get("payoff_summary", {})
+            if payoff and payoff.get("structure") != "No Trade":
                 st.divider()
                 st.markdown("**PAYOFF MATRIX**")
                 p1, p2 = st.columns(2)
                 
-                # Compute R:R
-                max_p_str = str(payoff.get('max_profit', 'N/A'))
-                rp = payoff.get('risk_proxy_inr', 1.0)
-                rr_str = ""
-                try:
-                    cleaned = re.sub(r"[^\d.]", "", max_p_str)
-                    p_val = float(cleaned) if cleaned else 0.0
-                    if p_val == 0.0:
-                        rr_str = " <span style='color:gray'>(R:R unavailable)</span>"
-                    elif isinstance(rp, (int, float)) and rp > 0:
-                        rr = p_val / rp
-                        rr_str = f" <span style='color:gray; font-size: 0.8em;'>(1:{1/rr:.1f} R:R)</span>"
-                except Exception:
-                    rr_str = " <span style='color:gray'>(R:R parse error)</span>"
-                    
                 with p1:
-                    st.markdown(f"**Max Profit**: {payoff.get('max_profit', 'N/A')}{rr_str}", unsafe_allow_html=True)
-                    st.write(f"**Max Loss**: {payoff.get('max_loss', 'N/A')}")
+                    st.markdown(f"**Max Reward**: {safe(str(payoff.get('max_reward', 'N/A')))}")
+                    st.write(f"**Max Risk**: {safe(str(payoff.get('max_risk', 'N/A')))}")
                 with p2:
-                    st.write(f"**Risk Proxy**: ₹{int(rp):,}" if isinstance(rp, (int, float)) else "N/A")
-                    be_u, be_l = payoff.get('breakeven_upper'), payoff.get('breakeven_lower')
-                    if be_u and be_l:
-                        st.write(f"**Breakevens**: {be_l:.0f} - {be_u:.0f}")
+                    st.write(f"**Structure**: {safe(str(payoff.get('structure', 'N/A')))}")
+                    bes = payoff.get('breakevens', [])
+                    if bes:
+                        st.write(f"**Breakevens**: {', '.join(bes)}")
                     else:
                         st.write("**Breakevens**: N/A")
 
@@ -915,13 +811,26 @@ try:
     with tab_intel:
         st.header("📉 GREEK INTERPRETATION LAYER")
         gr1, gr2, gr3 = st.columns(3)
-        gr4, gr5, gr6 = st.columns(3)
-        with gr1: st.metric("Net Delta", ui["greeks"]["delta"])
-        with gr2: st.metric("Absolute GEX", ui["greeks"]["gex_abs"])
-        with gr3: st.metric("Net GEX", ui["greeks"]["gex_net"])
-        with gr4: st.metric("Total Vega", ui["greeks"]["vega"])
-        with gr5: st.metric("Total Theta", ui["greeks"]["theta"])
-        with gr6: st.metric("T/V Carry", ui["tv_ratio"]["val"], delta=ui["tv_ratio"]["label"])
+        gr4, gr5, gr6, gr7 = st.columns(4)
+        
+        g_ui = ui.get("greeks", {})
+        with gr1:
+            st.metric("Net Delta", g_ui.get("delta", "N/A"))
+        with gr2:
+            st.metric("Absolute GEX", g_ui.get("gex_abs", "N/A"))
+        with gr3:
+            st.metric("Net GEX", g_ui.get("gex_net", "N/A"))
+            
+        with gr4:
+            st.metric("Total Vega", g_ui.get("vega", "N/A"))
+        with gr5:
+            st.metric("Total Theta", g_ui.get("theta", "N/A"))
+        with gr6:
+            vanna_val = ui.get("greeks", {}).get("vanna", "N/A")
+            st.metric("Total Vanna", vanna_val)
+        with gr7:
+            tv = flow_metrics.get("tv_ratio", "N/A")
+            st.metric("T/V Carry", f"x{tv:.2f}" if isinstance(tv, (int, float)) else "N/A")
             
         from nde_options_logic import classify_greek_market_state
         greek_state = classify_greek_market_state(flow_metrics)
@@ -1006,14 +915,19 @@ try:
         # Phase 46: Dynamic Window Alignment
         # Expand window to include any suggested trade strikes
         trade_strikes = []
-        if master_setup.get("template") and "execution" in master_setup["template"]:
-            exec_data = master_setup["template"]["execution"]
-            trade_strikes = [v for k, v in exec_data.items() if "strike" in k or k.startswith("sell_") or k.startswith("buy_")]
+        exec_plan = narrative.get("execution_plan", {})
+        if exec_plan and isinstance(exec_plan, dict):
+            trade_strikes = [leg.get("strike") for leg in exec_plan.get("legs", []) if leg.get("strike")]
             trade_strikes = [s for s in trade_strikes if isinstance(s, (int, float)) and s > 0]
             
         # Default window +/- 400 around spot
         min_win = min([spot - 400] + trade_strikes) if trade_strikes else spot - 400
         max_win = max([spot + 400] + trade_strikes) if trade_strikes else spot + 400
+        
+        # FINAL HARDENING: Protect against NaN conversion in range()
+        if pd.isna(min_win) or pd.isna(max_win):
+            min_win, max_win = spot - 400, spot + 400
+            
         map_strikes = range(int(min_win)//50*50, int(max_win)//50*50 + 50, 50)
         
         raw_exp = flow_metrics.get("raw_exposures", pd.DataFrame())
@@ -1091,6 +1005,7 @@ try:
         st.subheader("24h Thesis Validity")
         audit_file = Path("notes/nde_strategy_log.jsonl")
         validity_score = None
+        audit_rows = []
         if audit_file.exists():
             try:
                 audit_rows = []
@@ -1156,9 +1071,10 @@ try:
 
     st.sidebar.markdown(f"""
     1. {highlight_strat('Gamma Flip', 'GAMMA_FLIP')} (Critical Pivot)
-    2. {highlight_strat('Trend/Mean Rev', 'TREND_ACCELERATION', 'MEAN_REVERSION')} (Regime Core)
-    3. {highlight_strat('Vanna Flow', 'VANNA')} (Vol Dependency)
-    4. {highlight_strat('Charm Decay', 'CHARM')} (Passivity)
+    2. {highlight_strat('Trend Acceleration', 'TREND_ACCELERATION')} (Momentum)
+    3. {highlight_strat('Mean Reversion', 'MEAN_REVERSION')} (Range Stability)
+    4. {highlight_strat('Vanna Flow', 'VANNA')} (Vol Dependency)
+    5. {highlight_strat('Charm Decay', 'CHARM')} (Passivity)
     """)
 
     st.sidebar.divider()

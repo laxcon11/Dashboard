@@ -325,7 +325,7 @@ if view_mode == "Detail":
         )
     if meta_rows:
         st.markdown("#### Source & Freshness")
-        st.dataframe(pd.DataFrame(meta_rows), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(meta_rows), use_container_width=True, hide_index=True)
 
 with st.expander("🇮🇳 India Domestic Cross-Check (Context Only - Not in Liquidity Score)", expanded=False):
     ctx = get_india_macro_signals_v1()

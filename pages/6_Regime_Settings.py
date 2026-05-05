@@ -179,15 +179,15 @@ else:
 st.markdown("---")
 btn1, btn2, btn3 = _responsive_cols(3)
 with btn1:
-    if st.button("💾 Save Settings", width='stretch'):
+    if st.button("💾 Save Settings"):
         save_regime_settings(settings)
         st.success("Settings saved.")
 with btn2:
-    if st.button("↩️ Reset to Defaults", width='stretch'):
+    if st.button("↩️ Reset to Defaults"):
         settings = reset_regime_settings()
         st.success("Reset to defaults. Refresh page to view default values.")
 with btn3:
-    if st.button("🔄 Reload Saved", width='stretch'):
+    if st.button("🔄 Reload Saved"):
         st.rerun()
 
 st.caption("`On` = include factor, `Inv` = inverse logic (higher value treated bearish), `Group` = cap bucket for anti-bias constraints.")

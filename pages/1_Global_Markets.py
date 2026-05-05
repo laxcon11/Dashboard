@@ -118,7 +118,7 @@ indices_df = create_price_table(
 )
 st.dataframe(
     _compact_table(indices_df, ["Index", "Price", "Change %"]),
-    width='stretch',
+    use_container_width=True,
     hide_index=True
 )
 
@@ -134,7 +134,7 @@ currency_df = create_price_table(
 )
 st.dataframe(
     _compact_table(currency_df, ["Pair", "Price", "Change %"]),
-    width='stretch',
+    use_container_width=True,
     hide_index=True
 )
 
@@ -199,7 +199,7 @@ for primary_symbol, name in COMMODITIES.items():
 commodity_df = pd.DataFrame(commodity_rows)
 st.dataframe(
     _compact_table(commodity_df, ["Commodity", "Price", "Change %"]),
-    width='stretch',
+    use_container_width=True,
     hide_index=True
 )
 
@@ -215,7 +215,7 @@ crypto_df = create_price_table(
 )
 st.dataframe(
     _compact_table(crypto_df, ["Asset", "Price", "Change %"]),
-    width='stretch',
+    use_container_width=True,
     hide_index=True
 )
 
@@ -231,7 +231,7 @@ bond_df = create_price_table(
 )
 st.dataframe(
     _compact_table(bond_df, ["Instrument", "Value", "Change"]),
-    width='stretch',
+    use_container_width=True,
     hide_index=True
 )
 

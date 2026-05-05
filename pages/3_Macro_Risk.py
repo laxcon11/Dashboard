@@ -258,6 +258,6 @@ _perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)
 if st.sidebar.checkbox("Show Performance Diagnostics", value=False):
     st.sidebar.dataframe(
         pd.DataFrame([{"Step": k, "Seconds": v} for k, v in _perf.items()]),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )

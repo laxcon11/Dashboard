@@ -80,7 +80,7 @@ with left:
         except Exception:
             st.caption("Snapshot parse failed.")
 
-    if st.button("Run EOD Snapshot Now", width="stretch"):
+    if st.button("Run EOD Snapshot Now"):
         rc, out = run_script("eod_pipeline.py")
         if rc == 0:
             st.success("EOD pipeline completed.")
@@ -90,7 +90,7 @@ with left:
 
 with right:
     st.subheader("🚨 Alert Engine")
-    if st.button("Run Alerts Check", width="stretch"):
+    if st.button("Run Alerts Check"):
         rc, out = run_script("alert_engine.py")
         if rc == 0:
             st.success("Alert check completed.")
@@ -118,7 +118,7 @@ st.markdown("---")
 st.subheader("🕒 GIFT NIFTY Poller")
 g1, g2 = _responsive_cols(2, [1, 1])
 with g1:
-    if st.button("Run GIFT Poll (Once)", width="stretch"):
+    if st.button("Run GIFT Poll (Once)"):
         rc, out = run_script("poll_gift_nifty.py", ["--once"])
         if rc == 0:
             st.success("GIFT poll completed.")
@@ -136,7 +136,7 @@ st.markdown("---")
 st.subheader("🧰 Recovery Tools")
 col1, col2, col3, col4, col5 = _responsive_cols(5)
 with col1:
-    if st.button("Health Check", width="stretch"):
+    if st.button("Health Check"):
         rc, out = run_script("recovery_tools.py", ["--health"])
         if rc == 0:
             st.success("Health check complete.")
@@ -144,7 +144,7 @@ with col1:
             st.error(f"Health check returned code {rc}.")
         st.code(out[-4000:] if out else "(no output)", language="text")
 with col2:
-    if st.button("Rebuild History", width="stretch"):
+    if st.button("Rebuild History"):
         rc, out = run_script("recovery_tools.py", ["--rebuild-history"])
         if rc == 0:
             st.success("History rebuild complete.")
@@ -152,7 +152,7 @@ with col2:
             st.error(f"History rebuild returned code {rc}.")
         st.code(out[-4000:] if out else "(no output)", language="text")
 with col3:
-    if st.button("Repair Stale", width="stretch"):
+    if st.button("Repair Stale"):
         rc, out = run_script("recovery_tools.py", ["--repair-stale-bhavcopy"])
         if rc == 0:
             st.success("Stale repair complete.")
@@ -160,7 +160,7 @@ with col3:
             st.error(f"Stale repair returned code {rc}.")
         st.code(out[-4000:] if out else "(no output)", language="text")
     backfill_days = st.number_input("Backfill Days", min_value=1, max_value=365, value=30, step=1)
-    if st.button("Run Backfill", width="stretch"):
+    if st.button("Run Backfill"):
         rc, out = run_script("recovery_tools.py", ["--backfill-days", str(int(backfill_days))])
         if rc == 0:
             st.success("Backfill complete.")
@@ -168,14 +168,14 @@ with col3:
             st.error(f"Backfill returned code {rc}.")
         st.code(out[-4000:] if out else "(no output)", language="text")
 with col4:
-    if st.button("Trust Score", width="stretch"):
+    if st.button("Trust Score"):
         rc, out = run_script("recovery_tools.py", ["--trust-score"])
         if rc == 0:
             st.success("Trust score complete.")
         else:
             st.error(f"Trust score returned code {rc}.")
         st.code(out[-4000:] if out else "(no output)", language="text")
-    if st.button("Run Regime Sanity Tests", width="stretch"):
+    if st.button("Run Regime Sanity Tests"):
         rc, out = run_script("regime_sanity_tests.py")
         if rc == 0:
             st.success("Regime sanity tests passed.")
@@ -183,7 +183,7 @@ with col4:
             st.error(f"Sanity tests failed (code {rc}).")
         st.code(out[-4000:] if out else "(no output)", language="text")
 with col5:
-    if st.button("Backfill Regime", width="stretch"):
+    if st.button("Backfill Regime"):
         rc, out = run_script("recovery_tools.py", ["--backfill-regime-history"])
         if rc == 0:
             st.success("Regime history backfilled.")
@@ -195,7 +195,7 @@ st.markdown("---")
 st.subheader("🧾 Bhavcopy Parity")
 pc1, pc2 = _responsive_cols(2, [1, 1])
 with pc1:
-    if st.button("Run Parity Report", width="stretch"):
+    if st.button("Run Parity Report"):
         rc, out = run_script("bhavcopy_parity_report.py")
         if rc == 0:
             st.success("Parity report generated.")
@@ -221,7 +221,7 @@ st.markdown("---")
 st.subheader("🛡 Data Trust Score")
 t1, t2 = _responsive_cols(2, [1, 1])
 with t1:
-    if st.button("Run Data Trust Score", width="stretch"):
+    if st.button("Run Data Trust Score"):
         rc, out = run_script("data_trust_score.py")
         if rc == 0:
             st.success("Data trust report generated.")
@@ -249,7 +249,7 @@ st.markdown("---")
 st.subheader("🧪 Prediction Integrity")
 pi1, pi2, pi3 = _responsive_cols(3, [1, 1, 1])
 with pi1:
-    if st.button("Run Integrity Cycle", width="stretch"):
+    if st.button("Run Integrity Cycle"):
         rc, out = run_script("prediction_integrity_cycle.py")
         if rc == 0:
             st.success("Prediction integrity cycle completed.")
@@ -258,7 +258,7 @@ with pi1:
         st.code(out[-4000:] if out else "(no output)", language="text")
 with pi2:
     month_pi = st.text_input("Calibration Month (YYYY-MM)", value="", key="pi_cal_month")
-    if st.button("Generate Calibration", width="stretch"):
+    if st.button("Generate Calibration"):
         args = ["--month", month_pi] if month_pi else None
         rc, out = run_script("prediction_calibration_monthly.py", args)
         if rc == 0:
@@ -267,7 +267,7 @@ with pi2:
             st.error(f"Calibration generation failed (code {rc}).")
         st.code(out[-4000:] if out else "(no output)", language="text")
 with pi3:
-    if st.button("Apply Approved Proposal", width="stretch"):
+    if st.button("Apply Approved Proposal"):
         rc, out = run_script("prediction_apply_proposal.py", ["--approved-by", "ops_page"])
         if rc == 0:
             st.success("Approved proposal apply run complete.")
@@ -279,7 +279,7 @@ st.markdown("---")
 st.subheader("🧮 Scoring Audit")
 sa1, sa2 = _responsive_cols(2, [1, 1])
 with sa1:
-    if st.button("Run Scoring Audit", width="stretch"):
+    if st.button("Run Scoring Audit"):
         rc, out = run_script("scoring_audit_report.py")
         if rc == 0:
             st.success("Scoring audit completed.")

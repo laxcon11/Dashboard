@@ -213,7 +213,7 @@ with st.expander("Completed (Hidden from Active TODO)", expanded=False):
     else:
         done_df = pd.DataFrame(completed)
         cols = [c for c in ["completed_at", "title", "area", "priority", "owner", "due_date", "condition"] if c in done_df.columns]
-        st.dataframe(done_df[cols].sort_values("completed_at", ascending=False), width="stretch", hide_index=True)
+        st.dataframe(done_df[cols].sort_values("completed_at", ascending=False), use_container_width=True, hide_index=True)
         if st.button("Clear Completed History", type="secondary"):
             store["completed"] = []
             _save_store(store)

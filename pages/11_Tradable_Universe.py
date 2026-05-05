@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import watchlist_manager as wm
+from datetime import datetime, timedelta
 import streamlit as st
 
 from NSE_Config import NIFTY_200, PRESET_WATCHLISTS, SECTOR_CATEGORIES
@@ -17,7 +19,8 @@ device_mode = get_ui_device_mode("Desktop")
 is_mobile = device_mode == "Mobile"
 st.title("✅ Tradable Universe")
 st.caption("Consolidated tradable setups across categories with 20-day context.")
-st.caption(f"Device mode: **{device_mode}**")
+if view_mode == "Detail":
+    st.caption(f"Device mode: **{device_mode}**")
 
 SNAPSHOT_PATH = Path("data/snapshots/tradable_signals.parquet")
 SNAPSHOT_META_PATH = Path("data/snapshots/tradable_signals_meta.json")
@@ -64,7 +67,7 @@ def _write_tradable_heartbeat(success: bool, details: str = "") -> None:
 
 ctl1, ctl2 = _responsive_cols(2, [1, 3])
 with ctl1:
-    if st.button("Run Full Refresh", width="stretch"):
+    if st.button("Run Full Refresh"):
         cmd = [sys.executable, "scripts/tradable_universe_refresh.py"]
         subprocess.Popen(cmd, cwd=str(BASE_DIR))
         st.session_state["is_refreshing"] = True
@@ -105,10 +108,10 @@ def _is_trading_day(d: pd.Timestamp) -> bool:
     return bool(is_nse_trading_day(d))
 
 
-def _calc_streak(date_set: set[pd.Timestamp], ordered_dates: list[pd.Timestamp], current_d: pd.Timestamp) -> int:
-    if current_d not in date_set or current_d not in ordered_dates:
+def _calc_streak(date_set: set[pd.Timestamp], ordered_dates: list[pd.Timestamp], date_index_map: dict, current_d: pd.Timestamp) -> int:
+    if current_d not in date_set or current_d not in date_index_map:
         return 0
-    idx = ordered_dates.index(current_d)
+    idx = date_index_map[current_d]
     count = 0
     for j in range(idx, -1, -1):
         if ordered_dates[j] in date_set:
@@ -195,6 +198,7 @@ prev_keys = set(zip(prev_rows.get("symbol", pd.Series(dtype=str)), prev_rows.get
 # Only show in dropped if the *symbol* is completely gone from today's list
 dropped_keys = sorted([(s, t) for s, t in (prev_keys - today_keys) if s not in today_symbols])
 
+date_index_map = {d: i for i, d in enumerate(lookback_dates)}
 ctx_rows = []
 for _, r in today_rows.iterrows():
     sym = str(r["symbol"])
@@ -202,7 +206,7 @@ for _, r in today_rows.iterrows():
     h_setup = hist20[(hist20["symbol"] == sym) & (hist20["setup_type"] == stype)]
     setup_dates = sorted(h_setup["date"].unique().tolist())
     setup_days = len(setup_dates)
-    setup_streak = _calc_streak(set(setup_dates), lookback_dates, latest_date)
+    setup_streak = _calc_streak(set(setup_dates), lookback_dates, date_index_map, latest_date)
     qhist = pd.to_numeric(h_setup.get("quality_score"), errors="coerce").dropna().tail(5)
     qtrend = float(qhist.iloc[-1] - qhist.iloc[0]) if len(qhist) >= 3 else 0.0
     is_new = setup_days == 1
@@ -226,6 +230,12 @@ for _, r in today_rows.iterrows():
     if is_overlap:
         tags.append("OVERLAP")
         icons += " 💠"
+        
+    ltp = float(r.get("ltp", 0.0))
+    entry_px = float(r.get("suggested_entry", 0.0))
+    if entry_px > 0 and abs(ltp - entry_px) / entry_px <= 0.005:
+        tags.append("NEAR ENTRY")
+        icons += " 🔔"
 
     # Specific icon for setup type if not already decorated
     if stype == "Momentum 🚀" and "🚀" not in icons: icons += " 🚀"
@@ -343,46 +353,104 @@ st.caption(f"Latest run: {latest_run_date.date()} | Lookback days loaded: {len(l
 if tradable_df.empty:
     st.info("No tradable setups in latest snapshot.")
 else:
+    st.caption("LTP from last scan — not live")
+    select_mode = st.toggle("🎯 Select Trades to Log", value=False)
+
     show_df = tradable_df.copy()
     show_df["Score"] = show_df["Score"].map(lambda x: f"{x:.2f}")
     show_df["Quality Trend(5)"] = show_df["Quality Trend(5)"].map(lambda x: f"{x:+.2f}")
-    st.dataframe(
-        show_df,
-        column_config={
-            "Link": st.column_config.LinkColumn(
-                "Symbol",
-                help="Click to view Stock Fundamentals",
-                validate="^/Stock_Fundamentals",
-                display_text=r"^/Stock_Fundamentals\?symbol=(.*)$",
-            ),
-            "Entry": st.column_config.NumberColumn("Entry", format="%.2f", help="Strict trigger price"),
-            "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
-            "Target": st.column_config.NumberColumn("Target", format="%.2f"),
-            "Size": st.column_config.NumberColumn("Size", format="%d", help="Shares (Capped at 20% capital)"),
-            "Valid": st.column_config.TextColumn("Until", width="small"),
-            "Audit": st.column_config.TextColumn("Audit", help="Risk/Validity check status"),
-            "Quality History": st.column_config.LineChartColumn(
-                "Quality (5D)",
-                help="5-day quality score trend",
-                y_min=0,
-                y_max=1,
-            ),
-            "Score": st.column_config.TextColumn("Score"),
-            "Quality Trend(5)": st.column_config.TextColumn("Q-Trend"),
-            "LTP": st.column_config.NumberColumn("LTP", format="%.2f", help="Last Traded Price"),
-        },
-        column_order=[
-            "Tag", "Link", "Setup", "Audit", "LTP", "Entry", "Stop", "Target", "Size", "Order",
-            "Valid", "Category", "Tier", "Score", "Quality History", "Streak", "Status Tag"
-        ],
-        width="stretch",
-        hide_index=True,
-    )
+    show_df["Audit"] = show_df["Audit"].apply(lambda a: "🟢 OK" if a == "OK" else f"🔴 {a}")
+    
+    col_config = {
+        "Link": st.column_config.LinkColumn(
+            "Symbol",
+            help="Click to view Stock Fundamentals",
+            validate="^/Stock_Fundamentals",
+            display_text=r"^/Stock_Fundamentals\?symbol=(.*)$",
+        ),
+        "Entry": st.column_config.NumberColumn("Entry", format="%.2f", help="Strict trigger price"),
+        "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
+        "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+        "Size": st.column_config.NumberColumn("Size", format="%d", help="Shares (Capped at 20% capital)"),
+        "Valid": st.column_config.TextColumn("Until", width="small"),
+        "Audit": st.column_config.TextColumn("Audit", help="Risk/Validity check status"),
+        "Quality History": st.column_config.LineChartColumn(
+            "Quality (5D)",
+            help="5-day quality score trend",
+            y_min=0,
+            y_max=1,
+        ),
+        "Score": st.column_config.TextColumn("Score"),
+        "Quality Trend(5)": st.column_config.TextColumn("Q-Trend"),
+        "LTP": st.column_config.NumberColumn("LTP", format="%.2f", help="Last Traded Price"),
+    }
+    col_order = [
+        "Tag", "Link", "Setup", "Audit", "LTP", "Entry", "Stop", "Target", "Size", "Order",
+        "Valid", "Category", "Tier", "Score", "Quality History", "Streak", "Status Tag"
+    ]
+    
+    if select_mode:
+        show_df.insert(0, "Select", False)
+        col_config["Select"] = st.column_config.CheckboxColumn("Log?", default=False)
+        col_order.insert(0, "Select")
+        
+        edited = st.data_editor(
+            show_df,
+            column_config=col_config,
+            column_order=col_order,
+            disabled=[c for c in show_df.columns if c != "Select"],
+            hide_index=True,
+            # NOTE: LinkColumn configuration is lost when st.data_editor is in editable mode.
+            # Streamlit currently renders links as plain text in editable data_editors.
+            use_container_width=True,
+        )
+        
+        selected_rows = edited[edited["Select"] == True]
+        if not selected_rows.empty:
+            valid_rows = selected_rows[(selected_rows["Audit"] == "🟢 OK") & (selected_rows["Tier"].isin(["A+", "A"]))]
+            invalid_count = len(selected_rows) - len(valid_rows)
+            
+            if invalid_count > 0:
+                st.warning(f"⚠️ {invalid_count} selected row(s) ignored (must be Tier A/A+ and Audit OK).")
+            
+            if not valid_rows.empty:
+                col_btn1, col_btn2 = st.columns([1, 1])
+                with col_btn1:
+                    if st.button(f"📋 Log {len(valid_rows)} Selected Trade(s)", type="primary"):
+                        prefill_list = []
+                        for _, row in valid_rows.iterrows():
+                            prefill_list.append({
+                                "symbol": f"{row['Symbol']}.NS",
+                                "entry_price": row["Entry"],
+                                "stop_loss": row["Stop"],
+                                "invalidation": row["Stop"],
+                                "target_price": row["Target"],
+                                "setup_family": row["Setup"].split(" ")[0],
+                                "strategy": "Universe Sync",
+                                "side": "LONG",
+                                "quantity": row["Size"],
+                                "suggested_entry": row["Entry"],
+                            })
+                        st.session_state["journal_prefill"] = prefill_list
+                        st.switch_page("pages/5_Trading_Journal.py")
+                with col_btn2:
+                    if st.button(f"📌 Add {len(valid_rows)} to Watchlist"):
+                        syms = [f"{r['Symbol']}.NS" for _, r in valid_rows.iterrows()]
+                        wm.add_watchlist("Universe Selections", syms)
+                        st.success("Added to 'Universe Selections' watchlist!")
+    else:
+        st.dataframe(
+            show_df,
+            column_config=col_config,
+            column_order=col_order,
+            use_container_width=True,
+            hide_index=True,
+        )
 
 if not dropped_df.empty:
     st.markdown("**Dropped / Paused Since Previous Trading Day**")
     st.dataframe(
         _compact_table(dropped_df, ["Tag", "Symbol", "Setup", "Days in 20D", "Status Tag"]),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )

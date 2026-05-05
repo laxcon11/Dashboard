@@ -42,7 +42,7 @@ def run_audit() -> tuple[int, str]:
 
 c1, c2 = _responsive_cols(2, [1, 2])
 with c1:
-    if st.button("Run Scoring Audit", width="stretch"):
+    if st.button("Run Scoring Audit"):
         rc, out = run_audit()
         if rc == 0:
             st.success("Scoring audit completed.")
@@ -105,7 +105,7 @@ else:
     cmp_rows = parity.get("comparisons", [])
     if cmp_rows:
         df = pd.DataFrame(cmp_rows)
-        st.dataframe(df, width="stretch", hide_index=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 with st.expander("Playbook Audit Details", expanded=(view_mode == "Detail")):
     pb = payload.get("details", {}).get("playbook", {})

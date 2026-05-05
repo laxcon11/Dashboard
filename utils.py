@@ -642,7 +642,7 @@ def render_source_freshness(symbols_dict: Dict[str, str], data: Dict[str, pd.Dat
 
     if rows:
         st.markdown(f"#### {title}")
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def render_manual_data_staleness_alerts(india_ctx: Dict[str, Any]) -> None:

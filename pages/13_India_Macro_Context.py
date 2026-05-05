@@ -121,7 +121,7 @@ with gcol2:
         )
     )
     fig_g.update_layout(height=220, margin=dict(l=10, r=10, t=35, b=10))
-    st.plotly_chart(fig_g, width="stretch")
+    st.plotly_chart(fig_g, use_container_width=True)
 
 render_key_observations(observations, title="🔎 Key Observations", max_items=8)
 
@@ -171,7 +171,7 @@ for name, df in batch.items():
         yaxis_title="Value",
         showlegend=False,
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
     st.caption(f"India relevance: {INDIA_RELEVANCE.get(name, 'Context mapping not configured yet.')}")
 
 st.markdown("---")

@@ -10,6 +10,10 @@ from config import BREAKOUT_WINDOW
 
 logger = logging.getLogger(__name__)
 
+# --- Leading Indicators Constants ---
+DAILY_NOISE_THRESHOLD = 0.05
+ENV_THRESHOLD = 0.3
+
 
 def round_percentages_sum_to_100(values) -> list[int]:
     """Round probability-like values to whole percentages and force exact 100 total."""
@@ -528,3 +532,53 @@ def get_current_context(market_data_1mo=None, liquidity_series=None):
         logger.debug("get_current_context failed: %s", exc)
 
     return context
+
+def score_to_sentiment(score):
+    """Convert a discrete score [-1, 0, 1] to a human-readable sentiment label."""
+    if score is None:
+        return "N/A"
+    if score > 0:
+        return "Bullish"
+    if score < 0:
+        return "Bearish"
+    return "Neutral"
+
+
+def daily_change_score(series: pd.Series, inverse: bool = False):
+    """
+    Calculate a daily impulse score based on percentage move.
+    Returns: 1 (Bullish), -1 (Bearish), or 0 (Neutral/Noise).
+    """
+    s = series.dropna()
+    if len(s) < 2:
+        return None
+    prev = float(s.iloc[-2])
+    curr = float(s.iloc[-1])
+    if prev == 0:
+        return None
+    pct_move = ((curr - prev) / abs(prev)) * 100.0
+    
+    # Small moves are treated as noise for the daily impulse.
+    if abs(pct_move) < DAILY_NOISE_THRESHOLD:
+        score = 0
+    else:
+        score = 1 if pct_move > 0 else -1
+    return -score if inverse else score
+
+
+def ratio_series(df_a: pd.DataFrame, df_b: pd.DataFrame):
+    """Compute a relative strength ratio series between two dataframes."""
+    if (
+        df_a is None or df_b is None
+        or "Close" not in df_a.columns or "Close" not in df_b.columns
+    ):
+        return None
+    ratio_df = pd.concat(
+        [df_a["Close"].rename("a"), df_b["Close"].rename("b")],
+        axis=1
+    ).ffill().dropna()
+    if ratio_df.empty:
+        return None
+    ratio = ratio_df["a"] / ratio_df["b"]
+    ratio = ratio.replace([float("inf"), -float("inf")], pd.NA).dropna()
+    return ratio if len(ratio) >= 2 else None

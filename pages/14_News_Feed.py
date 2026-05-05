@@ -123,7 +123,7 @@ if not news_df.empty:
         kw_df = pd.DataFrame(top_words, columns=["word", "count"])
         fig = px.bar(kw_df, x="count", y="word", orientation="h", title="Top Keywords (Headlines)")
         fig.update_layout(height=350, yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("### Headlines")
 if news_df.empty:
@@ -170,4 +170,4 @@ with st.expander("Feed Health", expanded=False):
                 "error_detail": str(health.get("error_detail", "") or ""),
             }
         )
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)

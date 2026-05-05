@@ -55,6 +55,11 @@ def calculate_synthetic_forward(df: pd.DataFrame, spot: float) -> float:
     Refines ATM anchoring using Put-Call Parity: F = Strike + Call - Put.
     Removes cost-of-carry and dividend skew for cleaner Greeks.
     """
+    try:
+        spot = float(spot)
+        if math.isnan(spot) or spot <= 0: spot = 24000.0
+    except (ValueError, TypeError):
+        spot = 24000.0
     if df.empty: return spot
     
     # 1. Find the strike nearest to spot
@@ -105,6 +110,12 @@ def safe_T(T):
 
 def compute_atm_iv(df: pd.DataFrame, spot: float) -> float:
     """3-strike inverse-distance weighted ATM IV (v5 Skew-Aware)"""
+    try:
+        spot = float(spot)
+        if math.isnan(spot) or spot <= 0: spot = 24000.0
+    except (ValueError, TypeError):
+        spot = 24000.0
+
     if df is None or df.empty: return 15.0
     
     # Market Convention: Use Put IV for strikes <= spot, Call IV for strikes > spot
@@ -328,6 +339,11 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
     Compute aggregate GEX, VEX, CEX in Million INR.
     v3: Institutional stability + Normalized metrics (lot-invariant logic).
     """
+    try:
+        spot = float(spot)
+        if math.isnan(spot) or spot <= 0: spot = 24000.0
+    except (ValueError, TypeError):
+        spot = 24000.0
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return {
             "total_gex": 0.0, "total_gex_abs": 0.0, "total_vega": 0.0, 

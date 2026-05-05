@@ -84,7 +84,8 @@ def _compact_table(
 
 st.title("🚀 Trading Journal")
 st.caption("Log trades, manage risk, and review execution.")
-st.caption(f"Device mode: **{device_mode}**")
+if view_mode == "Detail":
+    st.caption(f"Device mode: **{device_mode}**")
 st.markdown(
     """
     <style>
@@ -114,6 +115,11 @@ st.markdown(
 
 # --- PRE-FILL HANDLING ---
 journal_prefill = st.session_state.pop("journal_prefill", None)
+
+if isinstance(journal_prefill, list):
+    st.session_state["journal_prefill_list"] = journal_prefill
+    journal_prefill = None
+
 query_params = st.query_params
 
 def _qp_scalar(value, default: str = "") -> str:
@@ -178,7 +184,7 @@ JOURNAL_LEGS_FILE = NOTES_DIR / "trading_journal_legs.csv"
 JOURNAL_SCHEMA_VERSION = 5
 JOURNAL_COLUMNS = [
     "Trade ID",
-    "Date", "Symbol", "Side", "Entry Price", "Exit Price", "Quantity", "Strategy", "Setup Family",
+    "Date", "Symbol", "Instrument Type", "Option Type", "Strike", "Expiry Date", "Side", "Entry Price", "Exit Price", "Quantity", "Strategy", "Setup Family",
     "Status", "Notes", "Regime", "Liquidity", "Stance", "Trade Intent", "Factor Context",
     "Invalidation", "Invalidation %", "Mistake Tags", "Chart Link", "Exit Reason", "Exit Date",
     "Holding Days", "Outcome R", "Outcome Bucket", "Invalidation Mode", "Locked Invalidation",
@@ -187,10 +193,10 @@ JOURNAL_COLUMNS = [
     "Hit Invalidation First", "Hit Target First", "Path Metrics Source",
     "Remaining Quantity", "Entry Regime Confidence", "Entry RiskOn Prob", "Entry Neutral Prob",
     "Entry RiskOff Prob", "Entry Quality Score", "Entry Gate Status", "Entry Vol Ratio", "Entry RS Blend",
-    "Initial Risk Amount", "Planned R Target", "Actual R", "Slippage R", "Exit Trigger", "Exit Quality",
+    "Initial Risk Amount", "Planned R Target", "Actual R", "Slippage R", "Suggested Entry", "Exit Trigger", "Exit Quality",
     "Sector", "Execution Mode", "Trail Type", "High Since Entry"
 ]
-LEGS_COLUMNS = ["Trade ID", "Leg Type", "Date", "Price", "Quantity", "Notes"]
+LEGS_COLUMNS = ["Trade ID", "Leg Type", "Date", "Price", "Quantity", "Notes", "Instrument Type", "Option Type", "Strike", "Expiry Date"]
 
 
 def _to_float(v, default: float = 0.0) -> float:
@@ -234,7 +240,7 @@ def load_journal():
             "Entry Price", "Exit Price", "Quantity", "Invalidation", "Invalidation %",
             "Holding Days", "Outcome R", "Locked Invalidation", "Locked Invalidation %",
             "Scanner Invalidation (At Entry)", "Target Price", "Entry Risk %", "Entry Risk (ATR)",
-            "Planned R Target", "Actual R", "Slippage R", "MFE %", "MAE %", "High Since Entry"
+            "Planned R Target", "Actual R", "Slippage R", "Suggested Entry", "MFE %", "MAE %", "High Since Entry", "Strike"
         ]
         for nc in numeric_cols:
             if nc in df.columns:
@@ -356,14 +362,20 @@ def get_technical_suggestions(symbol: str, side: str, setup_family: str):
     except Exception as e:
         return None
 
-def get_risk_budget_check(symbol: str, entry_price: float, quantity: int, invalidation: float):
-    """Check if the proposed trade breaches portfolio rules."""
+@st.cache_data(ttl=60)
+def _load_risk_rules():
     RULES_FILE = Path("notes/portfolio_rules.json")
     if not RULES_FILE.exists():
-        return None
-        
+        return {}
     try:
-        rules = json.loads(RULES_FILE.read_text())
+        return json.loads(RULES_FILE.read_text())
+    except Exception:
+        return {}
+
+def get_risk_budget_check(symbol: str, entry_price: float, quantity: int, invalidation: float):
+    """Check if the proposed trade breaches portfolio rules."""
+    try:
+        rules = _load_risk_rules()
         df = load_journal()
         open_trades = df[df["Status"].astype(str).str.upper() == "OPEN"].copy()
         
@@ -455,11 +467,107 @@ page_mode = st.sidebar.radio("Go to", ["Log New Trade", "View History", "Perform
 
 # ==================== LOG NEW TRADE ====================
 if page_mode == "Log New Trade":
+    if "journal_prefill_list" in st.session_state:
+        st.subheader("📋 Batch Log Trades")
+        batch_list = st.session_state["journal_prefill_list"]
+        
+        # Build DataFrame for data_editor
+        batch_rows = []
+        for r in batch_list:
+            batch_rows.append({
+                "Log?": True,
+                "Symbol": r["symbol"],
+                "Actual Entry ₹": float(r["entry_price"]),
+                "Stop": float(r["stop_loss"]),
+                "Target": float(r["target_price"]),
+                "Quantity": int(r.get("quantity", get_fno_lot_size(r["symbol"]) or 1)),
+                "Setup": r["setup_family"],
+                "Side": r["side"],
+                "Strategy": r["strategy"],
+                "Suggested Entry": r.get("suggested_entry", r["entry_price"])
+            })
+            
+        batch_df = pd.DataFrame(batch_rows)
+        edited = st.data_editor(
+            batch_df,
+            column_config={
+                "Log?": st.column_config.CheckboxColumn("Log?", default=True),
+                "Actual Entry ₹": st.column_config.NumberColumn("Actual Entry ₹", step=0.05),
+                "Stop": st.column_config.NumberColumn("Stop", step=0.05),
+                "Target": st.column_config.NumberColumn("Target", step=0.05),
+                "Quantity": st.column_config.NumberColumn("Quantity", step=1),
+            },
+            disabled=["Symbol", "Setup", "Side", "Strategy", "Suggested Entry"],
+            hide_index=True,
+            use_container_width=True,
+        )
+        
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            if st.button("✅ Confirm & Log All Selected", type="primary"):
+                sel = edited[edited["Log?"]]
+                if not sel.empty:
+                    for _, r in sel.iterrows():
+                        sym = r["Symbol"].replace(".NS", "")
+                        trade_id = _new_trade_id(sym)
+                        date_val = datetime.now()
+                        entry_px = float(r["Actual Entry ₹"])
+                        inv = float(r["Stop"])
+                        qty = int(r["Quantity"])
+                        tgt = float(r["Target"])
+                        entry = {
+                            "Trade ID": trade_id,
+                            "Date": date_val.strftime("%Y-%m-%d"),
+                            "Symbol": sym,
+                            "Instrument Type": "Equity / Cash",
+                            "Option Type": "N/A",
+                            "Strike": 0.0,
+                            "Expiry Date": "N/A",
+                            "Side": r["Side"],
+                            "Entry Price": entry_px,
+                            "Quantity": qty,
+                            "Strategy": r["Strategy"],
+                            "Setup Family": r["Setup"],
+                            "Status": "OPEN",
+                            "Invalidation": inv,
+                            "Target Price": tgt,
+                            "Execution Mode": "AUTO",
+                            "Initial Risk Amount": abs(entry_px - inv) * qty,
+                            "High Since Entry": entry_px,
+                            "Remaining Quantity": qty,
+                            "Planned R Target": (abs(tgt - entry_px) / abs(entry_px - inv)) if (tgt > 0 and abs(entry_px - inv) > 0) else 0.0,
+                            "Suggested Entry": float(r.get("Suggested Entry", entry_px))
+                        }
+                        save_entry(entry)
+                        save_leg({
+                            "Trade ID": trade_id,
+                            "Leg Type": "ENTRY",
+                            "Date": date_val.strftime("%Y-%m-%d"),
+                            "Price": entry_px,
+                            "Quantity": qty,
+                            "Notes": "Batch Entry",
+                            "Instrument Type": "Equity / Cash",
+                            "Option Type": "N/A",
+                            "Strike": 0.0,
+                            "Expiry Date": "N/A"
+                        })
+                    st.success(f"Successfully logged {len(sel)} trades!")
+                    st.balloons()
+                del st.session_state["journal_prefill_list"]
+                st.rerun()
+        with c2:
+            if st.button("Cancel Batch"):
+                del st.session_state["journal_prefill_list"]
+                st.rerun()
+        st.stop()
+        
     st.subheader("➕ Log a New Trade")
     
     # 1. Inputs (Symbol, Side, Setup) - OUTSIDE FORM for real-time reactivity
     st.markdown("<div class='tj-card'><b>Step 1: Define Setup</b></div>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
+    c0, c1, c2, c3 = st.columns(4)
+    with c0:
+        instrument_type = st.selectbox("Instrument", ["Equity / Cash", "Options"])
     with c1:
         symbol_options = sorted(list(NIFTY_200))
         default_sym_idx = 0
@@ -478,6 +586,8 @@ if page_mode == "Log New Trade":
     m1, m2 = st.columns([2, 1])
     with m1:
         exec_mode = st.radio("Mode", ["MANUAL", "AUTO", "DUMMY"], horizontal=True, label_visibility="collapsed")
+        if exec_mode != "AUTO" and "auto_preview" in st.session_state:
+            del st.session_state["auto_preview"]
     with m2:
         if exec_mode == "AUTO":
             sync_universe = st.checkbox("Sync with Universe", value=True)
@@ -487,7 +597,7 @@ if page_mode == "Log New Trade":
     # 1.2 Bulk Sync Logic
     if exec_mode == "AUTO" and sync_universe:
         st.info("💡 Auto-Trade will bulk-log all new symbols from the Tradable Universe with a 3:1 RR target and F&O based default sizing.")
-        if st.button("🔄 Execute Auto-Trade Sync", type="primary"):
+        if st.button("🔄 Preview Auto-Trades Before Logging"):
             ist = pytz.timezone('Asia/Kolkata')
             now_ist = datetime.now(ist)
             
@@ -518,8 +628,9 @@ if page_mode == "Log New Trade":
                     open_trades = df_jrnl[df_jrnl["Status"] == "OPEN"]["Symbol"].unique()
                     
                     regime_snapshot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
+                    st.session_state["auto_trade_regime_snapshot"] = regime_snapshot
                     
-                    logged_count = 0
+                    preview_rows = []
                     for row in df_sigs.itertuples():
                         raw_sym = str(row.symbol)
                         sym = raw_sym if raw_sym.endswith(".NS") else f"{raw_sym}.NS"
@@ -543,34 +654,87 @@ if page_mode == "Log New Trade":
                         
                         if entry_price <= 0 or inv <= 0 or qty <= 0:
                             continue
+                            
+                        preview_rows.append({
+                            "Log?": True,
+                            "Symbol": sym,
+                            "Actual Entry ₹": entry_price,
+                            "Stop": inv,
+                            "Target": target,
+                            "Size": qty,
+                            "Setup": setup_fam,
+                            "Score": float(getattr(row, "quality_score", 0.0)),
+                            "Suggested Entry": entry_price # Keep original for slippage
+                        })
+                    
+                    st.session_state["auto_preview"] = pd.DataFrame(preview_rows)
+                    
+        if "auto_preview" in st.session_state:
+            preview_df = st.session_state["auto_preview"]
+            if preview_df.empty:
+                st.info("No actionable auto-trades found.")
+            else:
+                edited = st.data_editor(
+                    preview_df,
+                    column_config={
+                        "Log?": st.column_config.CheckboxColumn("Include?", default=True),
+                        "Actual Entry ₹": st.column_config.NumberColumn("Actual Entry ₹", step=0.05),
+                    },
+                    disabled=["Symbol", "Stop", "Target", "Size", "Setup", "Score", "Suggested Entry"],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                
+                if st.button("✅ Confirm & Log Selected", type="primary"):
+                    sel = edited[edited["Log?"]]
+                    logged_count = 0
+                    regime_snapshot = st.session_state.get("auto_trade_regime_snapshot", {})
+                    
+                    for _, r in sel.iterrows():
+                        sym = r["Symbol"]
+                        entry_price = float(r["Actual Entry ₹"])
+                        inv = float(r["Stop"])
+                        qty = int(r["Size"])
+                        target = float(r["Target"])
+                        setup_fam = r["Setup"]
+                        score = float(r["Score"])
+                        suggested_entry = float(r["Suggested Entry"])
                         
                         risk = abs(entry_price - inv)
                         trade_id = _new_trade_id(sym)
                         now_s = datetime.now().strftime("%Y-%m-%d")
                         
+                        # Add tracking of slippage upon log
+                        # Note: We will calculate slippage in the df or keep track of the suggested_entry
+                        
                         entry = {
                             "Trade ID": trade_id,
                             "Date": now_s,
                             "Symbol": sym,
-                            "Side": side,
+                            "Instrument Type": "Equity / Cash",
+                            "Option Type": "N/A",
+                            "Strike": 0.0,
+                            "Expiry Date": "N/A",
+                            "Side": "LONG",
                             "Entry Price": entry_price,
                             "Quantity": qty,
                             "Strategy": "Universe Sync",
                             "Setup Family": setup_fam,
                             "Status": "OPEN",
-                            "Notes": f"Auto-Trade triggered from Execution Playbook. Validity until: {getattr(row, 'valid_until', 'N/A')}",
+                            "Notes": f"Auto-Trade triggered from Execution Playbook.",
                             "Sector": get_symbol_category(sym),
                             "Invalidation": inv,
                             "Target Price": target,
                             "Entry Regime Confidence": regime_snapshot.get("confidence", 0.0) if regime_snapshot else 0.5,
-                            "Entry Quality Score": float(getattr(row, "quality_score", 0.0)),
+                            "Entry Quality Score": score,
                             "Entry Gate Status": "PASSED (Playbook)",
                             "Initial Risk Amount": risk * qty,
                             "Remaining Quantity": qty,
-                            "Planned R Target": 2.0, # Updated to 2.0 per strict R:R plan
+                            "Planned R Target": 2.0,
                             "Execution Mode": "AUTO",
-                            "Trail Type": "ATR", # Default for auto-trades
-                            "High Since Entry": entry_price
+                            "Trail Type": "ATR",
+                            "High Since Entry": entry_price,
+                            "Suggested Entry": suggested_entry # Storing for future slippage correction tracking
                         }
                         
                         save_entry(entry)
@@ -580,14 +744,19 @@ if page_mode == "Log New Trade":
                             "Date": now_s,
                             "Price": entry_price,
                             "Quantity": qty,
-                            "Notes": "Auto-Trade Initial Entry"
+                            "Notes": "Auto-Trade Initial Entry",
+                            "Instrument Type": "Equity / Cash",
+                            "Option Type": "N/A",
+                            "Strike": 0.0,
+                            "Expiry Date": "N/A"
                         })
-                        open_trades = list(open_trades) + [sym] # Prevent duplicates
                         logged_count += 1
                         
                     st.success(f"Synced {logged_count} new Auto-Trades from Universe!")
                     if logged_count > 0: st.balloons()
-            st.stop() # Stop rendering the rest of the form since we just bulk synced
+                    del st.session_state["auto_preview"]
+                    st.rerun()
+            st.stop()
 
     # 2. System Guidance
     suggestions = get_technical_suggestions(selected_sym, side, setup_family)
@@ -607,6 +776,20 @@ if page_mode == "Log New Trade":
         
     with st.form("trade_form"):
         st.markdown("<div class='tj-card'><b>Step 3: Execution Details</b></div>", unsafe_allow_html=True)
+        
+        if instrument_type == "Options":
+            opt_c1, opt_c2, opt_c3 = st.columns(3)
+            with opt_c1:
+                opt_type = st.selectbox("Option Type", ["CE", "PE"])
+            with opt_c2:
+                opt_strike = st.number_input("Strike Price", step=50.0, min_value=0.0)
+            with opt_c3:
+                opt_expiry = st.date_input("Expiry Date")
+        else:
+            opt_type = "N/A"
+            opt_strike = 0.0
+            opt_expiry = None
+
         f1, f2, f3 = st.columns(3)
         with f1:
             date_val = st.date_input("Entry Date", datetime.now())
@@ -662,7 +845,7 @@ if page_mode == "Log New Trade":
                 final_invalidation = scoring.get_unified_stop_loss(entry_price, invalidation, atr_val, side)
             
             regime_snapshot = st.session_state.get("macro_regime_snapshot") or load_regime_snapshot()
-            trade_id = str(uuid.uuid4())[:8] # Changed to UUID for uniqueness
+            trade_id = _new_trade_id(selected_sym)
             
             entry = {
                 "Trade ID": trade_id,
@@ -686,7 +869,11 @@ if page_mode == "Log New Trade":
                 "Planned R Target": (abs(target - entry_price) / abs(entry_price - invalidation)) if (target > 0 and abs(entry_price - invalidation) > 0) else 0.0,
                 "Execution Mode": exec_mode,
                 "Trail Type": trail_type,
-                "High Since Entry": entry_price
+                "High Since Entry": entry_price,
+                "Instrument Type": instrument_type,
+                "Option Type": opt_type,
+                "Strike": safe_float(opt_strike),
+                "Expiry Date": opt_expiry.strftime("%Y-%m-%d") if opt_expiry else "N/A"
             }
             save_entry(entry)
             save_leg({
@@ -695,7 +882,11 @@ if page_mode == "Log New Trade":
                 "Date": date_val.strftime("%Y-%m-%d"),
                 "Price": safe_float(entry_price),
                 "Quantity": safe_int(quantity),
-                "Notes": "Initial Entry"
+                "Notes": "Initial Entry",
+                "Instrument Type": instrument_type,
+                "Option Type": opt_type,
+                "Strike": safe_float(opt_strike),
+                "Expiry Date": opt_expiry.strftime("%Y-%m-%d") if opt_expiry else "N/A"
             })
             st.success(f"Logged {selected_sym} trade!")
             st.balloons()
@@ -794,11 +985,11 @@ elif page_mode == "View History":
                         exit_price = 0.0
                         reason = ""
                         if side == "LONG":
-                            if tgt > 0 and ltp >= tgt: exit_price, reason = tgt, "Target Hit"
-                            elif inv > 0 and ltp <= inv: exit_price, reason = inv, "Stop Loss"
+                            if tgt > 0 and ltp >= tgt: exit_price, reason = ltp, "Target Hit"
+                            elif inv > 0 and ltp <= inv: exit_price, reason = ltp, "Stop Loss"
                         else:
-                            if tgt > 0 and ltp <= tgt: exit_price, reason = tgt, "Target Hit"
-                            elif inv > 0 and ltp >= inv: exit_price, reason = inv, "Stop Loss"
+                            if tgt > 0 and ltp <= tgt: exit_price, reason = ltp, "Target Hit"
+                            elif inv > 0 and ltp >= inv: exit_price, reason = ltp, "Stop Loss"
                             
                         if reason and qty > 0:
                             save_leg({"Trade ID": row["Trade ID"], "Leg Type": "EXIT", "Date": now_s, "Price": exit_price, "Quantity": qty, "Notes": f"Auto-Close: {reason}"})
@@ -835,8 +1026,9 @@ elif page_mode == "View History":
         cols = ["Date", "Symbol", "Side", "Status", "Mode", "Trail Type", "Entry Price", "Quantity", "Invalidation", "Sector"]
         if "LTP" in display_df.columns: cols.append("LTP")
         if "P&L" in display_df.columns: cols.append("P&L")
+        if "Slippage R" in display_df.columns: cols.append("Slippage R")
         
-        st.dataframe(display_df[cols].sort_values("Date", ascending=False), width="stretch", hide_index=True)
+        st.dataframe(display_df[cols].sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
 
         # Close Trade UI
         st.markdown("### 🔒 Close Trade")
@@ -872,10 +1064,10 @@ elif page_mode == "View History":
                                 for k, v in path.items(): df.at[idx, k] = v
                                 
                                 # Final P&L
-                                pnl_gross = (weighted_exit - row["Entry Price"]) if row["Side"]=="LONG" else (row["Entry Price"] - weighted_exit)
-                                trade_value = (weighted_exit + row["Entry Price"]) * exit_qty
+                                pnl_gross_per_share = (weighted_exit - row["Entry Price"]) if row["Side"]=="LONG" else (row["Entry Price"] - weighted_exit)
+                                trade_value = (weighted_exit + row["Entry Price"]) * total_exit_qty
                                 t_cost = trade_value * 0.002  # 0.2% transaction charges
-                                pnl_net = (pnl_gross * row["Quantity"]) - t_cost
+                                pnl_net = (pnl_gross_per_share * total_exit_qty) - t_cost
                                 
                                 risk = row["Initial Risk Amount"]
                                 df.at[idx, "Actual R"] = (pnl_net / risk) if risk > 0 else 0.0
@@ -894,6 +1086,64 @@ elif page_mode == "View History":
                         trade_legs = load_legs()
                         trade_legs = trade_legs[trade_legs["Trade ID"] != row["Trade ID"]]
                         trade_legs.to_csv(JOURNAL_LEGS_FILE, index=False)
+                        st.rerun()
+
+                # Inline Entry Correction for AUTO trades
+                if str(row.get("Execution Mode", "")).upper() == "AUTO":
+                    with st.expander(f"✏️ Correct Entry for {row['Symbol']} (ID: {row['Trade ID']})"):
+                        new_entry = st.number_input("Actual Entry Price", value=float(row["Entry Price"]), step=0.05, key=f"corr_entry_{idx}")
+                        if st.button("Update Entry", key=f"upd_entry_{idx}"):
+                            risk_per_share = abs(new_entry - safe_float(row["Invalidation"]))
+                            qty = int(row["Quantity"])
+                            df.at[idx, "Entry Price"] = new_entry
+                            df.at[idx, "Initial Risk Amount"] = risk_per_share * qty
+                            df.at[idx, "High Since Entry"] = new_entry
+                            
+                            sug_entry = safe_float(row.get("Suggested Entry", 0))
+                            if sug_entry > 0:
+                                risk_per_share = abs(sug_entry - safe_float(row["Invalidation"]))
+                                if risk_per_share > 0:
+                                    slippage_val = (new_entry - sug_entry) if row["Side"] == "LONG" else (sug_entry - new_entry)
+                                    df.at[idx, "Slippage R"] = slippage_val / risk_per_share
+                                
+                            # Update ENTRY leg
+                            trade_legs = load_legs()
+                            entry_idx = trade_legs[(trade_legs["Trade ID"] == row["Trade ID"]) & (trade_legs["Leg Type"] == "ENTRY")].index
+                            if len(entry_idx) > 0:
+                                trade_legs.loc[entry_idx[-1], "Price"] = new_entry
+                                trade_legs.to_csv(JOURNAL_LEGS_FILE, index=False)
+                                
+                            df.to_csv(JOURNAL_FILE, index=False)
+                            st.rerun()
+
+        # Exit Price Correction for CLOSED AUTO trades
+        closed_auto = display_df[(display_df["Status"] == "CLOSED") & (display_df["Execution Mode"].astype(str).str.upper() == "AUTO")]
+        if not closed_auto.empty:
+            st.markdown("### ✏️ Correct Exits (Auto-Trades)")
+            for idx, row in closed_auto.iterrows():
+                with st.expander(f"Correct Exit for {row['Symbol']} (ID: {row['Trade ID']})"):
+                    new_exit = st.number_input("Actual Exit Price", value=float(row["Exit Price"]), step=0.05, key=f"corr_exit_{idx}")
+                    if st.button("Update Exit", key=f"upd_exit_{idx}"):
+                        qty = int(row["Quantity"])
+                        pnl_gross_per_share = (new_exit - float(row["Entry Price"])) if row["Side"] == "LONG" else (float(row["Entry Price"]) - new_exit)
+                        pnl_gross_total = pnl_gross_per_share * qty
+                        trade_value = (new_exit + float(row["Entry Price"])) * qty
+                        t_cost = trade_value * 0.002
+                        pnl_net = pnl_gross_total - t_cost
+                        risk = float(row.get("Initial Risk Amount", 0))
+                        
+                        df.at[idx, "Exit Price"] = new_exit
+                        df.at[idx, "Actual R"] = (pnl_net / risk) if risk > 0 else 0.0
+                        df.at[idx, "Outcome R"] = df.at[idx, "Actual R"]
+                        
+                        # Also update the Exit leg
+                        trade_legs = load_legs()
+                        exit_leg_idx = trade_legs[(trade_legs["Trade ID"] == row["Trade ID"]) & (trade_legs["Leg Type"] == "EXIT")].index
+                        if len(exit_leg_idx) > 0:
+                            trade_legs.loc[exit_leg_idx[-1], "Price"] = new_exit
+                            trade_legs.to_csv(JOURNAL_LEGS_FILE, index=False)
+                            
+                        df.to_csv(JOURNAL_FILE, index=False)
                         st.rerun()
 
 # ==================== PERFORMANCE STATS ====================
@@ -916,10 +1166,35 @@ elif page_mode == "Performance Stats":
             
         closed["PnL"] = closed.apply(calc_net_pnl, axis=1)
         
-        m1, m2, m3 = st.columns(3)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Realized P&L (Net)", f"₹{closed['PnL'].sum():,.0f}")
         m2.metric("Win Rate", f"{((closed['PnL'] > 0).mean()*100):.1f}%")
         m3.metric("Avg R", f"{closed['Actual R'].mean():.2f}")
+        
+        # Equity Curve and Max Drawdown
+        closed_sorted = closed.sort_values("Exit Date")
+        cumulative_pnl = closed_sorted["PnL"].cumsum()
+        max_dd = (cumulative_pnl - cumulative_pnl.cummax()).min()
+        m4.metric("Max Drawdown", f"₹{max_dd:,.0f}")
+        
+        avg_slip = closed.get('Slippage R', pd.Series([0])).mean()
+        if abs(avg_slip) > 0.0001:
+            m5.metric("Avg Slippage R", f"{avg_slip:.3f}")
+        else:
+            m5.metric("Avg Slippage R", "N/A")
+        
+        st.markdown("### 📈 Cumulative Equity Curve")
+        # Separate AUTO vs MANUAL
+        # Ensure Exit Date is datetime for plotting
+        closed_sorted["Exit Date"] = pd.to_datetime(closed_sorted["Exit Date"], errors="coerce")
+        closed_plot = closed_sorted.dropna(subset=["Exit Date"])
+        
+        if not closed_plot.empty:
+            # Pivot table to get cumulative PnL per mode
+            pivot = closed_plot.pivot_table(index="Exit Date", columns="Execution Mode", values="PnL", aggfunc="sum").fillna(0).cumsum()
+            st.line_chart(pivot)
+        else:
+            st.info("Insufficient data for equity curve (no valid Exit Dates).")
 
         st.markdown("### 🧩 Performance Slicing")
         

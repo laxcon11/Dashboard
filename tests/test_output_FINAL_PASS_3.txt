@@ -1,0 +1,76 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.0, pytest-9.0.3, pluggy-1.6.0
+rootdir: /Users/laxmanacharya/Desktop/BhavCopy/Dashboard
+plugins: mock-3.15.1
+collected 26 items
+
+tests/test_nde_logic.py ...............F..F.......                       [100%]
+
+=================================== FAILURES ===================================
+_________________________ test_playbook_mapping_rules __________________________
+
+    def test_playbook_mapping_rules():
+        """Verifies strategy playbook mappings for different regimes."""
+        # Mock raw_exp for viability
+        raw_exp = pd.DataFrame([
+            {"strike": 22700, "type": "CALL", "ltp": 50.0, "oi": 50000},
+            {"strike": 22900, "type": "CALL", "ltp": 10.0, "oi": 20000},
+            {"strike": 22300, "type": "PUT", "ltp": 50.0, "oi": 50000},
+            {"strike": 22100, "type": "PUT", "ltp": 10.0, "oi": 20000}
+        ])
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "NORMAL", "flow_regime_label": "Long Gamma", "raw_exposures": raw_exp}
+        auto_metrics = {"drift": 0.05, "stability": 80} # stability 80 to pass WAIT block
+        spot = 22500
+        walls = (22700, 22300)
+        iv_data = {"iv_rank": 45.0}
+        quality_score = 8.5
+        size = 1.0
+        bias_obj = {"bias": "Bullish"}
+        rev_score_obj = {"score": 7.5, "label": "HIGH_REVERSION", "reason": ["Away from flip"]}
+    
+        # 1. Long Gamma + Mid-range (Stability 70 < 75) -> WAIT
+        auto_metrics["stability"] = 70
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, spot, walls, iv_data,
+            quality_score, size, bias_obj, rev_score_obj, dte=3
+        )
+        assert playbook["action"] == "WAIT"
+        assert "Wait for Extremes" in playbook["strategy"]
+        assert playbook["strike_plan"]["suppressed"] is True
+    
+        # 2. Long Gamma + Near Upper Wall -> Fade Resistance
+        auto_metrics["stability"] = 80
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, 22695, walls, iv_data,
+            quality_score, size, bias_obj, rev_score_obj, dte=3
+        )
+>       assert playbook["action"] == "FADE_RESISTANCE"
+E       AssertionError: assert 'WAIT' == 'FADE_RESISTANCE'
+E         
+E         - FADE_RESISTANCE
+E         + WAIT
+
+tests/test_nde_logic.py:565: AssertionError
+_______________ test_far_otm_weekly_walls_fail_premium_viability _______________
+
+    def test_far_otm_weekly_walls_fail_premium_viability():
+        """Verifies that low premium OTM walls block execution."""
+        raw_exp = pd.DataFrame([
+            {"strike": 26000, "type": "CALL", "ltp": 0.5, "oi": 10000},
+            {"strike": 23000, "type": "PUT", "ltp": 3.0, "oi": 10000}
+        ])
+        gamma_metrics = {"gex_norm": 5.0, "tv_label": "NORMAL", "raw_exposures": raw_exp}
+        auto_metrics = {"drift": 0.1, "stability": 80}
+        playbook = nde_strategy_logic.generate_strategy_playbook(
+            "MEAN_REVERSION", gamma_metrics, auto_metrics, 25950, (26000, 23000), {},
+            8.5, 1.0, {"bias": "Neutral"}, {"score": 5.0}, dte=3
+        )
+        assert playbook["action"] == "WAIT"
+>       assert "Wait for Extremes" in playbook["strategy"]
+E       AssertionError: assert 'Wait for Extremes' in 'FADE_RESISTANCE (Tactical Credit Spread) [blocked by premium]'
+
+tests/test_nde_logic.py:677: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_nde_logic.py::test_playbook_mapping_rules - AssertionError:...
+FAILED tests/test_nde_logic.py::test_far_otm_weekly_walls_fail_premium_viability
+========================= 2 failed, 24 passed in 1.74s =========================

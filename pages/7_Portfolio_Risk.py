@@ -200,7 +200,7 @@ with st.expander("⚙️ Trade Budget Rules", expanded=True):
     rules["regime_size_hints"]["🔴 Crisis"] = r4.slider("Crisis", 0.05, 0.5, float(rules["regime_size_hints"].get("🔴 Crisis", 0.25)), 0.05)
     rules["regime_size_hints"]["Unknown"] = r5.slider("Unknown", 0.25, 1.0, float(rules["regime_size_hints"].get("Unknown", 0.5)), 0.05)
 
-    if st.button("💾 Save Portfolio Rules", width="stretch"):
+    if st.button("💾 Save Portfolio Rules"):
         save_rules(rules)
         st.success("Portfolio rules saved.")
 
@@ -284,7 +284,7 @@ with left:
             rows_summary=12,
             rows_detail=20,
         ),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )
 
@@ -312,9 +312,9 @@ with page_diag_block("🔗 Correlation & Beta Proxy"):
         corr = ret_df.corr()
         if is_mobile:
             corr_show = _compact_table(corr.reset_index().rename(columns={"index": "Symbol"}), rows_summary=8, rows_detail=12)
-            st.dataframe(corr_show, width="stretch", hide_index=True)
+            st.dataframe(corr_show, use_container_width=True, hide_index=True)
         else:
-            st.dataframe(corr.style.background_gradient(cmap="RdYlGn_r"), width="stretch")
+            st.dataframe(corr.style.background_gradient(cmap="RdYlGn_r"), use_container_width=True)
 
         if "^NSEI" not in mkt:
             mkt_idx = batch_download(["^NSEI"], period="6mo")
@@ -339,7 +339,7 @@ with page_diag_block("🔗 Correlation & Beta Proxy"):
                     rows_summary=12,
                     rows_detail=20,
                 ),
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
             )
     else:
@@ -525,7 +525,7 @@ with page_diag_block("Checklist Rule Breakdown"):
                 rows_summary=10,
                 rows_detail=20,
             ),
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
 
@@ -541,6 +541,6 @@ _perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)
 if st.sidebar.checkbox("Show Performance Diagnostics", value=False):
     st.sidebar.dataframe(
         pd.DataFrame([{"Step": k, "Seconds": v} for k, v in _perf.items()]),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )

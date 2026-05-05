@@ -1,0 +1,114 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.0, pytest-9.0.3, pluggy-1.6.0
+rootdir: /Users/laxmanacharya/Desktop/BhavCopy/Dashboard
+plugins: mock-3.15.1
+collected 26 items
+
+tests/test_nde_logic.py F.....F........FFFF.FF.FFF                       [100%]
+
+=================================== FAILURES ===================================
+________________________ test_metadata_resolution_order ________________________
+tests/test_nde_logic.py:100: in test_metadata_resolution_order
+    with open(snap, "r") as f:
+         ^^^^^^^^^^^^^^^
+E   TypeError: expected str, bytes or os.PathLike object, not NoneType
+------------------------------ Captured log call -------------------------------
+ERROR    nde_automation_logic:nde_automation_logic.py:598 ❌ Failed to generate automated NDE snapshot: too many values to unpack (expected 2)
+____________________ test_strict_provenance_gate_execution _____________________
+tests/test_nde_logic.py:295: in test_strict_provenance_gate_execution
+    with open(res_path, "r") as f:
+         ^^^^^^^^^^^^^^^^^^^
+E   TypeError: expected str, bytes or os.PathLike object, not NoneType
+------------------------------ Captured log call -------------------------------
+ERROR    nde_automation_logic:nde_automation_logic.py:598 ❌ Failed to generate automated NDE snapshot: too many values to unpack (expected 2)
+_________________________ test_playbook_mapping_rules __________________________
+tests/test_nde_logic.py:550: in test_playbook_mapping_rules
+    assert "Wait for Extremes" in playbook["strategy"]
+E   AssertionError: assert 'Wait for Extremes' in 'MEAN_REVERSION'
+___________________________ test_playbook_guardrails ___________________________
+tests/test_nde_logic.py:593: in test_playbook_guardrails
+    playbook = nde_strategy_logic.generate_strategy_playbook(
+nde_strategy_logic.py:1602: in generate_strategy_playbook
+    time_decay = get_time_decay_outlook(dte, iv_data.get("iv_rank", 50.0), vol_regime)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nde_strategy_logic.py:362: in get_time_decay_outlook
+    if dte <= 2 and iv_rank > 40: return "Strong (Terminal Gamma + IV Rank)"
+       ^^^^^^^^
+E   TypeError: '<=' not supported between instances of 'NoneType' and 'int'
+_________________ test_wait_state_suppresses_execution_strikes _________________
+tests/test_nde_logic.py:643: in test_wait_state_suppresses_execution_strikes
+    playbook = nde_strategy_logic.generate_strategy_playbook(
+nde_strategy_logic.py:1602: in generate_strategy_playbook
+    time_decay = get_time_decay_outlook(dte, iv_data.get("iv_rank", 50.0), vol_regime)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nde_strategy_logic.py:362: in get_time_decay_outlook
+    if dte <= 2 and iv_rank > 40: return "Strong (Terminal Gamma + IV Rank)"
+       ^^^^^^^^
+E   TypeError: '<=' not supported between instances of 'NoneType' and 'int'
+_______________ test_far_otm_weekly_walls_fail_premium_viability _______________
+tests/test_nde_logic.py:689: in test_far_otm_weekly_walls_fail_premium_viability
+    assert "blocked by premium" in playbook["strategy"]
+E   AssertionError: assert 'blocked by premium' in 'MEAN_REVERSION'
+___________ test_gamma_flip_missing_or_zero_not_used_as_invalidation ___________
+tests/test_nde_logic.py:705: in test_gamma_flip_missing_or_zero_not_used_as_invalidation
+    playbook = nde_strategy_logic.generate_strategy_playbook(
+nde_strategy_logic.py:1602: in generate_strategy_playbook
+    time_decay = get_time_decay_outlook(dte, iv_data.get("iv_rank", 50.0), vol_regime)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nde_strategy_logic.py:362: in get_time_decay_outlook
+    if dte <= 2 and iv_rank > 40: return "Strong (Terminal Gamma + IV Rank)"
+       ^^^^^^^^
+E   TypeError: '<=' not supported between instances of 'NoneType' and 'int'
+_____________ test_gamma_flip_far_from_spot_is_context_not_trigger _____________
+tests/test_nde_logic.py:716: in test_gamma_flip_far_from_spot_is_context_not_trigger
+    playbook = nde_strategy_logic.generate_strategy_playbook(
+nde_strategy_logic.py:1602: in generate_strategy_playbook
+    time_decay = get_time_decay_outlook(dte, iv_data.get("iv_rank", 50.0), vol_regime)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nde_strategy_logic.py:362: in get_time_decay_outlook
+    if dte <= 2 and iv_rank > 40: return "Strong (Terminal Gamma + IV Rank)"
+       ^^^^^^^^
+E   TypeError: '<=' not supported between instances of 'NoneType' and 'int'
+___________________ test_non_trade_actions_suppress_strikes ____________________
+tests/test_nde_logic.py:750: in test_non_trade_actions_suppress_strikes
+    playbook = nde_strategy_logic.generate_strategy_playbook(
+nde_strategy_logic.py:1602: in generate_strategy_playbook
+    time_decay = get_time_decay_outlook(dte, iv_data.get("iv_rank", 50.0), vol_regime)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nde_strategy_logic.py:362: in get_time_decay_outlook
+    if dte <= 2 and iv_rank > 40: return "Strong (Terminal Gamma + IV Rank)"
+       ^^^^^^^^
+E   TypeError: '<=' not supported between instances of 'NoneType' and 'int'
+__________________ test_directional_debit_returns_debit_legs ___________________
+tests/test_nde_logic.py:766: in test_directional_debit_returns_debit_legs
+    playbook = nde_strategy_logic.generate_strategy_playbook(
+nde_strategy_logic.py:1602: in generate_strategy_playbook
+    time_decay = get_time_decay_outlook(dte, iv_data.get("iv_rank", 50.0), vol_regime)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nde_strategy_logic.py:362: in get_time_decay_outlook
+    if dte <= 2 and iv_rank > 40: return "Strong (Terminal Gamma + IV Rank)"
+       ^^^^^^^^
+E   TypeError: '<=' not supported between instances of 'NoneType' and 'int'
+___________________ test_strategy_specific_viability_checks ____________________
+tests/test_nde_logic.py:785: in test_strategy_specific_viability_checks
+    playbook = nde_strategy_logic.generate_strategy_playbook(
+nde_strategy_logic.py:1602: in generate_strategy_playbook
+    time_decay = get_time_decay_outlook(dte, iv_data.get("iv_rank", 50.0), vol_regime)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nde_strategy_logic.py:362: in get_time_decay_outlook
+    if dte <= 2 and iv_rank > 40: return "Strong (Terminal Gamma + IV Rank)"
+       ^^^^^^^^
+E   TypeError: '<=' not supported between instances of 'NoneType' and 'int'
+=========================== short test summary info ============================
+FAILED tests/test_nde_logic.py::test_metadata_resolution_order - TypeError: e...
+FAILED tests/test_nde_logic.py::test_strict_provenance_gate_execution - TypeE...
+FAILED tests/test_nde_logic.py::test_playbook_mapping_rules - AssertionError:...
+FAILED tests/test_nde_logic.py::test_playbook_guardrails - TypeError: '<=' no...
+FAILED tests/test_nde_logic.py::test_wait_state_suppresses_execution_strikes
+FAILED tests/test_nde_logic.py::test_far_otm_weekly_walls_fail_premium_viability
+FAILED tests/test_nde_logic.py::test_gamma_flip_missing_or_zero_not_used_as_invalidation
+FAILED tests/test_nde_logic.py::test_gamma_flip_far_from_spot_is_context_not_trigger
+FAILED tests/test_nde_logic.py::test_non_trade_actions_suppress_strikes - Typ...
+FAILED tests/test_nde_logic.py::test_directional_debit_returns_debit_legs - T...
+FAILED tests/test_nde_logic.py::test_strategy_specific_viability_checks - Typ...
+======================== 11 failed, 15 passed in 1.78s =========================

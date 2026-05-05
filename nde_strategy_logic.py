@@ -3,14 +3,13 @@ import numpy as np
 import json
 import os
 import logging
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any
-
-logger = logging.getLogger(__name__)
-
-# ==================== CONFIG & CALIBRATION (v3) ====================
+import nde_narrative_engine
 import NSE_Config
+logger = logging.getLogger(__name__)
 from nde_automation_logic import normalize_regime_name, compute_expiry_phase
 import nde_options_logic
 import nde_automation_logic
@@ -43,6 +42,45 @@ STRATEGY_WEIGHTS = {
     "strike": 0.30,
     "risk": 0.30
 }
+
+class CustomEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, pd.DataFrame):
+            return obj.to_dict(orient="records")
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, (datetime, pd.Timestamp)):
+            return obj.isoformat()
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
+
+def log_execution(ctx, narrative, execution_plan):
+    try:
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "spot": ctx.get("spot"),
+            "state": narrative.get("dominant_state"),
+            "action": narrative.get("dominant_action"),
+            "confidence": narrative.get("confidence"),
+            "template": execution_plan.get("template"),
+            "legs": execution_plan.get("legs"),
+            "iv_rank": ctx.get("iv_data", {}).get("iv_rank"),
+            "drift": ctx.get("auto_metrics", {}).get("drift"),
+            "stability": ctx.get("auto_metrics", {}).get("stability"),
+            "ctx_snapshot": ctx,
+            "narrative": narrative
+        }
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/execution_log.jsonl", "a") as f:
+            f.write(json.dumps(entry, cls=CustomEncoder) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to log execution: {e}")
 
 def get_snapshot_trends(current_metrics: dict, current_expiry: str) -> dict:
     """
@@ -423,6 +461,212 @@ def get_market_state(flow_metrics: dict, auto_metrics: dict, vol_ctx: dict, tran
         "gamma_threshold": round(gamma_thresh, 1)
     }
 
+# ==================== TRADING COCKPIT (UNIFIED NARRATIVE) ====================
+
+def generate_unified_narrative(master_setup: dict, cockpit: dict, prefilter: dict) -> dict:
+    """Consolidates all engine layers into a single authoritative Operator Narrative."""
+    strategy_code = master_setup.get("code", "NO_TRADE")
+    playbook = master_setup.get("playbook", {})
+    action = playbook.get("action", "WAIT").upper()
+    state = cockpit.get("market_state", "NEUTRAL")
+    
+    # 1. Conflict Resolution (The 'Arbiter' Layer)
+    # If Near Flip or Poor Data -> Override to TRANSITION / WAIT
+    if prefilter.get("reason_code") == "NEAR_FLIP":
+        state = "TRANSITION / FLIP ZONE"
+        action = "WAIT"
+        reason = [
+            "Spot near gamma flip → High whipsaw risk.",
+            "No structural edge exists until price clears pivot."
+        ]
+        next_trade = f"Position for {playbook.get('strategy', 'Next Setup')} only after breakout."
+    elif prefilter.get("reason_code") == "POOR_DATA_QUALITY":
+        state = "DATA UNSTABLE"
+        action = "STAND ASIDE"
+        reason = ["Feed latency detected (>5 mins).", "Analytical stability compromised."]
+        next_trade = "Wait for feed synchronization."
+    else:
+        # Standard Narrative
+        reason = playbook.get("why", ["Maintain current monitoring."])
+        next_trade = f"{playbook.get('strategy', 'Next Setup')} structure identified."
+        if action == "WAIT":
+            next_trade = f"Watching for {playbook.get('strategy', 'Next Setup')} entry."
+
+    # 2. Confidence Contextualization
+    conf_val = playbook.get("confidence", 0.0)
+    conf_label = "HIGH" if conf_val >= 0.8 else "MODERATE" if conf_val >= 0.5 else "LOW"
+    conf_reason = "Strong signal convergence" if conf_val >= 0.8 else "Signals divergent / Near pivot"
+    
+    return {
+        "dominant_state": state,
+        "dominant_action": action,
+        "reasoning": reason,
+        "next_trade": next_trade,
+        "triggers": playbook.get("triggers", ["No active triggers."]),
+        "decision_trail": playbook.get("decision_trail", []),
+        "risk": playbook.get("risk", "Standard Greek Decay / Whipsaw"),
+        "invalidation": playbook.get("invalidation", "Thesis holds in current regime."),
+        "avoid": playbook.get("avoid", []),
+        "reversion": {
+            "label": playbook.get("reversion_label", "WAIT"),
+            "score": playbook.get("reversion_score", 0.0),
+            "reasons": playbook.get("reversion_reasons", [])
+        },
+        "execution_plan": playbook.get("strike_plan", {}), # Absolute Truth
+        "execution_confidence": {
+            "value": conf_val,
+            "label": conf_label,
+            "reason": conf_reason
+        }
+    }
+
+# ==================== TRADING COCKPIT (GREEK INTERPRETATION) ====================
+
+def interpret_dealer_behavior(flow_metrics: dict) -> list:
+    """Translates Greeks/GEX into forced dealer behavior for the Cockpit."""
+    gex_net = flow_metrics.get("total_gex", 0.0)
+    dex_net = flow_metrics.get("total_delta", 0.0)
+    vex_net = flow_metrics.get("total_vex", 0.0)
+    cex_net = flow_metrics.get("total_cex", 0.0)
+
+    behavior = []
+    
+    # 1. Gamma Interpretation
+    if gex_net > 0:
+        behavior.append({
+            "label": "Gamma",
+            "state": "LONG",
+            "behavior": "Dealers SELL rallies, BUY dips (Stabilizing)"
+        })
+    else:
+        behavior.append({
+            "label": "Gamma",
+            "state": "SHORT",
+            "behavior": "Dealers BUY rallies, SELL dips (Amplifying)"
+        })
+
+    # 2. Delta Interpretation
+    if abs(dex_net) > 500000000: # Threshold in INR (50 Cr)
+        state = "POSITIVE" if dex_net > 0 else "NEGATIVE"
+        behavior.append({
+            "label": "Delta",
+            "state": state,
+            "behavior": f"{'Upward' if dex_net > 0 else 'Downward'} bias exists (Directional tilt)"
+        })
+    else:
+        behavior.append({
+            "label": "Delta",
+            "state": "NEUTRAL",
+            "behavior": "No significant delta bias"
+        })
+
+    # 3. Vanna Interpretation (Vol sensitivity)
+    if abs(vex_net) > 50000000: # 5 Cr
+        state = "POSITIVE" if vex_net > 0 else "NEGATIVE"
+        behavior.append({
+            "label": "Vanna",
+            "state": state,
+            "behavior": "Volatility changes amplifying price moves"
+        })
+    else:
+        behavior.append({
+            "label": "Vanna",
+            "state": "NEUTRAL",
+            "behavior": "Volatility changes not amplifying moves"
+        })
+
+    # 4. Charm Interpretation (Time sensitivity)
+    if abs(cex_net) > 10000000: # 1 Cr
+        behavior.append({
+            "label": "Charm",
+            "state": "POSITIVE" if cex_net > 0 else "NEGATIVE",
+            "behavior": "Time decay affecting market stability"
+        })
+    
+    return behavior
+
+def get_market_state_cockpit_details(flow_metrics: dict, auto_metrics: dict, market_state: dict) -> dict:
+    """Provides specific Cockpit-friendly descriptions for the market state."""
+    state = market_state.get("state", "NEUTRAL DRIFT")
+    drift = auto_metrics.get("drift", 0.0)
+    gamma_regime = flow_metrics.get("gamma_regime", "NEUTRAL")
+
+    details = {
+        "structure": "Mixed Flow",
+        "bias": "Neutral",
+        "volatility": "Normal",
+        "actions": ["Stay patient", "Monitor levels"],
+        "avoid": ["Heavy direction bets"]
+    }
+
+    if state == "PINNED RANGE":
+        details["structure"] = "Long Gamma (Stabilizing)"
+        details["bias"] = "Mild Bullish Drift" if drift > 0 else "Flat"
+        details["actions"] = ["Sell premium (moderate size)", "Fade extremes"]
+        details["avoid"] = ["Breakout trades"]
+    elif state == "LIQUIDITY VACUUM":
+        details["structure"] = "Short Gamma (Amplifying)"
+        details["bias"] = "Aggressive Trend"
+        details["volatility"] = "High / Rising"
+        details["actions"] = ["Buy volatility", "Trail momentum"]
+        details["avoid"] = ["Mean reversion plays", "Selling naked premiums"]
+    elif state == "VOLATILITY EXPANSION":
+        details["structure"] = "Gamma Compression"
+        details["bias"] = "Expansionary"
+        details["volatility"] = "Spiking"
+        details["actions"] = ["Switch to momentum", "Hedge existing ranges"]
+        details["avoid"] = ["Stubborn mean reversion"]
+    elif state == "SQUEEZE BUILDUP":
+        details["structure"] = "Vanna/Charm Driven"
+        details["bias"] = "Potential Squeeze"
+        details["actions"] = ["Watch for explosive move", "Tighten stops"]
+        details["avoid"] = ["Adding into strength"]
+    
+    return details
+
+def generate_greek_snapshot_data(flow_metrics: dict) -> list:
+    """Generates visual snapshot data for the Cockpit summary."""
+    import nde_options_logic
+    gex = flow_metrics.get("total_gex", 0.0)
+    dex = flow_metrics.get("total_delta", 0.0)
+    theta = flow_metrics.get("total_theta", 0.0)
+    vega = flow_metrics.get("total_vega", 0.0)
+    tv = flow_metrics.get("tv_ratio", 0.0)
+    tv_label = flow_metrics.get("tv_label", "NORMAL")
+
+    return [
+        {
+            "label": "Gamma (GEX)",
+            "value": nde_options_logic.format_institutional_metric(gex, "Cr"),
+            "meaning": "Stabilizing" if gex > 0 else "Amplifying",
+            "color": "green" if gex > 0 else "red"
+        },
+        {
+            "label": "Delta",
+            "value": nde_options_logic.format_institutional_metric(dex, "Cr"),
+            "meaning": "Bullish Bias" if dex > 0 else "Bearish Bias",
+            "color": "green" if dex > 0 else "red"
+        },
+        {
+            "label": "Theta",
+            "value": "High" if abs(theta) > 100000000 else "Moderate", # 10 Cr
+            "meaning": "Decay active",
+            "color": "blue"
+        },
+        {
+            "label": "Vega",
+            "value": "Moderate" if abs(vega) < 100000000 else "High",
+            "meaning": "Vol Risk" if abs(vega) > 100000000 else "Limited Vol Risk",
+            "color": "orange"
+        },
+        {
+            "label": "T/V Ratio",
+            "value": f"x{tv:.1f}",
+            "meaning": "Sell-premium edge" if tv > 0.7 else "Vol-buying edge",
+            "color": "green" if tv > 0.7 else "blue"
+        }
+    ]
+
 STRATEGY_TEMPLATES = {
     "IRON_CONDOR": {
         "name": "Institutional Iron Condor",
@@ -498,8 +742,22 @@ def generate_engine_context(
     """Unified engine context calculation that abstracts math away from the Streamlit UI."""
     meta = meta or {}
     
+    # Phase 51: Spot Guardrail (Prevent NaN propagation to math layers)
+    try:
+        if spot is None or math.isnan(float(spot)) or float(spot) <= 0:
+            spot = 24000.0  # Safe NIFTY fallback
+        else:
+            spot = float(spot)
+    except (ValueError, TypeError):
+        spot = 24000.0
+    
     # 1. Advanced Metrics Calculation (Relocated from UI)
     atr = nde_options_logic.calculate_atr_sma(nifty_df)
+    if atr is None or math.isnan(float(atr)) or float(atr) <= 0:
+        atr = 250.0
+    else:
+        atr = float(atr)
+
     t_days = nde_options_logic.calculate_dte_fractional(used_expiry)
     quality_score = meta.get("data_quality_score", 1.0)
     
@@ -539,7 +797,12 @@ def generate_engine_context(
             spot, subset, tv_ema_fast=_tv_ema_f, tv_ema_slow=_tv_ema_s, atr=atr
         )
         call_wall, put_wall, _, _ = nde_options_logic.calculate_option_walls(subset)
+        # --- WALL HARDENING ---
+        if pd.isna(call_wall) or call_wall <= 0: call_wall = spot + 300
+        if pd.isna(put_wall) or put_wall <= 0: put_wall = spot - 300
+        
         current_atm_iv = nde_options_logic.compute_atm_iv(subset, spot)
+        if pd.isna(current_atm_iv) or current_atm_iv <= 0: current_atm_iv = 15.0
     else:
         flow_metrics = {
             "total_gex": 0, "total_gex_abs": 0, "total_vega": 0, "total_theta": 0, "total_delta": 0, 
@@ -680,18 +943,43 @@ def generate_engine_context(
     master_setup["bias_conviction"] = bias_obj
     master_setup["executive_summary"] = get_strategy_executive_summary(strategy_code, bias_obj, spot, (call_wall, put_wall), gamma_metrics=flow_metrics, iv_data=iv_data)
     
-    # FIX 1 (Phase 5.8 Review): Use the playbook already generated inside get_strategy_details,
-    # which has the correct reversion_score_obj, vol_ctx, and trans_score.
-    # Previously, a second call here with {} as reversion_score overrode the correct one.
-    if "playbook" not in master_setup or not master_setup.get("playbook"):
-        # Fallback: only generate if get_strategy_details didn't produce one
-        master_setup["playbook"] = generate_strategy_playbook(
-            strategy_code, flow_metrics, auto_metrics, spot, (call_wall, put_wall), 
-            iv_data, quality_score, master_setup.get("size", 0.0), 
-            bias_obj, {}, mode=mode, term_data=term_data, source_mode=source, 
-            expiry=used_expiry, dte=t_days,
-            vol_ctx=vol_ctx, trans_score=trans_score, market_state=market_state
-        )
+    # NEW: Cockpit Redesign Data (Phase 48 Hardening)
+    _cockpit_data = {
+        "market_state": market_state["state"],
+        "details": get_market_state_cockpit_details(flow_metrics, auto_metrics, market_state),
+        "dealer_behavior": interpret_dealer_behavior(flow_metrics),
+        "greek_snapshot": generate_greek_snapshot_data(flow_metrics)
+    }
+    master_setup["cockpit"] = _cockpit_data
+    
+    # NEW: Unified Narrative & Deterministic Execution Pipeline
+    from nde_narrative_engine import build_narrative
+    from nde_execution_compiler import build_execution, build_payoff
+    
+    ctx_dict = {
+        "flow_metrics": flow_metrics,
+        "auto_metrics": auto_metrics,
+        "walls": (call_wall, put_wall),
+        "iv_data": iv_data,
+        "spot": spot,
+        "master_setup": master_setup,
+        "option_chain_df": raw_chain,
+        "meta": meta
+    }
+    
+    narrative = build_narrative(ctx_dict)
+    execution_plan = build_execution(ctx_dict, narrative)
+    payoff_summary = build_payoff(execution_plan)
+    
+    narrative["execution_plan"] = execution_plan
+    narrative["payoff_summary"] = payoff_summary
+    master_setup["narrative"] = narrative
+    
+    # NEW: Telemetry Hook
+    log_execution(ctx_dict, narrative, execution_plan)
+    
+    # Enforce single authority: Remove legacy playbook
+    master_setup["playbook"] = {}
     
     # 8. Tiered Institutional Execution Guard (Phase 42)
     # CRITICAL FALLBACKS (Structural Data Logic Fail)
@@ -744,7 +1032,8 @@ def generate_engine_context(
             "gex_abs": nde_options_logic.format_institutional_metric(flow_metrics.get("total_gex_abs", 0), "Cr"),
             "gex_net": nde_options_logic.format_institutional_metric(flow_metrics.get("total_gex", 0), "Cr"),
             "vega": nde_options_logic.format_institutional_metric(flow_metrics.get("total_vega", 0), "Cr"),
-            "theta": nde_options_logic.format_institutional_metric(flow_metrics.get("total_theta", 0), "Cr")
+            "theta": nde_options_logic.format_institutional_metric(flow_metrics.get("total_theta", 0), "Cr"),
+            "vanna": nde_options_logic.format_institutional_metric(flow_metrics.get("total_vex", 0), "Cr")
         },
         "tv_ratio": {
             "val": f"x{flow_metrics.get('tv_ratio', 0.0):.1f}",
@@ -798,6 +1087,7 @@ def generate_engine_context(
         "flow_metrics": flow_metrics,
         "auto_metrics": auto_metrics,
         "walls": (call_wall, put_wall),
+        "spot": spot,
         "iv_data": iv_data,
         "strategy_code": strategy_code,
         "master_setup": master_setup,
@@ -810,7 +1100,8 @@ def generate_engine_context(
         "source_mode": source,
         "requires_warning": (source == "DEGRADED (Strike Mean)" or meta.get("requires_warning", False) or prefilter_result["reason_code"] != "NONE"),
         "state": load_strategy_state(),
-        "ui_display": ui_display
+        "ui_display": ui_display,
+        "narrative": master_setup.get("narrative", {}) # Explicitly surface narrative
     }
 class CustomJsonEncoder(json.JSONEncoder):
     """Handles NumPy types for JSON serialization."""
@@ -1485,9 +1776,20 @@ def calculate_reversion_score(spot, walls, flip, drift, stability, gex_norm, nif
     if nifty_df is None or nifty_df.empty or "Close" not in nifty_df.columns:
         return {"score": 0.0, "label": "DATA_MISSING", "reason": ["Missing price history."]}
 
+    # Hardening for spot
+    try:
+        spot = float(spot)
+        if math.isnan(spot) or spot <= 0: spot = 24000.0
+    except (ValueError, TypeError): spot = 24000.0
+
     # 1. Distance from SMA (20-period proxy for VWAP)
-    sma = nifty_df["Close"].rolling(20).mean().iloc[-1]
-    dist_sma = abs(spot - sma) / sma * 100
+    sma_series = nifty_df["Close"].rolling(20).mean()
+    if len(sma_series) == 0 or pd.isna(sma_series.iloc[-1]):
+        sma = spot # Neutral fallback
+    else:
+        sma = float(sma_series.iloc[-1])
+    
+    dist_sma = abs(spot - sma) / (sma if sma > 0 else 1.0) * 100
     if dist_sma > 1.5:
         reasons.append("Significant distance from VWAP proxy.")
     
@@ -1596,12 +1898,46 @@ def generate_strategy_playbook(
     """
     V5 Strategy Engine Logic.
     """
+    # --- CANONICAL HARDENING (V5.2) ---
+    # Handle NaN spot or walls to prevent "cannot convert float NaN to integer"
+    try:
+        if spot is None or not (float(spot) > 0) or math.isnan(float(spot)):
+            spot = 24000.0  # Emergency mid-strike fallback
+        else:
+            spot = float(spot)
+    except (ValueError, TypeError):
+        spot = 24000.0
+
+    _safe_walls = []
+    for i, w in enumerate(walls):
+        try:
+            if w is None or not (float(w) > 0) or math.isnan(float(w)):
+                _safe_walls.append(spot + (300 if i == 0 else -300))
+            else:
+                _safe_walls.append(float(w))
+        except (ValueError, TypeError):
+            _safe_walls.append(spot + (300 if i == 0 else -300))
+    walls = tuple(_safe_walls)
+
     dte = dte if dte is not None else 7
     if bias_obj is None: bias_obj = {"bias": "Neutral"}
+    
+    # NEW: Secure metric extraction
     gex_norm = gamma_metrics.get("gex_norm", 0.0)
+    if gex_norm is None or math.isnan(float(gex_norm)): gex_norm = 0.0
+    else: gex_norm = float(gex_norm)
+
     c_wall = walls[0] if len(walls) >= 1 else spot + 300
     p_wall = walls[1] if len(walls) >= 2 else spot - 300
+    
     atr = gamma_metrics.get("atr_proxy", 250.0)
+    try:
+        if atr is None or not (float(atr) > 0) or math.isnan(float(atr)):
+            atr = 250.0
+        else:
+            atr = float(atr)
+    except (ValueError, TypeError):
+        atr = 250.0
     
     vol_regime = vol_ctx.get("regime", "NORMAL") if vol_ctx else "NORMAL"
     tv_label = gamma_metrics.get("tv_label", "NORMAL")
@@ -2144,6 +2480,10 @@ def get_strategy_details(strategy_code, gamma_metrics, auto_metrics, spot, regim
         "playbook": playbook,
         "wall_drift": wall_drift or {"call": 0, "put": 0, "is_squeeze": False}
     }
+    
+    # [HIERARCHY FIX] Ensure playbook is ONLY for template/execution data
+    if "action" in result["playbook"]:
+        del result["playbook"]["action"]
     
     if is_expiry_defensive:
         result["mode_override"] = "Defensive"

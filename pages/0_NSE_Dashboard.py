@@ -11,13 +11,13 @@ Improvements:
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import watchlist_manager as wm
 from datetime import datetime
 import numpy as np
 from pathlib import Path
 import logging
 import time
+import json
 import scoring
 import importlib.util
 
@@ -73,6 +73,7 @@ from utils import (
     get_ui_detail_mode,
     get_ui_device_mode,
     render_decision_header,
+    responsive_cols as _responsive_cols,
 )
 
 # ==================== LOGGING ====================
@@ -98,18 +99,7 @@ _page_t0 = time.perf_counter()
 _perf: dict[str, float] = {}
 
 
-def _responsive_cols(n_or_spec, spec=None):
-    if isinstance(n_or_spec, int):
-        count = n_or_spec
-    elif spec is not None and isinstance(spec, int):
-        count = spec
-    elif spec is not None:
-        count = len(spec)
-    else:
-        count = len(n_or_spec)
-    if is_mobile:
-        return [st.container() for _ in range(count)]
-    return st.columns(spec if spec is not None else n_or_spec)
+# _responsive_cols imported from utils
 
 
 def _compact_table(
@@ -130,7 +120,8 @@ def _compact_table(
 
 st.title("🚀 NSE Dashboard Launcher")
 st.caption("Swing dashboard for NIFTY 200.")
-st.caption(f"Device mode: **{device_mode}**")
+if view_mode == "Detail":
+    st.caption(f"Device mode: **{device_mode}**")
 render_decision_header(source="macro_ssot")
 
 if GIFT_NIFTY_DASHBOARD_CARD and is_gift_session_active(
@@ -183,7 +174,45 @@ if GIFT_NIFTY_DASHBOARD_CARD and is_gift_session_active(
                     f"{int(GIFT_NIFTY_COLLAPSE_IST_HOUR):02d}:00 IST (next day)."
                 )
 
-# Helper functions have been moved to analytics.py
+# Helper functions have been moved to analytics.py or centralized below
+def compute_breadth(stocks: list[str], data_dict: dict) -> tuple[int, int, int]:
+    adv, dec, unc = 0, 0, 0
+    for s in stocks:
+        df = data_dict.get(s)
+        _, _, chg_pct = get_live_price_safe(s, df)
+        if chg_pct is not None:
+            if chg_pct > 0.1:
+                adv += 1
+            elif chg_pct < -0.1:
+                dec += 1
+            else:
+                unc += 1
+    return adv, dec, unc
+
+def get_setup_family(setup_label: str) -> str:
+    s = str(setup_label or "")
+    if s.startswith("Momentum"):
+        return "Momentum"
+    if s.startswith("Pullback"):
+        return "Pullback"
+    if s.startswith("Volatility"):
+        return "Volatility Contraction"
+    return "Other"
+
+def build_journal_prefill(row: dict, setup_label: str) -> dict:
+    sym = row.get('Symbol', '')
+    prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
+    return {
+        "symbol": prefill_symbol,
+        "strategy": "Swing Ranking",
+        "side": "LONG",
+        "setup_family": get_setup_family(setup_label),
+        "entry_price": float(row.get("Price", 0.0) or 0.0),
+        "stop_loss": float(row.get("Invalidation", 0.0) or 0.0),
+        "invalidation": float(row.get("Invalidation", 0.0) or 0.0),
+        "target": float(row.get("Price", 0.0) or 0.0) * 1.1, # 10% default
+        "notes": f"NSE Dashboard Log: {setup_label}"
+    }
 
 
 # ==================== SIDEBAR - STOCK SELECTION ====================
@@ -344,7 +373,7 @@ if telemetry_df is not None and not telemetry_df.empty:
             show = wl_telemetry[["symbol", "source", "last_date", "age_bdays", "severity"]].rename(
                 columns={"symbol": "Symbol", "source": "Source", "last_date": "Last Date", "age_bdays": "Age (Bdays)", "severity": "Status"}
             )
-            st.dataframe(show, width='stretch', hide_index=True)
+            st.dataframe(show, use_container_width=True, hide_index=True)
 
 # ==================== MARKET OVERVIEW ====================
 st.subheader("🏛️ Market Overview")
@@ -408,7 +437,7 @@ if mode != "Swing Rankings":
 
         fig.update_xaxes(tickangle=-45)
 
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # ==================== MODE-SPECIFIC DISPLAYS ====================
@@ -420,23 +449,7 @@ if mode == "Morning Review":
 
     # IMPROVEMENT 1: Market Breadth Added
     st.markdown("### 📊 Market Breadth")
-
-    advances = 0
-    declines = 0
-    unchanged = 0
-
-    for symbol in selected_stocks:
-        df = watchlist_data.get(symbol)
-        price, change, change_pct = get_live_price_safe(symbol, df)
-
-        if change_pct is not None:
-            if change_pct > 0.1:
-                advances += 1
-            elif change_pct < -0.1:
-                declines += 1
-            else:
-                unchanged += 1
-
+    advances, declines, unchanged = compute_breadth(selected_stocks, watchlist_data)
     total = advances + declines + unchanged
 
     if total > 0:
@@ -482,7 +495,7 @@ if mode == "Morning Review":
         # Display with color
         st.dataframe(
             gap_up_df,
-            width='stretch',
+            use_container_width=True,
             hide_index=True
         )
 
@@ -500,7 +513,7 @@ if mode == "Morning Review":
 
         st.dataframe(
             gap_down_df,
-            width='stretch',
+            use_container_width=True,
             hide_index=True
         )
 
@@ -536,7 +549,7 @@ if mode == "Morning Review":
         nr7_df['Change %'] = nr7_df['Change %'].apply(lambda x: format_change(x) if x else 'N/A')
         nr7_df['Vol Ratio'] = nr7_df['Vol Ratio'].apply(lambda x: f"{x:.2f}x")
         
-        st.dataframe(nr7_df, width='stretch', hide_index=True)
+        st.dataframe(nr7_df, use_container_width=True, hide_index=True)
         st.success(f"🔥 Found {len(nr7_stocks)} stocks coiling for a move!")
     else:
         st.info("No NR7 setups detected today.")
@@ -598,7 +611,7 @@ elif mode == "End of Day":
             df_above = pd.DataFrame(above_vwap_list)
             df_above['Close'] = df_above['Close'].apply(lambda x: f"₹{x:.2f}")
             df_above['VWAP'] = df_above['VWAP'].apply(lambda x: f"₹{x:.2f}")
-            st.dataframe(df_above, width='stretch', hide_index=True)
+            st.dataframe(df_above, use_container_width=True, hide_index=True)
         else:
             st.info("No stocks above VWAP")
 
@@ -608,7 +621,7 @@ elif mode == "End of Day":
             df_below = pd.DataFrame(below_vwap_list)
             df_below['Close'] = df_below['Close'].apply(lambda x: f"₹{x:.2f}")
             df_below['VWAP'] = df_below['VWAP'].apply(lambda x: f"₹{x:.2f}")
-            st.dataframe(df_below, width='stretch', hide_index=True)
+            st.dataframe(df_below, use_container_width=True, hide_index=True)
         else:
             st.info("No stocks below VWAP")
 
@@ -616,23 +629,7 @@ elif mode == "End of Day":
 
     # IMPROVEMENT 2: Advance/Decline - Table + Pie Chart
     st.markdown("### 📊 Advance/Decline Analysis")
-
-    advances = 0
-    declines = 0
-    unchanged = 0
-
-    for symbol in selected_stocks:
-        df = watchlist_data.get(symbol)
-        price, change, change_pct = get_live_price_safe(symbol, df)
-
-        if change_pct is not None:
-            if change_pct > 0.1:
-                advances += 1
-            elif change_pct < -0.1:
-                declines += 1
-            else:
-                unchanged += 1
-
+    advances, declines, unchanged = compute_breadth(selected_stocks, watchlist_data)
     total = advances + declines + unchanged
 
     if total > 0:
@@ -645,7 +642,7 @@ elif mode == "End of Day":
                 {"Category": "Declines 🔴", "Count": declines, "Percent": f"{(declines/total)*100:.1f}%"},
                 {"Category": "Unchanged ⚪", "Count": unchanged, "Percent": f"{(unchanged/total)*100:.1f}%"}
             ]
-            st.dataframe(pd.DataFrame(ad_data), width='stretch', hide_index=True)
+            st.dataframe(pd.DataFrame(ad_data), use_container_width=True, hide_index=True)
             
             # Summary stats below table
             st.markdown("#### Summary")
@@ -668,7 +665,7 @@ elif mode == "End of Day":
                 hole=0.4
             )])
             fig.update_layout(height=300, margin=dict(t=0, b=0, l=0, r=0))
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
@@ -722,7 +719,7 @@ elif mode == "End of Day":
             height=300
         )
 
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
         st.caption(f"📊 {len(extreme_rsi)} stocks at RSI extremes")
     else:
@@ -861,7 +858,7 @@ elif mode == "Full Analysis":
             xaxis_rangeslider_visible=False
         )
 
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
         # Volume Chart
         st.markdown("**📊 Volume Analysis**")
@@ -888,7 +885,7 @@ elif mode == "Full Analysis":
         ))
 
         vol_fig.update_layout(height=200, showlegend=True)
-        st.plotly_chart(vol_fig, width='stretch')
+        st.plotly_chart(vol_fig, use_container_width=True)
 
         # Additional Stats
         st.markdown("**📈 Additional Statistics**")
@@ -906,8 +903,8 @@ elif mode == "Full Analysis":
             st.write(f"**20-Day Range**: ₹{month_low:.2f} - ₹{month_high:.2f}")
 
         with stat_col3:
-            avg_vol = df['Volume'].tail(20).mean()
-            st.write(f"**Avg Volume (20D)**: {avg_vol/1000000:.2f}M")
+            avg_vol_20d = df['Volume'].tail(20).mean()
+            st.write(f"**Avg Volume (20D)**: {avg_vol_20d/1000000:.2f}M")
 
         with st.expander("🏛️ Fundamentals (EODHD/Finnhub)", expanded=False):
             if not FINNHUB_API_KEY and not EODHD_API_KEY:
@@ -983,21 +980,10 @@ elif mode == "Swing Rankings":
     st.caption(f"Regime-gated setup engine on {len(selected_stocks)} selected stocks")
 
     cfg = scoring.STRICTNESS_CFG.get(swing_strictness, scoring.STRICTNESS_CFG["Balanced"])
-
-    # Helpers moved to scoring.py
+    advances, declines, unchanged = compute_breadth(selected_stocks, watchlist_data)
 
     nifty_df = index_data.get('^NSEI')
     bank_df = index_data.get('^NSEBANK')
-
-    advances, declines = 0, 0
-    for symbol in selected_stocks:
-        df = watchlist_data.get(symbol)
-        _, _, chg = get_live_price_safe(symbol, df)
-        if chg is not None:
-            if chg > 0.1:
-                advances += 1
-            elif chg < -0.1:
-                declines += 1
 
     breadth_ratio = (advances / declines) if declines > 0 else (float(advances) if advances > 0 else 0.0)
 
@@ -1063,14 +1049,14 @@ elif mode == "Swing Rankings":
                 st.markdown("**Focus Sectors (Top 3)**")
                 st.dataframe(
                     leaders.assign(**{"Change %": leaders["Change %"].map(lambda x: f"{x:+.2f}%")}),
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                 )
             with l2:
                 st.markdown("**Avoid / Underweight (Bottom 2)**")
                 st.dataframe(
                     laggards.assign(**{"Change %": laggards["Change %"].map(lambda x: f"{x:+.2f}%")}),
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                 )
 
@@ -1171,8 +1157,13 @@ elif mode == "Swing Rankings":
                 close = df["Close"].dropna()
                 if close.empty:
                     continue
+                
+                # Consolidated Metrics for Risk, Correction & Momentum Protection
                 low10 = df["Low"].tail(10).min() if "Low" in df.columns else close.tail(10).min()
                 low20 = df["Low"].tail(20).min() if "Low" in df.columns else close.tail(20).min()
+                high20 = df["High"].tail(20).max() if "High" in df.columns else close.tail(20).max()
+                drawdown = (high20 - price) / high20 if high20 > 0 else 0.0
+
                 low_series = df["Low"] if "Low" in df.columns else close
                 mom_leg_low = scoring.momentum_leg_low(close, ema20_series, low_series, fallback_lookback=20)
                 pb_leg_low = scoring.pullback_leg_low(df)
@@ -1232,9 +1223,7 @@ elif mode == "Swing Rankings":
                         rel_ret = merged["s"].pct_change() - merged["b"].pct_change()
                         rel_std = rel_ret.tail(20).std()
 
-                # New metrics for Correction & Momentum Protection
-                low20 = float(df["Low"].tail(20).min())
-                high20 = float(df["High"].tail(20).max())
+                # RS calculation
                 
                 # Calculate consecutive red days (Close < Prev Close)
                 diffs = close.diff().dropna()
@@ -1276,8 +1265,6 @@ elif mode == "Swing Rankings":
                 pullback_pass = bool(trend_bull and (-2.5 <= dist_ema20 <= 1.5) and (40 <= rsi <= 58) and (not breakout))
                 vol_contract_pass = bool(nr7 and inside_day and (abs(dist_ema20) <= 4.0) and (pd.isna(atr_pct) or atr_pct <= 4.0))
 
-                # Heavy gate: Reject if drawdown > 10% (strict correction limit)
-                drawdown = (high20 - price) / high20 if high20 > 0 else 0.0
                 if drawdown >= 0.10:
                     continue
 
@@ -1592,34 +1579,9 @@ elif mode == "Swing Rankings":
                                 run_abs = float(row["Price"]) - float(row["ML"])
                                 st.caption(f"Run-up from ML: {run_abs:+.2f} ({float(row.get('LTP vs ML %', 0.0)):+.2f}%)")
                         sym = row['Symbol']
-                        prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
                         setup_label = str(row.get("Setup Type", "Swing Ranking"))
-                        if setup_label.startswith("Momentum"):
-                            pre_setup_family = "Momentum"
-                        elif setup_label.startswith("Pullback"):
-                            pre_setup_family = "Pullback"
-                        elif setup_label.startswith("Volatility"):
-                            pre_setup_family = "Volatility Contraction"
-                        else:
-                            pre_setup_family = "Other"
-                        if st.button("Log Setup", key=f"log_setup_toprank_{i}_{sym}", width='stretch'):
-                            st.session_state["journal_prefill"] = {
-                                "symbol": prefill_symbol,
-                                "strategy": "Swing Ranking",
-                                "side": "LONG",
-                                "setup_family": pre_setup_family,
-                                "entry_price": float(row.get("Price", 0.0) or 0.0),
-                                "stop_loss": float(row.get("Invalidation", 0.0) or 0.0),
-                                "invalidation": float(row.get("Invalidation", 0.0) or 0.0),
-                                "entry_risk_atr": float(row.get("Risk (ATR)", 0.0) or 0.0),
-                                "target_price": 0.0,
-                                "trigger_policy": str(row.get("Trigger Type", "")),
-                                "notes": (
-                                    f"Auto from Swing: {setup_label} | "
-                                    f"Score {float(row.get('Score', 0.0)):.2f} | "
-                                    f"Trigger: {row.get('Trigger Type', '')}"
-                                ),
-                            }
+                        if st.button("Log Setup", key=f"log_setup_toprank_{i}_{sym}", use_container_width=True):
+                            st.session_state["journal_prefill"] = build_journal_prefill(row, setup_label)
                             st.switch_page("pages/5_Trading_Journal.py")
 
     actionable = combined[
@@ -1714,9 +1676,15 @@ elif mode == "Swing Rankings":
         return bool(is_nse_trading_day(d))
 
     def _calc_streak(date_set: set[pd.Timestamp], ordered_dates: list[pd.Timestamp], current_d: pd.Timestamp) -> int:
-        if current_d not in date_set or current_d not in ordered_dates:
+        if current_d not in date_set:
             return 0
-        idx = ordered_dates.index(current_d)
+        
+        # Optimize with O(1) lookup map if processing many records
+        date_to_idx = {d: i for i, d in enumerate(ordered_dates)}
+        if current_d not in date_to_idx:
+            return 0
+            
+        idx = date_to_idx[current_d]
         count = 0
         for j in range(idx, -1, -1):
             if ordered_dates[j] in date_set:
@@ -1871,7 +1839,7 @@ elif mode == "Swing Rankings":
                         rows_summary=12,
                         rows_detail=24,
                     ),
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                 )
             else:
@@ -1885,7 +1853,7 @@ elif mode == "Swing Rankings":
                         rows_summary=10,
                         rows_detail=20,
                     ),
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                 )
 
@@ -1919,34 +1887,9 @@ elif mode == "Swing Rankings":
                         st.caption(f"Trend:{row['Trend']} | Vol:{row['Vol Ratio']:.2f}x | RSI:{row['RSI']:.1f}")
 
                     sym = row['Symbol']
-                    prefill_symbol = sym if sym.endswith(".NS") else f"{sym}.NS"
                     setup_label = str(row.get("Setup Type", "Swing Ranking"))
-                    if setup_label.startswith("Momentum"):
-                        pre_setup_family = "Momentum"
-                    elif setup_label.startswith("Pullback"):
-                        pre_setup_family = "Pullback"
-                    elif setup_label.startswith("Volatility"):
-                        pre_setup_family = "Volatility Contraction"
-                    else:
-                        pre_setup_family = "Other"
-                    if st.button("Log Setup", key=f"log_setup_phase2_{i}_{sym}", width='stretch'):
-                        st.session_state["journal_prefill"] = {
-                            "symbol": prefill_symbol,
-                            "strategy": "Swing Ranking",
-                            "side": "LONG",
-                            "setup_family": pre_setup_family,
-                            "entry_price": float(row.get("Price", 0.0) or 0.0),
-                            "stop_loss": float(row.get("Invalidation", 0.0) or 0.0),
-                            "invalidation": float(row.get("Invalidation", 0.0) or 0.0),
-                            "entry_risk_atr": float(row.get("Risk (ATR)", 0.0) or 0.0),
-                            "target_price": 0.0,
-                            "trigger_policy": str(row.get("Trigger Type", "")),
-                            "notes": (
-                                f"Auto from Swing: {setup_label} | "
-                                f"Score {float(row.get('Score', 0.0)):.2f} | "
-                                f"Trigger: {row.get('Trigger Type', '')}"
-                            ),
-                        }
+                    if st.button("Log Setup", key=f"log_setup_phase2_{i}_{sym}", use_container_width=True):
+                        st.session_state["journal_prefill"] = build_journal_prefill(row, setup_label)
                         st.switch_page("pages/5_Trading_Journal.py")
     else:
         if hard_pass_total == 0:
@@ -1987,7 +1930,7 @@ elif mode == "Swing Rankings":
                 rows_summary=20,
                 rows_detail=35,
             ),
-            width='stretch',
+            use_container_width=True,
             hide_index=True,
         )
 
@@ -2020,7 +1963,7 @@ elif mode == "Swing Rankings":
                     rows_summary=12,
                     rows_detail=20,
                 ),
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
             )
 
@@ -2056,7 +1999,7 @@ elif mode == "Swing Rankings":
                     rows_summary=20,
                     rows_detail=40,
                 ),
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
             )
 
@@ -2080,7 +2023,7 @@ elif mode == "Swing Rankings":
                         rows_summary=12,
                         rows_detail=15,
                     ),
-                    width='stretch',
+                    use_container_width=True,
                     hide_index=True,
                 )
 
@@ -2102,7 +2045,7 @@ elif mode == "Swing Rankings":
                         rows_summary=10,
                         rows_detail=12,
                     ),
-                    width='stretch',
+                    use_container_width=True,
                     hide_index=True,
                 )
             else:
@@ -2122,7 +2065,7 @@ elif mode == "Swing Rankings":
                         rows_summary=10,
                         rows_detail=12,
                     ),
-                    width='stretch',
+                    use_container_width=True,
                     hide_index=True,
                 )
             else:
@@ -2143,7 +2086,7 @@ elif mode == "Swing Rankings":
                         rows_summary=10,
                         rows_detail=12,
                     ),
-                    width='stretch',
+                    use_container_width=True,
                     hide_index=True,
                 )
             else:
@@ -2169,7 +2112,7 @@ elif mode == "Swing Rankings":
                         rows_summary=15,
                         rows_detail=20,
                     ),
-                    width='stretch',
+                    use_container_width=True,
                     hide_index=True,
                 )
 
@@ -2178,7 +2121,7 @@ _perf["total_page_s"] = round(time.perf_counter() - _page_t0, 3)
 if st.sidebar.checkbox("Show Performance Diagnostics", value=False):
     st.sidebar.dataframe(
         pd.DataFrame([{"Step": k, "Seconds": v} for k, v in _perf.items()]),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )
 
@@ -2194,4 +2137,4 @@ with footer_cols[1]:
     st.caption(f"Updated {datetime.now().strftime('%H:%M:%S')}")
 
 with footer_cols[2]:
-    st.caption("VWAP + compact tables")
+    st.caption("TradingDashPro v2.4 (Hardened)")

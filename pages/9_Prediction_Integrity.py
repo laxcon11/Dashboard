@@ -44,13 +44,13 @@ st.caption(f"Device mode: **{device_mode}**")
 
 c1, c2, c3 = _responsive_cols(3)
 with c1:
-    if st.button("Run Daily Integrity Cycle", width="stretch"):
+    if st.button("Run Daily Integrity Cycle"):
         out = run_daily_cycle()
         st.success(f"Cycle complete: issued={out['issue'].get('issued', 0)} | evaluated={out['evaluate'].get('evaluated', 0)}")
 with c2:
     month = st.text_input("Calibration month (YYYY-MM)", value="", placeholder="2026-02")
 with c3:
-    if st.button("Generate Monthly Calibration", width="stretch"):
+    if st.button("Generate Monthly Calibration"):
         report = generate_monthly_calibration(month=(month or None))
         st.success(f"Calibration generated for {report.get('month', 'N/A')} ({report.get('status', 'UNKNOWN')})")
 
@@ -159,7 +159,7 @@ else:
     if isinstance(changes, list) and changes:
         st.dataframe(
             _compact_table(pd.DataFrame(changes), ["field", "old_value", "new_value", "rationale"]),
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
 
@@ -178,16 +178,16 @@ else:
             st.success(f"Proposal status updated to {status}")
 
         with s1:
-            if st.button("Mark APPROVED", width="stretch"):
+            if st.button("Mark APPROVED"):
                 _save_status("APPROVED")
         with s2:
-            if st.button("Mark MODIFY_REQUESTED", width="stretch"):
+            if st.button("Mark MODIFY_REQUESTED"):
                 _save_status("MODIFY_REQUESTED")
         with s3:
-            if st.button("Mark REJECTED", width="stretch"):
+            if st.button("Mark REJECTED"):
                 _save_status("REJECTED")
 
-    if st.button("Apply Approved Proposal", width="stretch"):
+    if st.button("Apply Approved Proposal"):
         result = apply_approved_proposal(str(proposal_path), approved_by="streamlit")
         if result.get("applied", 0) > 0:
             st.success(f"Applied {result['applied']} changes and versioned settings.")
@@ -207,7 +207,7 @@ with st.expander("Prediction Records (immutable)", expanded=(view_mode == "Detai
                 show,
                 ["date_issued", "horizon_days", "predicted_regime", "confidence_bucket", "model_version", "prediction_id"],
             ),
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
         st.download_button(
@@ -227,7 +227,7 @@ with st.expander("Outcome Records", expanded=(view_mode == "Detail")):
                 show_outs,
                 ["evaluated_at", "horizon_days", "predicted_regime", "actual_regime", "regime_correct", "prediction_id"],
             ),
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
         st.download_button(
@@ -244,7 +244,7 @@ with st.expander("Model Versions", expanded=False):
         show_vers = vers.sort_values(["created_at"], ascending=False)
         st.dataframe(
             _compact_table(show_vers, ["created_at", "version_id", "notes", "approved_by"]),
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
 

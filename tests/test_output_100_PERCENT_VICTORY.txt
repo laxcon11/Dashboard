@@ -1,0 +1,9 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.0, pytest-9.0.3, pluggy-1.6.0
+rootdir: /Users/laxmanacharya/Desktop/BhavCopy/Dashboard
+plugins: mock-3.15.1
+collected 26 items
+
+tests/test_nde_logic.py ..........................                       [100%]
+
+============================== 26 passed in 1.16s ==============================
