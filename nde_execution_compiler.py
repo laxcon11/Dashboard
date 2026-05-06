@@ -1,6 +1,8 @@
 import math
 import pandas as pd
 from nde_strategy_mapper import map_strategy
+import nde_options_logic
+import NSE_Config
 
 def select_strike_by_delta(df_chain, opt_type: str, target_abs_delta: float, spot: float):
     """
@@ -52,20 +54,28 @@ def select_strike_by_delta(df_chain, opt_type: str, target_abs_delta: float, spo
     
     return int(sub.iloc[0]["strike"])
 
-def resolve_strike(target: str, opt: str, spot: float, call_wall: float, put_wall: float, atr: float, df_chain=None) -> int:
+def resolve_strike(target: str, opt: str, spot: float, call_wall: float, put_wall: float, atr: float, df_chain=None, ctx: dict = None) -> int:
     """
     Strike Selection Engine
     Resolves symbolic targets into concrete strike prices based on structural and volatility rules.
     """
-    # Safety rounding function
-    def nearest_50(val):
+    # Phase 6.3: Multi-Index Strike Snapping
+    index_name = ctx.get("index_name", "NIFTY")
+    s_interval = NSE_Config.MARKET_CONFIG.get(index_name, {}).get("strike_interval", 50.0)
+    
+    def resolve_safe_strike(val, chain):
         try:
-            return int(round(float(val) / 50.0) * 50)
+            # First attempt: Snap to ACTUAL chain strike
+            if chain is not None and not chain.empty:
+                return int(nde_options_logic.snap_to_nearest_strike(float(val), chain))
+            # Second attempt: Round by interval if chain missing
+            return int(round(float(val) / s_interval) * s_interval)
         except (ValueError, TypeError):
-            return int(round(spot / 50.0) * 50)
+            return int(round(spot / s_interval) * s_interval)
 
-    atm = nearest_50(spot)
-    wing_width = max(50, nearest_50(atr * 0.75)) # approx 0.75 ATR for wings
+    atm = resolve_safe_strike(spot, df_chain)
+    wing_width = max(s_interval, resolve_safe_strike(atr * 0.75, df_chain) - atm)
+    if wing_width <= 0: wing_width = s_interval * 2
 
     # -------------------------
     # REAL DELTA PATH (NEW)
@@ -73,8 +83,9 @@ def resolve_strike(target: str, opt: str, spot: float, call_wall: float, put_wal
     if target in ("DELTA_0_25", "DELTA_0_50") and df_chain is not None:
         tgt = 0.25 if target == "DELTA_0_25" else 0.50
         strike = select_strike_by_delta(df_chain, opt, tgt, spot)
+        strike = select_strike_by_delta(df_chain, opt, tgt, spot)
         if strike:
-            return nearest_50(strike)
+            return resolve_safe_strike(strike, df_chain)
             
     # -------------------------
     # EXISTING LOGIC (fallback)
@@ -84,25 +95,25 @@ def resolve_strike(target: str, opt: str, spot: float, call_wall: float, put_wal
         
     elif target == "CALL_WALL":
         # Short strike ≈ walls
-        return nearest_50(call_wall if call_wall and call_wall > spot else spot + atr)
+        return resolve_safe_strike(call_wall if call_wall and call_wall > spot else spot + atr, df_chain)
         
     elif target == "PUT_WALL":
         # Short strike ≈ walls
-        return nearest_50(put_wall if put_wall and put_wall < spot else spot - atr)
+        return resolve_safe_strike(put_wall if put_wall and put_wall < spot else spot - atr, df_chain)
         
     elif target == "CALL_WING":
         # Wings ≈ 0.5–1 ATR beyond shorts
         base_wall = call_wall if call_wall and call_wall > spot else spot + atr
-        return nearest_50(base_wall + wing_width)
+        return resolve_safe_strike(base_wall + wing_width, df_chain)
         
     elif target == "PUT_WING":
         # Wings ≈ 0.5–1 ATR beyond shorts
         base_wall = put_wall if put_wall and put_wall < spot else spot - atr
-        return nearest_50(base_wall - wing_width)
+        return resolve_safe_strike(base_wall - wing_width, df_chain)
         
     elif target == "DELTA_0_25":
         # Approximation: 0.25 delta is roughly 0.5 ATR OTM
-        offset = nearest_50(atr * 0.5)
+        offset = resolve_safe_strike(atr * 0.5, df_chain) - atm
         return atm + offset if opt == "CE" else atm - offset
 
     # Fallback
@@ -157,6 +168,11 @@ def build_execution(ctx: dict, narrative: dict) -> dict:
 
     # 👉 NEW: pass chain
     df_chain = ctx.get("option_chain_df")  # IMPORTANT: attach this in engine
+    
+    # Filter by specific expiry if available to avoid snapping to wrong contract strikes
+    used_expiry = ctx.get("meta", {}).get("expiry")
+    if df_chain is not None and not df_chain.empty and used_expiry and "expiry" in df_chain.columns:
+        df_chain = df_chain[df_chain["expiry"] == used_expiry]
 
     # 2. Strike Selection
     resolved_legs = []
@@ -168,7 +184,7 @@ def build_execution(ctx: dict, narrative: dict) -> dict:
             # Resolve strike based on rules
             concrete_strike = resolve_strike(
                 target, opt_type, spot, call_wall, put_wall, atr,
-                df_chain=df_chain
+                df_chain=df_chain, ctx=ctx
             )
             leg["strike"] = concrete_strike
             resolved_legs.append(leg)

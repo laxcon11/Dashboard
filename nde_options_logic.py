@@ -223,10 +223,24 @@ STRIKE_INTEL_CONFIG = {
     "proximity_penalty": 0.2,
     "vega_percentile": 80,
     "zone_merge_gap": 150,
-    "symmetry_weight": 5.0     # Phase 30: Recalibrated down from 12.0
+    "symmetry_weight": 5.0,    # Phase 30: Recalibrated down from 12.0
+    "min_delta": 0.05,
+    "max_delta": 0.30,
+    "ideal_delta": 0.15
 }
 
 # ==================== MATH UTILITIES ====================
+def snap_to_nearest_strike(target: float, df: pd.DataFrame) -> float:
+    """
+    Ensures a calculated price level is snapped to the nearest ACTUAL strike available in the chain.
+    Prevents suggesting 'ghost strikes' that don't exist in the specific expiry.
+    """
+    if df.empty or "strike" not in df.columns:
+        return float(target)
+    
+    unique_strikes = df["strike"].unique()
+    idx = (np.abs(unique_strikes - target)).argmin()
+    return float(unique_strikes[idx])
 
 def norm_cdf(x):
     """
@@ -334,7 +348,7 @@ def calculate_greeks(S, K, T, r, iv, q=0.0, option_type="call"):
         "charm": float(charm)
     }
 
-def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK_FREE_RATE, q: float = DIVIDEND_YIELD, tv_ema_fast: float = None, tv_ema_slow: float = None, atr: float = 250.0):
+def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK_FREE_RATE, q: float = DIVIDEND_YIELD, tv_ema_fast: float = None, tv_ema_slow: float = None, atr: float = 250.0, strike_interval: float = 50.0):
     """
     Compute aggregate GEX, VEX, CEX in Million INR.
     v3: Institutional stability + Normalized metrics (lot-invariant logic).
@@ -610,11 +624,14 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
         "va_low": float(v_profile["va_low"]) if v_profile["va_low"] is not None else None,
         "va_high": float(v_profile["va_high"]) if v_profile["va_high"] is not None else None,
         "expected_move": exp_move,
+        "call_wall": float(c_wall),
+        "put_wall": float(p_wall),
         "call_wall_sec": float(sec_c),
         "put_wall_sec": float(sec_p),
         "atm_oi_share": float(round(atm_oi_share, 2)),
         "cvd_proxy": float(total_oi_chng),
-        "synthetic_forward": calculate_synthetic_forward(df_exp, spot)
+        "synthetic_forward": calculate_synthetic_forward(df_exp, spot),
+        "strike_interval": float(strike_interval)
     }
 
     # Phase 37: Continuous Entry Gate (Theta/Vega Carry Ratio)
@@ -700,6 +717,8 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
         "theta_clusters": theta_clusters,
         "intelligence": intelligence,
         "institutional_iq": inst_iq,
+        "call_wall": float(c_wall),
+        "put_wall": float(p_wall),
         "raw_exposures": df_exp
     }
 
@@ -843,7 +862,9 @@ def select_optimal_strikes(df: pd.DataFrame, spot: float, flow_metrics: dict = N
         (abs(work_df["strike"] - spot) >= min_dist) & 
         (abs(work_df["strike"] - spot) <= max_dist) &
         (work_df["oi"] >= STRIKE_INTEL_CONFIG["min_oi"]) &
-        (work_df["tex_m"] >= min_theta)
+        (work_df["tex_m"] >= min_theta) &
+        (work_df["delta"].abs() >= STRIKE_INTEL_CONFIG["min_delta"]) &
+        (work_df["delta"].abs() <= STRIKE_INTEL_CONFIG["max_delta"])
     ]
     
     if work_df.empty:
@@ -859,9 +880,15 @@ def select_optimal_strikes(df: pd.DataFrame, spot: float, flow_metrics: dict = N
     t_min, t_max = work_df["tex"].abs().min(), work_df["tex"].abs().max()
     work_df["t_norm"] = (work_df["tex"].abs() - t_min) / (t_max - t_min) if t_max > t_min else 1.0
     
-    # 2. Base Score
+    # 2. Base Score: Carry-to-Risk (Theta / Vega)
     alpha = STRIKE_INTEL_CONFIG["alpha"]
     work_df["score"] = work_df["t_norm"] - (alpha * work_df["v_norm"])
+    
+    # 2.05 Delta Awareness Overlay (Phase 6.1)
+    # Give a bonus for strikes close to the 'Ideal Delta' (0.15)
+    ideal_d = STRIKE_INTEL_CONFIG["ideal_delta"]
+    work_df["d_dist"] = (work_df["delta"].abs() - ideal_d).abs()
+    work_df["score"] += 0.2 * (1.0 - work_df["d_dist"] / 0.25) # Max 0.2 bonus at ideal delta
     
     # 2.1 Execution Mode Conditioning (Phase 28)
     if mode == "Defensive":
@@ -1331,9 +1358,10 @@ def parse_nse_option_chain_csv(file_path: Path) -> tuple[pd.DataFrame, str]:
         logger.error(f"Error parsing NSE CSV {file_path}: {e}")
         return pd.DataFrame(), ""
 
-def load_latest_option_chain_csv(filename: str | None = None) -> tuple[pd.DataFrame, str, datetime, str]:
+def load_latest_option_chain_csv(filename: str | None = None, index_name: str = "NIFTY") -> tuple[pd.DataFrame, str, datetime, str]:
     """
     Find and load a specific CSV or the intelligently 'Nearest Active' one.
+    If index_name is provided, filters files by that index (e.g. NIFTY, SENSEX).
     """
     if filename:
         target_file = OPTION_CHAIN_DIR / filename
@@ -1342,8 +1370,12 @@ def load_latest_option_chain_csv(filename: str | None = None) -> tuple[pd.DataFr
             mtime = datetime.fromtimestamp(target_file.stat().st_mtime)
             return df, filename, mtime, expiry
             
-    files = list(OPTION_CHAIN_DIR.glob("*.csv"))
+    # Standard NDE format: option-chain-ED-sensi-NIFTY-16-May-2024.csv
+    pattern = f"*option-chain-ED-sensi-{index_name.upper()}*.csv"
+    files = list(OPTION_CHAIN_DIR.glob(pattern))
+    
     if not files:
+        # P0: Strict Index Isolation — Do NOT fallback to other indices (e.g. NIFTY) if SENSEX fails
         return pd.DataFrame(), "", None, ""
     
     # Pre-parse meta to find the dates
@@ -1392,11 +1424,10 @@ def load_latest_option_chain_csv(filename: str | None = None) -> tuple[pd.DataFr
     
     return df, target_chain.name, mtime, expiry
 
-def list_available_option_chains() -> list[dict]:
+def list_available_option_chains(index_name: str = None) -> list[dict]:
     """
     Scans data/option_chain/ for NDE-standard CSVs only (sensi/v3 converted files).
-    Excludes raw Sensibull downloads (NIFTY_*_option_chain_*.csv).
-    De-duplicates by expiry, preferring sensi over v3 over other files.
+    If index_name is provided, filters files by that index (e.g. NIFTY, SENSEX).
     """
     if not OPTION_CHAIN_DIR.exists():
         return []
@@ -1407,6 +1438,10 @@ def list_available_option_chains() -> list[dict]:
     by_expiry: dict[str, dict] = {}
 
     for f in OPTION_CHAIN_DIR.glob("*.csv"):
+        # If filtering by index, skip files that don't match
+        if index_name and index_name.upper() not in f.name.upper():
+            continue
+            
         # Skip raw Sensibull downloads — they haven't been converted yet
         if re.match(r"NIFTY_\d{4}-\d{2}-\d{2}_option_chain", f.name):
             continue
@@ -1600,21 +1635,21 @@ def ingest_live_option_chain_v3(symbol: str = "NIFTY", current_atr: float = 250.
 
     return {"status": "success", "files": saved_files, "spot": spot}
 
-def load_nifty_v3_data(filename: str | None = None) -> tuple[pd.DataFrame, str, str, dict, str]:
+def load_index_v3_data(filename: str | None = None, index_name: str = "NIFTY") -> tuple[pd.DataFrame, str, str, dict, str]:
     """
     Deterministic loading with LIVEv3/CACHED status.
     Returns: (DataFrame, Expiry, SourceLabel, Metadata, Filename)
     """
     # 1. Try Live/Specific file
-    df, fname, mtime, expiry = load_latest_option_chain_csv(filename)
+    df, fname, mtime, expiry = load_latest_option_chain_csv(filename, index_name=index_name)
     source = "LIVEv3" if "v3" in fname else "MANUAL-NSE"
     
     # 2. Fallback to Master Snapshot
     if df.empty:
-        master_csv = OPTION_CHAIN_DIR / "last_successful_nifty.csv"
+        master_csv = OPTION_CHAIN_DIR / f"last_successful_{index_name.lower()}.csv"
         if master_csv.exists():
             df, expiry = parse_nse_option_chain_csv(master_csv)
-            fname = "last_successful_nifty.csv"
+            fname = f"last_successful_{index_name.lower()}.csv"
             mtime = master_csv.stat().st_mtime
             source = "CACHED"
         else:
@@ -2041,7 +2076,7 @@ def fetch_futures_price(symbol: str = "NIFTY") -> float:
     """
     Canonical accessor for current futures price from metadata.
     """
-    _, _, _, meta, _ = load_nifty_v3_data()
+    _, _, _, meta, _ = load_index_v3_data()
     return meta.get("underlyingValue", meta.get("spot_at_fetch", 0.0))
 
 def compute_implied_borrowing_rate(spot: float, futures: float, dte: float) -> float:

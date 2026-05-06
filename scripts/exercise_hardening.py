@@ -75,7 +75,7 @@ def run_exercise():
     with open(mangled_nde, "w") as f: f.write("EXPIRY DATE: 10-Apr-2026\nSTRIKE,LTP\n22000,10\n")
 
     # Load the processed file
-    df, expiry, source, meta, fname = nde_options_logic.load_nifty_v3_data("option-chain-ED-sensi-NIFTY-10-Apr-2026.csv")
+    df, expiry, source, meta, fname = nde_options_logic.load_index_v3_data("option-chain-ED-sensi-NIFTY-10-Apr-2026.csv")
     
     print(f"   Metadata Flags: {meta.get('validation_flags', 'None')}")
     print(f"   Quality Score: {meta.get('data_quality_score', 'None')}")

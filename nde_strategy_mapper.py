@@ -1,10 +1,14 @@
 def map_strategy(ctx: dict, narrative: dict) -> dict:
     """
-    Strategy Mapping Engine
-    Translates the dominant state from the narrative into a concrete execution template.
-    Returns an execution plan with symbolic strike rules, which the compiler will resolve.
+    Institutional Strategy Mapping Engine (V3).
+    Translates canonical market state into concrete execution templates.
+    Structural Logic:
+    - SUPPRESSED: Define risk via spreads, avoid long gamma.
+    - EXPANSIVE: Favor convexity (straddles/strangles), dealer amplification.
+    - PINNED: premium selling (Iron Condor).
     """
     state = narrative.get("dominant_state", "NEUTRAL")
+    substate = narrative.get("substate", "NORMAL")
     action = narrative.get("dominant_action", "WAIT")
     
     execution_plan = {
@@ -18,10 +22,11 @@ def map_strategy(ctx: dict, narrative: dict) -> dict:
     if action != "ENTER":
         return execution_plan
 
+    # 1. PINNED RANGE (Dealer Suppression / Neutral Stability)
     if state == "PINNED RANGE":
         execution_plan["template"] = "Iron Condor"
-        execution_plan["invalidation"] = "Spot closes > 0.5 ATR beyond Wall"
-        execution_plan["notes"] = ["Range bound regime. Selling premium at structural walls."]
+        execution_plan["invalidation"] = "Spot sustains 0.5 ATR beyond structural walls."
+        execution_plan["notes"] = ["Range bound regime. Dealer suppression active. Favoring premium collection."]
         execution_plan["legs"] = [
             {"type": "SELL", "opt": "CE", "target": "CALL_WALL"},
             {"type": "BUY",  "opt": "CE", "target": "CALL_WING"},
@@ -29,26 +34,45 @@ def map_strategy(ctx: dict, narrative: dict) -> dict:
             {"type": "BUY",  "opt": "PE", "target": "PUT_WING"}
         ]
         
-    elif state == "VOLATILITY EXPANSION":
-        execution_plan["template"] = "Straddle"
-        execution_plan["invalidation"] = "IV Crush / Spot remains pinned near entry"
-        execution_plan["notes"] = ["Volatility expansion expected. Long gamma setup."]
-        execution_plan["legs"] = [
-            {"type": "BUY", "opt": "CE", "target": "ATM"},
-            {"type": "BUY", "opt": "PE", "target": "ATM"}
-        ]
-        
-    elif state == "LIQUIDITY VACUUM":
+    # 2. SUPPRESSED TREND (Long Gamma Directional Grind)
+    elif state == "SUPPRESSED TREND":
         execution_plan["template"] = "Debit Spread"
-        execution_plan["invalidation"] = "Momentum failure / Trend reversal"
-        execution_plan["notes"] = ["Directional vacuum setup. Using debit spread to define risk."]
-        # Assume Call spread if drift is positive, else Put spread
+        execution_plan["invalidation"] = "Structural drift reversal or GEX flip."
+        execution_plan["notes"] = ["Institutional directional grind. Movement suppressed by dealer positioning."]
+        
+        direction = narrative.get("dominant_state_direction", "BULLISH")
         auto = ctx.get("auto_metrics", {})
         drift = auto.get("drift", 0.0)
         opt_type = "CE" if drift > 0 else "PE"
         
         execution_plan["legs"] = [
-            {"type": "BUY",  "opt": opt_type, "target": "DELTA_0_50"},
+            {"type": "BUY",  "opt": opt_type, "target": "ATM"},
+            {"type": "SELL", "opt": opt_type, "target": "DELTA_0_25"}
+        ]
+        
+    # 3. EXPANSIVE TREND (Short Gamma Breakout)
+    elif state == "EXPANSIVE TREND":
+        execution_plan["template"] = "Straddle"
+        execution_plan["invalidation"] = "Volatility crush (IV < RV shift) or mean reversion."
+        execution_plan["notes"] = ["Gamma expansion regime. Dealer amplification active. Favoring convexity."]
+        execution_plan["legs"] = [
+            {"type": "BUY", "opt": "CE", "target": "ATM"},
+            {"type": "BUY", "opt": "PE", "target": "ATM"}
+        ]
+        
+    # 4. LIQUIDITY VACUUM (Momentum / Air-Pocket)
+    elif state == "LIQUIDITY VACUUM":
+        execution_plan["template"] = "Debit Spread"
+        execution_plan["invalidation"] = "Velocity reversal or Wall recapture."
+        execution_plan["notes"] = ["Directional vacuum. Air-pocket movement expected. High momentum."]
+        
+        auto = ctx.get("auto_metrics", {})
+        drift = auto.get("drift", 0.0)
+        opt_type = "CE" if drift > 0 else "PE"
+        
+        # More aggressive target for vacuum
+        execution_plan["legs"] = [
+            {"type": "BUY",  "opt": opt_type, "target": "ATM"},
             {"type": "SELL", "opt": opt_type, "target": "DELTA_0_25"}
         ]
         

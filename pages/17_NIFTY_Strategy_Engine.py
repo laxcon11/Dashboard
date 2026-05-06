@@ -13,7 +13,9 @@ _VALID_COLORS = {"#00C805","#FF3B30","#FF9500","#8E8E93","#007AFF","#5AC8FA","#f
 safe_color = lambda c: c if c in _VALID_COLORS else "#8E8E93"
 
 # v3 Calibration Core (Moved to top to prevent circularity)
+import importlib
 import NSE_Config
+importlib.reload(NSE_Config)
 LOT = NSE_Config.NIFTY_LOT_SIZE
 CONFIG_VERSION = NSE_Config.CONFIG_VERSION
 
@@ -30,10 +32,18 @@ with st.sidebar:
     st.header("🎯 Strategy Tuning")
     view_mode = get_ui_detail_mode(default="Summary")
     st.write("---")
+    
+    # P0: Multi-Index Support
+    selected_index = st.radio("Active Index", ["NIFTY", "SENSEX", "BANKNIFTY"], horizontal=True)
+    index_cfg = NSE_Config.MARKET_CONFIG[selected_index]
+    LOT = index_cfg["lot_size"]
+    ticker = index_cfg["ticker"]
+    STRIKE_STEP = index_cfg.get("strike_interval", 50)
+    
     mode = st.radio("Execution Bias", ["Defensive", "Balanced", "Aggressive"], index=1, help="Adjusts strike widening/tightness.")
-    st.caption(f"Engine: `{CONFIG_VERSION}`")
+    st.caption(f"Engine: `{CONFIG_VERSION}` | Index: `{selected_index}`")
 
-    available_chains = nde_options_logic.list_available_option_chains()
+    available_chains = nde_options_logic.list_available_option_chains(index_name=selected_index)
     selected_filename = None
     if available_chains:
         nearest = next((c for c in available_chains if c.get("is_near_active")), available_chains[0])
@@ -249,32 +259,43 @@ def render_greek_cluster(clusters, total_val, greek_type, current_spot=None):
 setup_page("Nifty Strategy Engine")
 
 
-st.title("🎯 NIFTY Strategy Engine (NDE)")
-st.caption("Derived from NDE v12 Intelligence Layer")
+st.title(f"🎯 {selected_index} Strategy Engine")
+st.caption(f"Derived from NDE v12 Intelligence Layer ({selected_index} Edition)")
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_cached_term_structure():
+def load_cached_term_structure(index_name):
     """Performance Shield: Vectorizes all expiries once and reuses the result."""
-    return nde_options_logic.compute_term_structure("NIFTY")
+    return nde_options_logic.compute_term_structure(index_name)
 
 from nde_automation_logic import get_historical_snapshot_df
 
-term_data = load_cached_term_structure()
+term_data = load_cached_term_structure(selected_index)
 
 try:
     # 1. LOAD DATA
-    regime_history = load_regime_history()
-    market_data = batch_download(["^NSEI", "^INDIAVIX"], period="3mo")
-    nifty_df = market_data.get("^NSEI")
+    regime_history = load_regime_history(index_name=selected_index)
+    # P0: Fetch index-specific spot and VIX
+    market_data = batch_download([ticker, "^INDIAVIX"], period="3mo")
+    nifty_df = market_data.get(ticker)
     vix_df = market_data.get("^INDIAVIX")
     
     # Updated: v3 Multi-source data loader (Live/Cached)
-    raw_chain, used_expiry, source, meta, fname = nde_options_logic.load_nifty_v3_data(selected_filename)
+    raw_chain, used_expiry, source, meta, fname = nde_options_logic.load_index_v3_data(selected_filename, index_name=selected_index)
     
     # 1.1 Secure Spot Extraction (Hardening for NaN/Missing data)
-    spot = nifty_df["Close"].iloc[-1]
-    if pd.isna(spot) or spot <= 0:
-        spot = 24000.0 # Emergency UI fallback for NIFTY
+    spot = None
+    if nifty_df is not None and not nifty_df.empty:
+        spot = nifty_df["Close"].iloc[-1]
+        
+    # Secondary Fallback: Use metadata from Option Chain (Highest Fidelity for Greeks Sync)
+    if spot is None or pd.isna(spot) or spot <= 0:
+        spot = meta.get("underlyingValue") or meta.get("spot_at_fetch") or meta.get("spot")
+        
+    # Final Hard Fallback: Broad Index Averages
+    if spot is None or pd.isna(spot) or spot <= 0:
+        if selected_index == "NIFTY": spot = 24000.0
+        elif selected_index == "BANKNIFTY": spot = 54000.0 # Updated to current regime
+        else: spot = 77000.0 # SENSEX
     else:
         spot = float(spot)
     
@@ -286,12 +307,14 @@ try:
         nifty_df=nifty_df,
         used_expiry=used_expiry,
         regime_history=regime_history,
-        regime_snap=load_regime_snapshot(),
+        regime_snap=load_regime_snapshot(index_name=selected_index),
         vix_df=vix_df,
         meta=meta,
         mode=mode,
         source=source,
-        term_data=term_data
+        term_data=term_data,
+        strike_interval=STRIKE_STEP,
+        index_name=selected_index
     )
 
     flow_metrics = ctx["flow_metrics"]
@@ -336,19 +359,13 @@ try:
             **DO NOT EXECUTE** without manual chain verification.
         """)
 
-    # ==================== 🥇 OPERATOR ACTION CENTER (SINGLE SOURCE OF TRUTH) ====================
+    # 🥇 OPERATOR ACTION CENTER (SINGLE SOURCE OF TRUTH)
+    # Narrative and execution are now pre-computed in backend
     cockpit = master_setup.get("cockpit", {})
     details = cockpit.get("details", {})
-    # --- EXPLICIT DETERMINISTIC DECISION PIPELINE ---
-    from nde_narrative_engine import build_narrative
-    from nde_execution_compiler import build_execution, build_payoff
-    
-    narrative = build_narrative(ctx)
-    execution_plan = build_execution(ctx, narrative)
-    payoff_summary = build_payoff(execution_plan)
-    
-    narrative["execution_plan"] = execution_plan
-    narrative["payoff_summary"] = payoff_summary
+    narrative = master_setup.get("narrative", {})
+    execution_plan = narrative.get("execution_plan", {})
+    payoff_summary = narrative.get("payoff_summary", {})
     
     master_setup = ctx.get("master_setup", {})
     flow_metrics = ctx.get("flow_metrics", {})
@@ -542,7 +559,7 @@ try:
     st.write("---")
     st.subheader("⏱️ WHAT CHANGED (Last vs Current)")
     # Requesting 5 days but only using the topmost (dated) row for direct Comparison
-    hist_df = get_historical_snapshot_df(limit=5, daily_only=True)
+    hist_df = get_historical_snapshot_df(limit=5, daily_only=True, index_name=selected_index)
     
     # Logic: If today's dated snapshot already exists, iloc[0] is Today. iloc[1] is Yesterday.
     # We want to compare current UI state vs Yesterday (iloc[1] if iloc[0] is today, else iloc[0])
@@ -636,7 +653,7 @@ try:
             # For Mean Reversion (Short Vol), drift away from entry is usually unfavorable.
             # For Straddles (Long Vol), drift is favorable.
             is_long_vol = strategy_code in ("TREND_ACCELERATION", "GAMMA_FLIP")
-            drift_favorable = (abs(drift_pts) > 50) if is_long_vol else (abs(drift_pts) < 30)
+            drift_favorable = (abs(drift_pts) > STRIKE_STEP) if is_long_vol else (abs(drift_pts) < (STRIKE_STEP * 0.6))
             drift_color = "#00C805" if drift_favorable else "#FF3B30"
             
             with st.container():
@@ -928,7 +945,7 @@ try:
         if pd.isna(min_win) or pd.isna(max_win):
             min_win, max_win = spot - 400, spot + 400
             
-        map_strikes = range(int(min_win)//50*50, int(max_win)//50*50 + 50, 50)
+        map_strikes = range(int(min_win)//STRIKE_STEP*STRIKE_STEP, int(max_win)//STRIKE_STEP*STRIKE_STEP + STRIKE_STEP, STRIKE_STEP)
         
         raw_exp = flow_metrics.get("raw_exposures", pd.DataFrame())
         dns_z = intel.get("dns_zones", [])

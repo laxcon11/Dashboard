@@ -60,7 +60,7 @@ def fetch_arbitrage_context(contract_filename: str):
     nifty_df = market_data.get("^NSEI")
     yf_spot = nifty_df["Close"].iloc[-1]
     
-    raw_chain, used_expiry, source, meta, fname = nde_options_logic.load_nifty_v3_data(contract_filename)
+    raw_chain, used_expiry, source, meta, fname = nde_options_logic.load_index_v3_data(contract_filename)
     
     # Spot: yfinance ^NSEI is primary (real-time close),
     # sensibull meta as fallback only

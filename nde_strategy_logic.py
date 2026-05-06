@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 from nde_automation_logic import normalize_regime_name, compute_expiry_phase
 import nde_options_logic
 import nde_automation_logic
+import realized_vol_engine
+import local_gamma_engine
+import position_manager
+import scenario_engine
 LOT = NSE_Config.NIFTY_LOT_SIZE
 CONFIG_VERSION = getattr(NSE_Config, 'CONFIG_VERSION', 'unknown')
 STATE_VERSION = "2.0"
@@ -34,7 +38,8 @@ STRATEGY_CONFIG = {
     "DRIFT_THRESHOLD_MIN": 0.15,
     "DRIFT_THRESHOLD_MAX": 0.50,
     "STABILITY_THRESHOLD_MIN": 40,
-    "STABILITY_THRESHOLD_MAX": 85
+    "STABILITY_THRESHOLD_MAX": 85,
+    "GAMMA_CONV_THRESHOLD": 5.0
 }
 
 STRATEGY_WEIGHTS = {
@@ -62,24 +67,38 @@ class CustomEncoder(json.JSONEncoder):
 
 def log_execution(ctx, narrative, execution_plan):
     try:
+        master = ctx.get("master_setup", {})
+        m_state = master.get("market_state", {})
+        rv = ctx.get("realized_metrics", {})
+        
         entry = {
             "timestamp": datetime.now().isoformat(),
             "spot": ctx.get("spot"),
-            "state": narrative.get("dominant_state"),
+            "state": m_state.get("state"),
+            "substate": m_state.get("substate"),
+            "volatility_regime": m_state.get("volatility_regime"),
+            "suppression_regime": m_state.get("suppression_regime"),
+            "confidence": m_state.get("confidence"),
+            "transition_risk": m_state.get("transition_risk"),
+            "rv_structure": rv,
+            "signal_alignment": master.get("signal_alignment"),
             "action": narrative.get("dominant_action"),
-            "confidence": narrative.get("confidence"),
             "template": execution_plan.get("template"),
             "legs": execution_plan.get("legs"),
-            "iv_rank": ctx.get("iv_data", {}).get("iv_rank"),
-            "drift": ctx.get("auto_metrics", {}).get("drift"),
-            "stability": ctx.get("auto_metrics", {}).get("stability"),
             "ctx_snapshot": ctx,
             "narrative": narrative
         }
         os.makedirs("logs", exist_ok=True)
-        with open("logs/execution_log.jsonl", "a") as f:
+        with open("logs/execution_audit_log.jsonl", "a") as f:
             f.write(json.dumps(entry, cls=CustomEncoder) + "\n")
+            
+        # Also track in position manager if action is ENTER
+        if narrative.get("dominant_action") == "ENTER":
+            pm = position_manager.PositionManager()
+            pm.open_position(ctx, narrative, execution_plan)
+            
     except Exception as e:
+        logger.error(f"Failed to log execution: {e}")
         logger.error(f"Failed to log execution: {e}")
 
 def get_snapshot_trends(current_metrics: dict, current_expiry: str) -> dict:
@@ -189,18 +208,6 @@ def save_strategy_state(state: Dict[str, Any]):
     state["config_hash"] = CONFIG_VERSION
     state["last_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     STATE_FILE.write_text(json.dumps(state, indent=2))
-
-def append_strategy_audit(entry: Dict[str, Any]):
-    """
-    Persists governance events (transitions, blocks, rejections) 
-    to notes/nde_strategy_log.jsonl.
-    """
-    try:
-        AUDIT_FILE.parent.mkdir(exist_ok=True)
-        with open(AUDIT_FILE, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as e:
-        logger.error(f"Audit Logging Failed: {e}")
 
 # ==================== PROFESSIONAL INTELLIGENCE HELPERS ====================
 # NOTE: compute_expiry_phase is now imported from nde_automation_logic (single canonical definition)
@@ -403,55 +410,171 @@ def get_time_decay_outlook(dte: int, iv_rank: float, vol_regime: str) -> str:
     if dte > 4: return "Moderate (Early Expiry)"
     return "Moderate"
 
+def classify_market_state(ctx: dict) -> dict:
+    """
+    CANONICAL MARKET STATE ENGINE (V3)
+    The Single Source of Truth for the entire NDE ecosystem.
+    Determines institutional regime using Positioning + Vol Structure + Movement.
+    """
+    flow = ctx.get("flow_metrics", {})
+    auto = ctx.get("auto_metrics", {})
+    rv = ctx.get("realized_metrics", {})
+    local = ctx.get("local_gamma", {})
+    iv_data = ctx.get("iv_data", {})
+    
+    spot = ctx.get("spot", 24000.0)
+    stability = auto.get("stability", 50.0)
+    drift = auto.get("drift", 0.0)
+    gex_norm = flow.get("gex_norm", 0.0)
+    iv_rank = iv_data.get("iv_rank", 50.0)
+    
+    rv_regime = rv.get("rv_regime", "NORMAL")
+    suppression_strength = local.get("suppression_strength", 0.0)
+    
+    state = "NEUTRAL"
+    substate = "WAITING_FOR_CONFIRMATION"
+    direction = "BULLISH" if drift > 0.15 else "BEARISH" if drift < -0.15 else "NEUTRAL"
+    vol_regime = "NORMAL"
+    suppression = "NONE"
+    why = []
+
+    # 1. PINNED RANGE (Long Gamma + Stability + Suppression)
+    if gex_norm > 5.0 and stability > 70 and abs(drift) < 0.2:
+        state = "PINNED RANGE"
+        vol_regime = "SUPPRESSED"
+        suppression = "STRONG"
+        substate = "PREMIUM_COLLECTION"
+        why.append("High Gamma density + High stability suppressing realized volatility.")
+
+    # 2. SUPPRESSED TREND (Directional + Long Gamma + Structural Support)
+    elif abs(drift) > 0.2 and gex_norm > 2.0 and rv_regime == "SUPPRESSED":
+        state = "SUPPRESSED TREND"
+        vol_regime = "SUPPRESSED"
+        substate = "DIRECTIONAL_GRIND"
+        why.append(f"Steady {direction} drift supported by dealer positioning. Movement suppressed.")
+
+    # 3. EXPANSIVE TREND (Directional + Short Gamma + RV Acceleration)
+    elif abs(drift) > 0.35 and gex_norm < -2.0 and rv_regime == "EXPANSIVE":
+        state = "EXPANSIVE TREND"
+        vol_regime = "EXPANSIVE"
+        substate = "CONVEX_ACCELERATION"
+        why.append(f"Short Gamma regime amplifying {direction} drift. Convex expansion likely.")
+
+    # 4. TRANSITIONAL INSTABILITY (Falling Stability + High Transition Score)
+    elif stability < 40 and ctx.get("trans_score", {}).get("score", 0.0) > 0.6:
+        state = "TRANSITIONAL INSTABILITY"
+        vol_regime = "VOLATILE"
+        substate = "REGIME_UNCERTAINTY"
+        why.append("Structural stability collapse. High probability of regime transition.")
+
+    # 5. LIQUIDITY VACUUM (Short Gamma + Low Density + Drift Velocity)
+    elif gex_norm < -5.0 and local.get("gamma_density_score", 1.0) < 0.5:
+        state = "LIQUIDITY VACUUM"
+        vol_regime = "EXPANSIVE"
+        substate = "AIR_POCKET"
+        why.append("Severe negative Gamma concentration with poor structural support.")
+
+    # Fallback to legacy classification for compatibility if none of the above match
+    if state == "NEUTRAL":
+        if abs(drift) > 0.5:
+            state = "MOMENTUM_DRIVE"
+            why.append("High drift magnitude driving state.")
+        else:
+            why.append("Standard macro environment.")
+
+    return {
+        "state": state,
+        "substate": substate,
+        "direction": direction,
+        "volatility_regime": vol_regime,
+        "suppression_regime": suppression,
+        "confidence": 0.0, # Will be filled by alignment engine
+        "transition_risk": ctx.get("trans_score", {}).get("score", 0.0),
+        "why": why
+    }
+
+def compute_signal_alignment(ctx: dict) -> dict:
+    """
+    Institutional Signal Alignment Engine.
+    Measures coherence between positioning, drift, and volatility.
+    """
+    flow = ctx.get("flow_metrics", {})
+    auto = ctx.get("auto_metrics", {})
+    rv = ctx.get("realized_metrics", {})
+    
+    drift = auto.get("drift", 0.0)
+    gex_norm = flow.get("gex_norm", 0.0)
+    rv_regime = rv.get("rv_regime", "NORMAL")
+    
+    agreements = []
+    conflicts = []
+    score = 0.0
+    
+    # 1. Drift vs Gamma Regime
+    if (drift > 0.1 and gex_norm > 0) or (drift < -0.1 and gex_norm < 0):
+        # Bullish drift in Long Gamma is suppressed (Agreement on Suppression)
+        # Bearish drift in Short Gamma is expansive (Agreement on Momentum)
+        score += 0.25
+        agreements.append("Drift aligns with Gamma structural regime.")
+    else:
+        conflicts.append("Drift conflicts with Gamma structural regime.")
+        
+    # 2. RV vs Gamma Regime
+    if (rv_regime == "EXPANSIVE" and gex_norm < 0) or (rv_regime == "SUPPRESSED" and gex_norm > 0):
+        score += 0.25
+        agreements.append("Realized movement validates Gamma positioning.")
+    else:
+        conflicts.append("Realized movement deviates from positioning expectations.")
+        
+    # 3. Vanna vs Direction
+    vanna = flow.get("vanna_bias", "Neutral")
+    if ("Bullish" in vanna and drift > 0) or ("Bearish" in vanna and drift < 0):
+        score += 0.25
+        agreements.append("Vanna flow supports directional drift.")
+        
+    # 4. Stability Alignment
+    if auto.get("stability", 50.0) > 60:
+        score += 0.25
+        agreements.append("High structural stability increases signal trust.")
+    
+    return {
+        "alignment_score": round(score, 2),
+        "agreement_count": len(agreements),
+        "agreements": agreements,
+        "conflicts": conflicts,
+        "confidence": round(score, 2)
+    }
+
 def get_market_state(flow_metrics: dict, auto_metrics: dict, vol_ctx: dict, trans_score: dict, atr: float = 250.0, spot: float = 22000.0) -> dict:
-    """
-    Market State Engine: Adaptive Thresholds & Velocity Layers.
-    """
+    """Task 2: Market State Classification - Derived from structural flow + momentum."""
+    # 1. Extract Metrics
     gamma_norm = flow_metrics.get("gex_norm", 0.0)
     vanna_norm = flow_metrics.get("vex_norm", 0.0)
-    charm_norm = flow_metrics.get("cex_norm", 0.0)
     iv_rank = vol_ctx.get("iv_rank", 50.0)
     stability = auto_metrics.get("stability", 50.0)
     drift = auto_metrics.get("drift", 0.0)
     drift_accel = auto_metrics.get("drift_acceleration", 0.0)
     
-    # 1. Adaptive Thresholds (f(IV, ATR))
-    # High IV requires more Gamma to pin. High ATR requires more Drift to trend.
+    # 2. Adaptive Thresholds
     gamma_thresh = 5.0 * (1.0 + (iv_rank / 100.0))
-    drift_thresh = 0.20 * (1.0 + (atr / spot * 10)) # Normalized to 1% move proxy
     
-    # 2. Velocity Layer (FAST vs SLOW)
+    # 3. Velocity Layer
     velocity_regime = "FAST" if abs(drift_accel) > 0.1 else "SLOW"
+    trans_label = trans_score.get("label", "NORMAL") if trans_score else "NORMAL"
     
-    # 3. Drift Regime (Low / Moderate / High / Extreme)
+    # 4. Drift Intensity
     d_abs = abs(drift)
     if d_abs > 0.6: d_regime = "EXTREME"
     elif d_abs > 0.35: d_regime = "HIGH"
     elif d_abs > 0.15: d_regime = "MODERATE"
     else: d_regime = "LOW"
     
-    # 4. State Logic
-    state = "NEUTRAL DRIFT"
-    why = "No clear structural dominance. Following macro bias."
-    
-    if gamma_norm > gamma_thresh and stability > 70 and d_regime == "LOW":
-        state = "PINNED RANGE"
-        why = "Long Gamma saturation + High Stability + Low Drift → Range expected."
-    elif gamma_norm < -gamma_thresh and d_regime in ["HIGH", "EXTREME"] and trans_score["label"] in ["IMMINENT", "PRE-TRANSITION"]:
-        state = "LIQUIDITY VACUUM"
-        why = f"Short Gamma + {d_regime} Drift + Accelerating Transition → Vacuum likely."
-    elif vanna_norm < -2.0 and iv_rank > 40 and d_regime == "HIGH":
-        state = "SQUEEZE BUILDUP"
-        why = "Negative Vanna + High IV + High Drift → Squeeze risk high."
-    elif vol_ctx["regime"] == "QUIET" and gamma_norm > gamma_thresh and velocity_regime == "SLOW":
-        state = "TRANSITION COMPRESSION"
-        why = "Quiet Vol + Range Pinned + Low Velocity → Breakout precursor."
-    elif velocity_regime == "FAST" and d_regime == "EXTREME":
-        state = "VOLATILITY EXPANSION"
-        why = "Extreme Drift Velocity + High Acceleration → High-momentum breakout."
-    elif gamma_norm > gamma_thresh and d_regime == "HIGH":
-        state = "MEAN REVERSION STRENGTH"
-        why = "Long Gamma buffer + Over-extended Drift → Reversion likely."
+    # 5. Canonical State Logic
+    state, why = classify_market_state(
+        gamma_norm, stability, d_regime, trans_label, 
+        vol_ctx or {}, vanna_norm, iv_rank, velocity_regime,
+        gamma_thresh=gamma_thresh
+    )
     
     return {
         "state": state, 
@@ -737,7 +860,7 @@ def evaluate_risk_prefilter(spot: float, gamma_flip: float, atr: float, state: s
 def generate_engine_context(
     raw_chain: pd.DataFrame, spot: float, nifty_df: pd.DataFrame, used_expiry: str,
     regime_history: list, regime_snap: dict, vix_df: pd.DataFrame, meta: dict = None, mode: str = "Balanced",
-    source: str = "UNKNOWN", term_data: dict = None
+    source: str = "UNKNOWN", term_data: dict = None, strike_interval: int = 50, index_name: str = "NIFTY"
 ) -> dict:
     """Unified engine context calculation that abstracts math away from the Streamlit UI."""
     meta = meta or {}
@@ -745,16 +868,24 @@ def generate_engine_context(
     # Phase 51: Spot Guardrail (Prevent NaN propagation to math layers)
     try:
         if spot is None or math.isnan(float(spot)) or float(spot) <= 0:
-            spot = 24000.0  # Safe NIFTY fallback
+            # P0: Index-Aware Safe Fallback
+            u_expiry = str(used_expiry).upper()
+            if "BANKNIFTY" in u_expiry: spot = 54000.0
+            elif "NIFTY" in u_expiry: spot = 24000.0
+            else: spot = 77000.0 # SENSEX
         else:
             spot = float(spot)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         spot = 24000.0
+        
+    subset = pd.DataFrame()
+    if nifty_df is None:
+        nifty_df = pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
     
     # 1. Advanced Metrics Calculation (Relocated from UI)
     atr = nde_options_logic.calculate_atr_sma(nifty_df)
     if atr is None or math.isnan(float(atr)) or float(atr) <= 0:
-        atr = 250.0
+        atr = 250.0 if spot < 50000 else 800.0 # Proportional fallback
     else:
         atr = float(atr)
 
@@ -794,12 +925,12 @@ def generate_engine_context(
             
         subset["t_days"] = t_days
         flow_metrics = nde_options_logic.compute_option_flow_exposures(
-            spot, subset, tv_ema_fast=_tv_ema_f, tv_ema_slow=_tv_ema_s, atr=atr
+            spot, subset, tv_ema_fast=_tv_ema_f, tv_ema_slow=_tv_ema_s, atr=atr, strike_interval=strike_interval
         )
         call_wall, put_wall, _, _ = nde_options_logic.calculate_option_walls(subset)
         # --- WALL HARDENING ---
-        if pd.isna(call_wall) or call_wall <= 0: call_wall = spot + 300
-        if pd.isna(put_wall) or put_wall <= 0: put_wall = spot - 300
+        if pd.isna(call_wall) or call_wall <= 0: call_wall = spot + (3 * strike_interval)
+        if pd.isna(put_wall) or put_wall <= 0: put_wall = spot - (3 * strike_interval)
         
         current_atm_iv = nde_options_logic.compute_atm_iv(subset, spot)
         if pd.isna(current_atm_iv) or current_atm_iv <= 0: current_atm_iv = 15.0
@@ -836,17 +967,51 @@ def generate_engine_context(
         "drift_acceleration": drift_accel, "transition_risk": risk, "fragility": fragility
     }
     
+    # 3b. Transition Score Object
+    trans_label = "IGNORE"
+    if risk > 0.8: trans_label = "IMMINENT"
+    elif risk > 0.6: trans_label = "ELEVATED"
+    elif risk > 0.4: trans_label = "MODERATE"
+    else: trans_label = "LOW"
+    
+    trans_score = {"score": risk, "label": trans_label}
+    
     # 4. IV Rank
     if vix_df is not None and not vix_df.empty:
         iv_data = nde_options_logic.compute_iv_rank(current_atm_iv, vix_df["Close"])
     else:
         iv_data = {"label": "UNKNOWN", "iv_rank": 50.0}
 
-    # New Professional Intelligence Layers (Phase 44 + Phase 48 V5)
-    vol_trend = compute_vol_trend(vix_df, regime_history)
-    vol_ctx = get_volatility_context(iv_data, vol_trend)
-    trans_score = calculate_transition_score(auto_metrics, _strat_state)
-    market_state = get_market_state(flow_metrics, auto_metrics, vol_ctx, trans_score)
+    # 5. NEW: Realized Volatility & Local Gamma Engines (Institutional Upgrade)
+    realized_metrics = realized_vol_engine.compute_realized_volatility_metrics(nifty_df, spot, atr)
+    local_gamma = local_gamma_engine.compute_local_gamma_density(subset if not raw_chain.empty else None, spot, atr)
+    
+    # Institutional Volatility Context
+    vol_ctx = {
+        "rv_5d": realized_metrics.get("rv_5d", 15.0),
+        "rv_intraday": realized_metrics.get("rv_intraday", 15.0),
+        "rv_acceleration": realized_metrics.get("rv_acceleration", 0.0),
+        "regime": realized_metrics.get("volatility_regime", "NORMAL")
+    }
+    vt_label = "Expanding (Rising)" if vol_ctx["rv_acceleration"] > 0.05 else "Suppressed (Falling)" if vol_ctx["rv_acceleration"] < -0.05 else "Stable"
+    vol_trend = {"vol_trend": vt_label}
+    
+    # 6. Preliminary Context for Classification
+    ctx_pre = {
+        "flow_metrics": flow_metrics,
+        "auto_metrics": auto_metrics,
+        "realized_metrics": realized_metrics,
+        "local_gamma": local_gamma,
+        "iv_data": iv_data,
+        "spot": spot,
+        "trans_score": trans_score,
+        "vol_ctx": vol_ctx
+    }
+    
+    # 7. CANONICAL STATE ENGINE (SINGLE SOURCE OF TRUTH)
+    market_state = classify_market_state(ctx_pre)
+    alignment = compute_signal_alignment(ctx_pre)
+    market_state["confidence"] = alignment["confidence"]
     
     bias_obj = get_directional_conviction(
         regime_snap.get("current_regime") or regime_snap.get("regime_label", "Unknown"), 
@@ -854,7 +1019,7 @@ def generate_engine_context(
         flow_metrics.get("total_gex", 0)
     )
 
-    # 6. Expiry Defensive Flag (Institutional Policy Phase 42 + V5 Hardening)
+    # 8. Expiry Defensive Flag (Institutional Policy Phase 42 + V5 Hardening)
     is_expiry_defensive = False
     tv_label = flow_metrics.get("tv_label", "NORMAL")
     gex_norm = flow_metrics.get("gex_norm", 0.0)
@@ -870,24 +1035,33 @@ def generate_engine_context(
         if current_iv < 12.0 and gex_norm > 0 and tv_label != "AVOID" and oi_share < 45.0:
             is_expiry_defensive = True
 
-    # Task 4: Risk Pre-Filter Extraction
-    prefilter_result = evaluate_risk_prefilter(
-        spot, flow_metrics.get("gamma_flip_level", 0.0), atr, 
-        market_state, meta.get("data_quality", "HIGH")
-    )
-
-    # 7. Master Strategy Selection (Refactored for V5)
-    strategy_code = select_master_strategy(
-        flow_metrics, auto_metrics, spot, regime_snap, 
-        dte=t_days, atr=atr, iv_data=iv_data, 
-        is_expiry_defensive=is_expiry_defensive,
-        vol_ctx=vol_ctx, trans_score=trans_score
-    )
+    # 9. Master Strategy Selection (Refactored for V5)
+    strategy_code = select_master_strategy(ctx_pre)
     
-    if not prefilter_result["can_trade"]:
-        strategy_code = "NO_TRADE"
-        
-    # 8. Hydrate Strategy Selection
+    # Governance Gate (P1: Strict Blocking)
+    prefilter_result = {"can_trade": True, "reason_code": "NONE"}
+    
+    # Extract integrity flags
+    data_quality = meta.get("data_quality")
+    has_delta = meta.get("has_delta", True)
+    chain_rows = meta.get("chain_rows", 100)
+    
+    # Determination: Is data quality explicitly degraded?
+    is_degraded = (data_quality in ["LOW", "DEGRADED"]) or (not has_delta) or (chain_rows < 50)
+    
+    if is_degraded and strategy_code != "NO_TRADE":
+        # Check if critical missing
+        if not has_delta or chain_rows < 30:
+            strategy_code = "NO_TRADE"
+            prefilter_result = {"can_trade": False, "reason_code": "CRITICAL_DATA_DEGRADATION"}
+            logger.warning("Governance: Active execution blocked due to critical data degradation.")
+        else:
+            prefilter_result = {"can_trade": True, "reason_code": "DEGRADED_DATA_WARNING"}
+            
+    if strategy_code == "NO_TRADE" and prefilter_result["can_trade"]:
+        prefilter_result = {"can_trade": False, "reason_code": "NO_STRATEGY_ALIGNMENT"}
+
+    # 10. Hydrate Strategy Selection
     intel = flow_metrics.get("intelligence", {}).copy()
     inst_iq = flow_metrics.get("institutional_iq", {})
     # Merge Enriched Metrics into Intelligence Layer (Phase 46 Unified Context)
@@ -901,49 +1075,45 @@ def generate_engine_context(
         )
     flow_metrics["intelligence"] = intel
     
-    # NEW: Wall Migration & Squeeze Logic (V5 Roadmap / Tier 6)
+    # 11. Wall Migration & Squeeze Logic
     wall_drift = {"call": 0, "put": 0, "is_squeeze": False, "migration_bonus": 1.0}
     if regime_history and len(regime_history) > 1:
         try:
             today_str = datetime.now().strftime("%Y-%m-%d")
-            # Find the first snapshot of today
             today_snapshots = [s for s in regime_history if s.get("date", "").startswith(today_str)]
             if today_snapshots:
                 first = today_snapshots[0]
                 first_cw = first.get("call_wall", walls[0])
                 first_pw = first.get("put_wall", walls[1])
-                
                 wall_drift["call"] = int(walls[0] - first_cw)
                 wall_drift["put"] = int(walls[1] - first_pw)
-                
-                # Squeeze Check: Distance between walls < 1.5 * ATR
                 if abs(walls[0] - walls[1]) < (1.5 * atr):
                     wall_drift["is_squeeze"] = True
-                
-                # Migration Bonus: If bias is Bullish and walls migrated UP
-                # (+5% for 50pt drift, +10% for 100pt drift)
                 bias_label = bias_obj.get("bias", "NEUTRAL")
-                if bias_label == "BULLISH" and (wall_drift["call"] >= 50 or wall_drift["put"] >= 50):
-                    wall_drift["migration_bonus"] = 1.05 if max(wall_drift["call"], wall_drift["put"]) < 100 else 1.10
-                elif bias_label == "BEARISH" and (wall_drift["call"] <= -50 or wall_drift["put"] <= -50):
-                    wall_drift["migration_bonus"] = 1.05 if min(wall_drift["call"], wall_drift["put"]) > -100 else 1.10
+                s_int = float(strike_interval)
+                if bias_label == "BULLISH" and (wall_drift["call"] >= s_int or wall_drift["put"] >= s_int):
+                    wall_drift["migration_bonus"] = 1.05 if max(wall_drift["call"], wall_drift["put"]) < (2 * s_int) else 1.10
+                elif bias_label == "BEARISH" and (wall_drift["call"] <= -s_int or wall_drift["put"] <= -s_int):
+                    wall_drift["migration_bonus"] = 1.05 if min(wall_drift["call"], wall_drift["put"]) > (-2 * s_int) else 1.10
         except Exception: pass
 
     master_setup = get_strategy_details(
         strategy_code, flow_metrics, auto_metrics, spot, regime_snap, (call_wall, put_wall), atr, 
         dte=t_days, iv_data=iv_data, bias_conv=bias_obj, mode=mode, is_expiry_defensive=is_expiry_defensive,
-        term_data=term_data, nifty_df=nifty_df, wall_drift=wall_drift
+        term_data=term_data, nifty_df=nifty_df, wall_drift=wall_drift, strike_interval=strike_interval
     )
     
-    # Add trend data to context
-    master_setup["vol_trend"] = vol_trend
-    master_setup["vol_ctx"] = vol_ctx
-    master_setup["trans_score"] = trans_score
-    master_setup["market_state"] = market_state
-    master_setup["bias_conviction"] = bias_obj
-    master_setup["executive_summary"] = get_strategy_executive_summary(strategy_code, bias_obj, spot, (call_wall, put_wall), gamma_metrics=flow_metrics, iv_data=iv_data)
+    master_setup.update({
+        "vol_trend": vol_trend,
+        "vol_ctx": vol_ctx,
+        "trans_score": trans_score,
+        "market_state": market_state,
+        "signal_alignment": alignment,
+        "bias_conviction": bias_obj,
+        "executive_summary": get_strategy_executive_summary(strategy_code, bias_obj, spot, (call_wall, put_wall), gamma_metrics=flow_metrics, iv_data=iv_data)
+    })
     
-    # NEW: Cockpit Redesign Data (Phase 48 Hardening)
+    # 12. Cockpit Data
     _cockpit_data = {
         "market_state": market_state["state"],
         "details": get_market_state_cockpit_details(flow_metrics, auto_metrics, market_state),
@@ -952,20 +1122,25 @@ def generate_engine_context(
     }
     master_setup["cockpit"] = _cockpit_data
     
-    # NEW: Unified Narrative & Deterministic Execution Pipeline
-    from nde_narrative_engine import build_narrative
-    from nde_execution_compiler import build_execution, build_payoff
-    
+    # 13. Unified Context Construction
     ctx_dict = {
         "flow_metrics": flow_metrics,
         "auto_metrics": auto_metrics,
+        "realized_metrics": realized_metrics,
+        "local_gamma": local_gamma,
         "walls": (call_wall, put_wall),
         "iv_data": iv_data,
         "spot": spot,
         "master_setup": master_setup,
         "option_chain_df": raw_chain,
-        "meta": meta
+        "meta": meta,
+        "index_name": index_name,
+        "strike_interval": strike_interval,
+        "trans_score": trans_score
     }
+    
+    from nde_narrative_engine import build_narrative
+    from nde_execution_compiler import build_execution, build_payoff
     
     narrative = build_narrative(ctx_dict)
     execution_plan = build_execution(ctx_dict, narrative)
@@ -975,7 +1150,11 @@ def generate_engine_context(
     narrative["payoff_summary"] = payoff_summary
     master_setup["narrative"] = narrative
     
-    # NEW: Telemetry Hook
+    # NEW: Scenario Generation
+    scenarios = scenario_engine.ScenarioEngine.generate_scenarios(spot, atr, execution_plan.get("legs", []), t_days)
+    master_setup["scenarios"] = scenarios
+    
+    # AUTO-LOGGING (Institutional Requirement)
     log_execution(ctx_dict, narrative, execution_plan)
     
     # Enforce single authority: Remove legacy playbook
@@ -1098,7 +1277,11 @@ def generate_engine_context(
         "expiry_phase": expiry_phase,
         "quality_score": quality_score,
         "source_mode": source,
-        "requires_warning": (source == "DEGRADED (Strike Mean)" or meta.get("requires_warning", False) or prefilter_result["reason_code"] != "NONE"),
+        "requires_warning": (
+            source == "DEGRADED (Strike Mean)" or 
+            meta.get("requires_warning", False) or 
+            prefilter_result["reason_code"] in ["CRITICAL_DATA_DEGRADATION", "DEGRADED_DATA_WARNING"]
+        ),
         "state": load_strategy_state(),
         "ui_display": ui_display,
         "narrative": master_setup.get("narrative", {}) # Explicitly surface narrative
@@ -1277,7 +1460,7 @@ def calculate_trade_quality(strategy_code, gamma_metrics, auto_metrics, regime_d
     strike_score = max(0.0, min(10.0, strike_score))
     risk_score = max(0.0, min(10.0, risk_score))
     
-    w = STRATEGY_WEIGHTS
+    # w is already correctly weighted by market phase (Discovery/Midday/Closing)
     total_score = (regime_score * w["regime"] + strike_score * w["strike"] + risk_score * w["risk"])
     
     # Phase 37: Convergence & IV Adjustments
@@ -1428,9 +1611,10 @@ def generate_trade_template(strategy, spot, call_wall, put_wall, atr, intel=None
         sell_c = selected["call"]["strike"] if selected and selected.get("call") else call_wall
         sell_p = selected["put"]["strike"] if selected and selected.get("put") else put_wall
         
-        # Defined Risk logic (Nifty Step is 50/100)
-        # mode: Defensive (Width 100), Balanced (Width 50), Aggressive (Naked proxy)
-        width = 100 if mode == "Defensive" else 50
+        # Defined Risk logic (Nifty Step is 50/100, others 100/200)
+        # mode: Defensive (Width 2x Interval), Balanced (Width 1x Interval), Aggressive (Naked proxy)
+        strike_interval = intel.get("strike_interval", 50.0) if intel else 50.0
+        width = (2 * strike_interval) if mode == "Defensive" else strike_interval
         
         # Guard against NaN values
         if not sell_c or math.isnan(sell_c): sell_c = call_wall
@@ -1482,12 +1666,15 @@ def generate_trade_template(strategy, spot, call_wall, put_wall, atr, intel=None
 
     elif strategy == "TREND_ACCELERATION":
         bias = intel.get("structural_bias", "Neutral") if intel else "Bullish"
-        width = 150 if mode == "Defensive" else (100 if mode == "Balanced" else 200)
+        strike_interval = intel.get("strike_interval", 50.0) if intel else 50.0
+        width = (3 * strike_interval) if mode == "Defensive" else ((2 * strike_interval) if mode == "Balanced" else (4 * strike_interval))
         offset_mult = 1.5 if mode == "Defensive" else (1.0 if mode == "Balanced" else 0.5)
+        strike_interval = intel.get("strike_interval", 50.0)
         
         if bias == "Bullish":
-            sell_p = round((spot - (0.5 * atr * offset_mult)) / 50.0) * 50.0
-            buy_p = sell_p - width
+            t_p = spot - (0.5 * atr * offset_mult)
+            sell_p = nde_options_logic.snap_to_nearest_strike(t_p, raw_exp)
+            buy_p = nde_options_logic.snap_to_nearest_strike(sell_p - width, raw_exp)
             try:
                 s_ltp = float(raw_exp[(raw_exp["strike"] == sell_p) & (raw_exp["type"] == "put")]["ltp"].values[0])
                 b_ltp = float(raw_exp[(raw_exp["strike"] == buy_p) & (raw_exp["type"] == "put")]["ltp"].values[0])
@@ -1513,9 +1700,10 @@ def generate_trade_template(strategy, spot, call_wall, put_wall, atr, intel=None
                 },
                 "position_type": "BULL_PUT_SPREAD"
             }
-        else:
-            sell_c = round((spot + (0.5 * atr * offset_mult)) / 50.0) * 50.0
-            buy_c = sell_c + width
+        elif bias == "Bearish":
+            t_c = spot + (0.5 * atr * offset_mult)
+            sell_c = nde_options_logic.snap_to_nearest_strike(t_c, raw_exp)
+            buy_c = nde_options_logic.snap_to_nearest_strike(sell_c + width, raw_exp)
             try:
                 s_ltp = float(raw_exp[(raw_exp["strike"] == sell_c) & (raw_exp["type"] == "call")]["ltp"].values[0])
                 b_ltp = float(raw_exp[(raw_exp["strike"] == buy_c) & (raw_exp["type"] == "call")]["ltp"].values[0])
@@ -1559,8 +1747,11 @@ def generate_trade_template(strategy, spot, call_wall, put_wall, atr, intel=None
 
     elif strategy == "VANNA":
         # Vol-Neutral Core Positioning (1.5 ATR distance)
-        sell_c = round((spot + (1.5 * atr)) / 50.0) * 50.0
-        sell_p = round((spot - (1.5 * atr)) / 50.0) * 50.0
+        strike_interval = intel.get("strike_interval", 50.0) if intel else 50.0
+        t_c = spot + (1.5 * atr)
+        t_p = spot - (1.5 * atr)
+        sell_c = nde_options_logic.snap_to_nearest_strike(t_c, raw_exp)
+        sell_p = nde_options_logic.snap_to_nearest_strike(t_p, raw_exp)
         
         # Mode-aware Protection
         width = 150 if mode == "Defensive" else (100 if mode == "Balanced" else 0)
@@ -1611,161 +1802,81 @@ def generate_trade_template(strategy, spot, call_wall, put_wall, atr, intel=None
 # ==================== MAIN LOGIC ====================
 
 
-def select_master_strategy(gamma_metrics, auto_metrics, spot, regime_data, dte=30, atr=250.0, iv_data=None, is_expiry_defensive=False, vol_ctx=None, trans_score=None):
-    """
-    Deterministic Selection with Priority Logic & Cycle Awareness (Refactored for V5).
-    Hierarchy: Volatility Gate -> Gamma Regime -> Stability -> Drift -> Transition.
-    """
-    if regime_data is None: regime_data = {}
-    if iv_data is None: iv_data = {"label": "NORMAL", "iv_rank": 50.0}
-    
-    # V5 Gating
-    vol_regime = vol_ctx.get("regime", "NORMAL") if vol_ctx else "NORMAL"
-    trans_label = trans_score.get("label", "IGNORE") if trans_score else "IGNORE"
-    
-    cfg = STRATEGY_CONFIG
-    state = load_strategy_state()
-    
-    flip_level = gamma_metrics.get("gamma_flip_level", None)
-    gamma = gamma_metrics.get("total_gex", 0)
-    gex_norm = gamma_metrics.get("gex_norm", 0.0)
-    tv_label = gamma_metrics.get("tv_label", "NORMAL")
-    
-    drift = auto_metrics.get("drift", 0)
-    stability = auto_metrics.get("stability", 50)
-    
-    expiry_phase = compute_expiry_phase(dte)
-    mean_rev_stab_threshold = cfg["MEAN_REV_STABILITY_THRESHOLD"] + max(0, (5 - dte) * 3)
+def calculate_realized_volatility(df: pd.DataFrame, window: int = 20) -> float:
+    """Computes Annualized Realized Volatility from historical returns."""
+    if df is None or df.empty or len(df) < window:
+        return 15.0 # Default fallback
+    try:
+        # Calculate daily log returns
+        returns = np.log(df['Close'] / df['Close'].shift(1))
+        # Rolling std dev annualized (sqrt(252))
+        vol = returns.rolling(window=window).std() * np.sqrt(252) * 100
+        rv = float(vol.iloc[-1])
+        return rv if not np.isnan(rv) else 15.0
+    except Exception:
+        return 15.0
 
+def select_master_strategy(ctx: dict) -> str:
+    """
+    Institutional Strategy Selection Engine (V3).
+    Hierarchy: Transition Risk -> Market State -> Alignment -> Strategy intent.
+    """
+    flow = ctx.get("flow_metrics", {})
+    auto = ctx.get("auto_metrics", {})
+    vol_ctx = ctx.get("vol_ctx", {})
+    trans_score = ctx.get("trans_score", {})
+    
+    # Extract State from Context
+    m_state = ctx.get("master_setup", {}).get("market_state", {})
+    if not m_state:
+        from nde_strategy_logic import classify_market_state
+        m_state = classify_market_state(ctx)
+        
+    state = m_state.get("state", "NEUTRAL")
+    vol_regime = m_state.get("volatility_regime", "NORMAL")
+    trans_label = trans_score.get("label", "IGNORE")
+    
     strategy_code = "NO_TRADE"
     
-    # 1. Volatility Override (Priority 1)
-    if vol_regime == "EXPLOSIVE":
-        # Force defensive or long-vol strategies
-        if trans_label in ["PRE-TRANSITION", "IMMINENT"]:
-            return "GAMMA_FLIP" # Or a dedicated SQUEEZE_TRADE code
-            
-    # 2. Transition Gate (Priority 2)
+    # 1. TRANSITION PRIORITY
     if trans_label == "IMMINENT":
-        return "GAMMA_FLIP"
-    
-    # 3. Gamma/Drift Core Logic
-    last_strat = str(state.get("last_strategy", "NO_TRADE"))
-    flip_thresh = max(cfg["DRIFT_THRESHOLD_MIN"], 0.5 * atr / spot) if spot > 0 else 0.005
-    active_flip_threshold = flip_thresh * 1.5 if last_strat == "GAMMA_FLIP" else flip_thresh
-    
-    flip_dist = abs(spot - flip_level) / spot if flip_level is not None and spot > 0 else 1.0
-    
-    if flip_level is not None and flip_dist < active_flip_threshold:
         strategy_code = "GAMMA_FLIP"
-    elif gex_norm < 0 and abs(drift) > cfg["TREND_DRIFT_THRESHOLD"]:
-        strategy_code = "TREND_ACCELERATION"
-    elif gex_norm > 0 and stability > mean_rev_stab_threshold:
-        if (expiry_phase not in ["PRE_EXPIRY", "EXPIRY_RISK"] and tv_label != "AVOID") or is_expiry_defensive:
+    else:
+        # 2. STATE-BASED SELECTION
+        if state == "PINNED RANGE":
             strategy_code = "MEAN_REVERSION"
+        elif state == "SUPPRESSED TREND":
+            strategy_code = "TREND_ACCELERATION"
+        elif state == "EXPANSIVE TREND":
+            strategy_code = "TREND_ACCELERATION"
+        elif state == "LIQUIDITY VACUUM":
+            strategy_code = "TREND_ACCELERATION"
+        elif state == "TRANSITIONAL INSTABILITY":
+            strategy_code = "NO_TRADE"
         else:
-            strategy_code = "CHARM"
-    elif abs(gamma_metrics.get("vex_norm", 0)) > cfg["VANNA_THRESHOLD_NORM"]:
-        strategy_code = "VANNA"
-    elif gamma_metrics.get("cex_norm", 0) > cfg["CHARM_THRESHOLD_NORM"]: 
-        strategy_code = "CHARM"
-        
+            # 3. LEGACY FALLBACKS
+            drift = auto.get("drift", 0.0)
+            stability = auto.get("stability", 50.0)
+            if abs(drift) > 0.4:
+                strategy_code = "TREND_ACCELERATION"
+            elif stability > 70 and abs(drift) < 0.2:
+                strategy_code = "MEAN_REVERSION"
+    
+    # 4. Persistence & Audit Sync
+    from datetime import datetime
     today_str = datetime.now().strftime("%Y-%m-%d")
+    s_state = load_strategy_state()
     
-    # State tracking expansions: TV EMA (Fast vs Slow) & Flip Velocity (Risks 2 & 3 & 5)
-    # v3: Use lot-normalized GEX for velocity to avoid million-vs-point unit mismatch
-    current_tv = gamma_metrics.get("tv_ratio", 1.0)
-    # Phase 3 Hardening: Institutional Transition Gate (Governance)
-    current_gex_norm = gamma_metrics.get("gex_norm", 0.0)
-    current_tv = gamma_metrics.get("tv_ratio", 1.0)
-    
-    # Compute candidate metrics before finalizing
-    c_conv_data = compute_signal_convergence(strategy_code, gamma_metrics, auto_metrics, regime_data, iv_data, atr, spot)
-    c_score, _ = calculate_trade_quality(strategy_code, gamma_metrics, auto_metrics, regime_data, iv_data, c_conv_data)
-    c_conv = c_conv_data[0]
-    
-    last_strat = str(state.get("last_strategy", "NO_TRADE"))
-    last_score = float(state.get("last_quality_score", 0.0))
-    last_gex = float(state.get("last_gex_norm", 0.0))
-    
-    if state.get("last_update") != today_str:
-        # Day Open: Baseline comparison uses the last saved state from YESTERDAY
-        # We only update the state AFTER the comparison below to ensure a valid day-transition gate.
-        pass
-
-    final_strategy = last_strat
-    transition_accepted = False
-    rejection_reason = ""
-    
-    # 1. Base Case: No change
-    if strategy_code == last_strat:
-        final_strategy = strategy_code
-        transition_accepted = True
+    if s_state.get("last_strategy") == strategy_code:
+        s_state["persistence_days"] = s_state.get("persistence_days", 0) + 1
     else:
-        # 2. Hard-Breach Gate (Phase 3 Rulebook)
-        score_delta = c_score - last_score
-        regime_cross = (np.sign(current_gex_norm) != np.sign(last_gex)) if last_gex != 0 else False
+        s_state["last_strategy"] = strategy_code
+        s_state["persistence_days"] = 1
         
-        gate_passed = False
-        if strategy_code == "GAMMA_FLIP":
-            gate_passed = True
-            rejection_reason = "Priority: GAMMA_FLIP"
-        elif score_delta >= 1.5:
-            gate_passed = True
-            rejection_reason = f"Delta: {score_delta:+.2f} >= 1.5"
-        elif regime_cross:
-            gate_passed = True
-            rejection_reason = f"Regime Cross: {np.sign(last_gex)} -> {np.sign(current_gex_norm)}"
-        else:
-            rejection_reason = f"Gate Failed: Delta {score_delta:+.2f} < 1.5, No Flip, No Cross"
-            
-        if gate_passed:
-            final_strategy = strategy_code
-            transition_accepted = True
-            state["last_quality_score"] = c_score
-            state["last_gex_norm"] = current_gex_norm
-        else:
-            final_strategy = last_strat
-            transition_accepted = False
-
-    # Persistence & Day-Change Logic
-    if state.get("last_update") != today_str:
-        # Day Open: Record current state as baseline for TODAY after comparison against YESTERDAY
-        state["last_strategy"] = final_strategy
-        state["last_quality_score"] = c_score
-        state["last_gex_norm"] = current_gex_norm
-        state["last_update"] = today_str
-        
-        # Reset or increment persistence based on strategy stability
-        state["persistence_days"] = state.get("persistence_days", 1) + 1 if final_strategy == last_strat else 1
-    else:
-        # Intraday: persistence doesn't increment, just tracking the state
-        if transition_accepted:
-            state["last_strategy"] = final_strategy
-            state["last_quality_score"] = c_score
-            state["last_gex_norm"] = current_gex_norm
-
-    # Audit Logging (Rejected vs Accepted)
-    audit_entry = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "current_code": last_strat,
-        "candidate_code": strategy_code,
-        "final_code": final_strategy,
-        "current_quality": last_score,
-        "candidate_quality": c_score,
-        "accepted": transition_accepted,
-        "rejection_reason": rejection_reason if not transition_accepted else None,
-        "threshold_state": {
-            "gex_norm": current_gex_norm,
-            "gamma_regime": gamma_metrics.get("gamma_regime"),
-            "quality_score": c_score,
-            "score_delta": abs(c_score - last_score)
-        }
-    }
-    append_strategy_audit(audit_entry)
-        
-    save_strategy_state(state)
-    return final_strategy
+    s_state["last_update"] = today_str
+    save_strategy_state(s_state)
+    
+    return strategy_code
 
 def calculate_reversion_score(spot, walls, flip, drift, stability, gex_norm, nifty_df):
     """
@@ -1893,7 +2004,7 @@ def generate_strategy_playbook(
     strategy_code, gamma_metrics, auto_metrics, spot, walls, iv_data, 
     quality_score, size, bias_obj, reversion_score_obj, mode="Balanced", 
     term_data=None, source_mode="TRUSTED", expiry=None, dte=None,
-    vol_ctx=None, trans_score=None, market_state=None
+    vol_ctx=None, trans_score=None, market_state=None, strike_interval=50.0
 ):
     """
     V5 Strategy Engine Logic.
@@ -2043,14 +2154,21 @@ def generate_strategy_playbook(
         tpl = STRATEGY_TEMPLATES["IRON_CONDOR"]
         strike_plan["schema"] = "IRON_CONDOR"
         # FIX 5 (Phase 5.8 Review): Dynamic wing width based on ATR and mode
-        _ic_wing = int(round(atr * (1.5 if mode == "Defensive" else 1.0 if mode == "Balanced" else 0.75) / 50) * 50)
-        _ic_wing = max(_ic_wing, 100)  # Floor at 100pts
+        # Snap to real strikes (Phase 6.2)
+        _ic_wing = int(atr * (1.5 if mode == "Defensive" else 1.0 if mode == "Balanced" else 0.75))
+        _ic_wing = max(_ic_wing, int(2 * strike_interval))
+        
+        sell_ce = nde_options_logic.snap_to_nearest_strike(c_wall, raw_exp)
+        sell_pe = nde_options_logic.snap_to_nearest_strike(p_wall, raw_exp)
+        buy_ce = nde_options_logic.snap_to_nearest_strike(sell_ce + _ic_wing, raw_exp)
+        buy_pe = nde_options_logic.snap_to_nearest_strike(sell_pe - _ic_wing, raw_exp)
+        
         strike_plan.update({
             "template": tpl["name"],
-            "sell_ce": int(round(c_wall / 50.0) * 50.0),
-            "sell_pe": int(round(p_wall / 50.0) * 50.0),
-            "buy_ce": int(round((c_wall + _ic_wing) / 50.0) * 50.0),
-            "buy_pe": int(round((p_wall - _ic_wing) / 50.0) * 50.0),
+            "sell_ce": int(sell_ce),
+            "sell_pe": int(sell_pe),
+            "buy_ce": int(buy_ce),
+            "buy_pe": int(buy_pe),
             "why": tpl["why"]
         })
     elif strategy_code == "FOLLOW_TREND" or action == "FOLLOW_TREND" or strategy_code == "TREND_ACCELERATION" or (strategy_code == "NO_TRADE" and abs(auto_metrics.get("drift", 0)) > 0.3):
@@ -2059,14 +2177,12 @@ def generate_strategy_playbook(
         drift = auto_metrics.get("drift", 0)
         width = 150 if abs(drift) > 0.4 else 100
         is_call = drift > 0
-        # FIX 7 (Phase 5.8 Review): Corrected debit spread leg direction
-        # Buy ATM, Sell OTM → pay debit, profit from directional move
-        b_strike = int(round(spot / 50.0) * 50.0)
-        s_strike = int(round((spot + (width if is_call else -width)) / 50.0) * 50.0)
+        b_strike = nde_options_logic.snap_to_nearest_strike(spot, raw_exp)
+        s_strike = nde_options_logic.snap_to_nearest_strike(spot + (width if is_call else -width), raw_exp)
         strike_plan.update({
             "template": "Directional Spread",
-            "buy_leg": b_strike,
-            "sell_leg": s_strike,
+            "buy_leg": int(b_strike),
+            "sell_leg": int(s_strike),
             "type": "CALL" if is_call else "PUT",
             "spread_type": "CREDIT" if abs(drift) < 0.3 else "DEBIT",
             "why": tpl["why"]
@@ -2075,20 +2191,22 @@ def generate_strategy_playbook(
     elif strategy_code == "GAMMA_FLIP" or trans_label == "IMMINENT":
         tpl = STRATEGY_TEMPLATES["STRADDLE"]
         strike_plan["schema"] = "STRADDLE"
-        atm = int(round(spot / 50.0) * 50.0)
+        atm = nde_options_logic.snap_to_nearest_strike(spot, raw_exp)
         strike_plan.update({
             "template": tpl["name"],
-            "buy_ce": atm,
-            "buy_pe": atm,
+            "buy_ce": int(atm),
+            "buy_pe": int(atm),
             "why": tpl["why"]
         })
     elif strategy_code == "FADE_RESISTANCE" or action == "FADE_RESISTANCE":
         tpl = STRATEGY_TEMPLATES["CREDIT_SPREAD"]
         strike_plan["schema"] = "CREDIT_SPREAD"
+        sell_leg = nde_options_logic.snap_to_nearest_strike(c_wall, raw_exp)
+        buy_leg = nde_options_logic.snap_to_nearest_strike(sell_leg + (2 * strike_interval), raw_exp)
         strike_plan.update({
             "template": tpl["name"],
-            "sell_leg": int(round(c_wall / 50.0) * 50.0),
-            "buy_leg": int(round((c_wall + 100) / 50.0) * 50.0),
+            "sell_leg": int(sell_leg),
+            "buy_leg": int(buy_leg),
             "type": "CALL",
             "why": tpl["why"]
         })
@@ -2096,10 +2214,12 @@ def generate_strategy_playbook(
     elif strategy_code == "FADE_SUPPORT" or action == "FADE_SUPPORT":
         tpl = STRATEGY_TEMPLATES["CREDIT_SPREAD"]
         strike_plan["schema"] = "CREDIT_SPREAD"
+        sell_leg = nde_options_logic.snap_to_nearest_strike(p_wall, raw_exp)
+        buy_leg = nde_options_logic.snap_to_nearest_strike(sell_leg - (2 * strike_interval), raw_exp)
         strike_plan.update({
             "template": tpl["name"],
-            "sell_leg": int(round(p_wall / 50.0) * 50.0),
-            "buy_leg": int(round((p_wall - 100) / 50.0) * 50.0),
+            "sell_leg": int(sell_leg),
+            "buy_leg": int(buy_leg),
             "type": "PUT",
             "why": tpl["why"]
         })
@@ -2194,7 +2314,6 @@ def generate_strategy_playbook(
         "decision_trail": audit_data["trail"],
         "time_decay": time_decay,
         "source_mode": source_mode,
-        "position_size": size,
         # [P2 Fix] Data Sync
         "market_state": m_state,
         "vol_regime": vol_regime,
@@ -2205,7 +2324,7 @@ def generate_strategy_playbook(
         "expiry_phase": compute_expiry_phase(dte)
     }
 
-def get_strategy_details(strategy_code, gamma_metrics, auto_metrics, spot, regime_data, walls, atr, dte=30, iv_data=None, bias_conv=None, mode="Balanced", is_expiry_defensive=False, term_data=None, nifty_df=None, wall_drift=None):
+def get_strategy_details(strategy_code, gamma_metrics, auto_metrics, spot, regime_data, walls, atr, dte=30, iv_data=None, bias_conv=None, mode="Balanced", is_expiry_defensive=False, term_data=None, nifty_df=None, wall_drift=None, strike_interval=50.0):
     """
     Hydrate strategy with Professional Intelligence, Payoffs, and Summary.
     """
@@ -2449,21 +2568,15 @@ def get_strategy_details(strategy_code, gamma_metrics, auto_metrics, spot, regim
             
     trends = get_snapshot_trends(gamma_metrics, expiry_val)
 
-    # Phase 47: Reversion Score & Strategy Playbook
-    flip_lvl = gamma_metrics.get("gamma_flip_level", 0)
-    gex_norm = gamma_metrics.get("gex_norm", 0.0)
-    rev_score_obj = calculate_reversion_score(spot, walls, flip_lvl, auto_metrics.get("drift",0), auto_metrics.get("stability",50), gex_norm, nifty_df)
-    
-    source_label = gamma_metrics.get("source_mode", "TRUSTED")
-    # Infer degraded status if walls are missing or synthetic
-    if (not walls[0] or not walls[1] or walls[0] == walls[1]) and source_label == "TRUSTED": 
-        source_label = "DEGRADED"
-
-    playbook = generate_strategy_playbook(
-        strategy_code, gamma_metrics, auto_metrics, spot, walls, iv_data, 
-        quality_score, size, bias_conv, rev_score_obj, mode=mode, term_data=term_data, 
-        source_mode=source_label, expiry=expiry_val, dte=dte
-    )
+    # Phase 47: Reversion Score & Strategy Playbook (DECOMMISSIONED for Narrative Pipeline)
+    # The playbook is kept as a legacy dictionary for internal audit but is NO LONGER used for execution
+    playbook = {
+        "strategy": strategy_code,
+        "quality": quality_score,
+        "size": size,
+        "warnings": all_warnings,
+        "is_legacy": True
+    }
 
     result = {
         **base,
