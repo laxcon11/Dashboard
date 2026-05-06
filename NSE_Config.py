@@ -10,6 +10,8 @@ Institutional Hardening v3: Master Calibration Layer
 
 # ==================== GLOBAL CALIBRATION (v3) ====================
 NIFTY_LOT_SIZE = 65
+SENSEX_LOT_SIZE = 20
+BANKNIFTY_LOT_SIZE = 30
 RISK_FREE_RATE = 0.0705         # 1Y T-Bill Proxy
 DIVIDEND_YIELD = 0.012          # Nifty Average
 
@@ -24,8 +26,35 @@ CONFIG_VERSION = "v3_lot65_atmIV_costaware"
 
 # System Invariants (Strict Guards)
 assert NIFTY_LOT_SIZE == 65, "Critical Error: Lot size miscalibration"
+assert SENSEX_LOT_SIZE == 20, "Critical Error: SENSEX Lot size miscalibration"
+assert BANKNIFTY_LOT_SIZE == 30, "Critical Error: BANKNIFTY Lot size miscalibration"
 assert 0 < RISK_FREE_RATE < 0.2, "Abnormal RFR detected"
 assert 0 <= DIVIDEND_YIELD < 0.05, "Abnormal Dividend Yield detected"
+
+# Multi-Index Configuration (v5 Roadmap)
+MARKET_CONFIG = {
+    "NIFTY": {
+        "lot_size": NIFTY_LOT_SIZE,
+        "ticker": "^NSEI",
+        "expiry_day": "Tuesday",
+        "category": "NSE",
+        "strike_interval": 50
+    },
+    "SENSEX": {
+        "lot_size": SENSEX_LOT_SIZE,
+        "ticker": "^BSESN",
+        "expiry_day": "Thursday",
+        "category": "BSE",
+        "strike_interval": 100
+    },
+    "BANKNIFTY": {
+        "lot_size": BANKNIFTY_LOT_SIZE,
+        "ticker": "^NSEBANK",
+        "expiry_day": "Wednesday",
+        "category": "NSE",
+        "strike_interval": 100
+    }
+}
 # =================================================================
 
 # ==================== SECTOR INDICES ====================

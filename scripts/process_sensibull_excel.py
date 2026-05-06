@@ -22,11 +22,13 @@ def process_all_downloads(extra_dir: Path = None) -> int:
         search_dirs.append(extra_dir)
 
     all_files = []
+    patterns = ["nifty", "sensex", "banknifty"]
     for d in search_dirs:
         if d.exists():
-            # Match any Excel/CSV with NIFTY in the name, but EXCLUDE Standard NDE files
-            all_files += [f for f in d.glob("*.xlsx") if "nifty" in f.name.lower() and not f.name.startswith("option-chain-ED-sensi-")]
-            all_files += [f for f in d.glob("*.csv")  if "nifty" in f.name.lower() and not f.name.startswith("option-chain-ED-sensi-")]
+            for p in patterns:
+                # Match any Excel/CSV with standard index names, but EXCLUDE Standard NDE files
+                all_files += [f for f in d.glob("*.xlsx") if p in f.name.lower() and not f.name.startswith("option-chain-ED-sensi-")]
+                all_files += [f for f in d.glob("*.csv")  if p in f.name.lower() and not f.name.startswith("option-chain-ED-sensi-")]
 
     # Deduplicate
     seen = set()
@@ -227,8 +229,12 @@ def process_all_downloads(extra_dir: Path = None) -> int:
             if not expiry_str:
                 expiry_str = f"UNKNOWN_{count}"
                 
+            index_name = "NIFTY"
+            if "sensex" in f.name.lower(): index_name = "SENSEX"
+            elif "banknifty" in f.name.lower(): index_name = "BANKNIFTY"
+            
             header = f"EXPIRY DATE: {expiry_str}\nVERSION: Sensibull Multi-Expiry Override\n"
-            out_path = TARGET / f"option-chain-ED-sensi-NIFTY-{expiry_str}.csv"
+            out_path = TARGET / f"option-chain-ED-sensi-{index_name}-{expiry_str}.csv"
             
             csv_str = out_df.to_csv(index=False)
             out_path.write_text(header + csv_str)

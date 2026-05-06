@@ -412,24 +412,33 @@ def get_time_decay_outlook(dte: int, iv_rank: float, vol_regime: str) -> str:
 
 def classify_market_state(ctx: dict) -> dict:
     """
-    CANONICAL MARKET STATE ENGINE (V3)
-    The Single Source of Truth for the entire NDE ecosystem.
-    Determines institutional regime using Positioning + Vol Structure + Movement.
+    CANONICAL MARKET STATE ENGINE (V5)
+    Institutional implementation with Suppression Collapse & Vol Edge Integration.
     """
     flow = ctx.get("flow_metrics", {})
     auto = ctx.get("auto_metrics", {})
     rv = ctx.get("realized_metrics", {})
     local = ctx.get("local_gamma", {})
     iv_data = ctx.get("iv_data", {})
+    history = ctx.get("regime_history", [])
     
     spot = ctx.get("spot", 24000.0)
     stability = auto.get("stability", 50.0)
     drift = auto.get("drift", 0.0)
     gex_norm = flow.get("gex_norm", 0.0)
-    iv_rank = iv_data.get("iv_rank", 50.0)
     
     rv_regime = rv.get("rv_regime", "NORMAL")
+    rv_accel = rv.get("rv_acceleration", 0.0)
+    
+    # 🧩 micro-structure metrics
     suppression_strength = local.get("suppression_strength", 0.0)
+    gamma_density = local.get("gamma_density_score", 1.0)
+    
+    # 🚨 COLLAPSE DETECTION
+    is_collapse = detect_suppression_collapse(suppression_strength, history)
+    
+    # 📊 VOL EDGE
+    vol_edge = compute_vol_edge(iv_data, rv)
     
     state = "NEUTRAL"
     substate = "WAITING_FOR_CONFIRMATION"
@@ -438,43 +447,49 @@ def classify_market_state(ctx: dict) -> dict:
     suppression = "NONE"
     why = []
 
-    # 1. PINNED RANGE (Long Gamma + Stability + Suppression)
-    if gex_norm > 5.0 and stability > 70 and abs(drift) < 0.2:
+    # 🥇 1. PINNED RANGE (Suppression Dominant)
+    if gex_norm > 5.0 and stability > 70 and suppression_strength > 0.6:
         state = "PINNED RANGE"
         vol_regime = "SUPPRESSED"
         suppression = "STRONG"
         substate = "PREMIUM_COLLECTION"
-        why.append("High Gamma density + High stability suppressing realized volatility.")
+        why.append("Structural suppression confirmed: High Gamma + Local Wall density.")
 
-    # 2. SUPPRESSED TREND (Directional + Long Gamma + Structural Support)
-    elif abs(drift) > 0.2 and gex_norm > 2.0 and rv_regime == "SUPPRESSED":
+    # 🥈 2. SUPPRESSED TREND (Directional + Structural Absorption)
+    elif abs(drift) > 0.2 and gex_norm > 1.5 and suppression_strength > 0.4:
         state = "SUPPRESSED TREND"
         vol_regime = "SUPPRESSED"
         substate = "DIRECTIONAL_GRIND"
-        why.append(f"Steady {direction} drift supported by dealer positioning. Movement suppressed.")
+        why.append(f"Steady {direction} drift being absorbed by dealer positioning.")
 
-    # 3. EXPANSIVE TREND (Directional + Short Gamma + RV Acceleration)
-    elif abs(drift) > 0.35 and gex_norm < -2.0 and rv_regime == "EXPANSIVE":
-        state = "EXPANSIVE TREND"
-        vol_regime = "EXPANSIVE"
-        substate = "CONVEX_ACCELERATION"
-        why.append(f"Short Gamma regime amplifying {direction} drift. Convex expansion likely.")
+    # 🥉 3. EXPANSIVE TREND (Hard Gating for SUSTAINABLE Vol Expansion)
+    elif abs(drift) > 0.35 and gex_norm < -1.5:
+        # P0: Require Suppression Collapse OR Extreme RV Acceleration
+        if is_collapse or (rv_accel > 0.10 and vol_edge["vol_edge_label"] == "BUY_VOL"):
+            state = "EXPANSIVE TREND"
+            vol_regime = "EXPANSIVE"
+            substate = "CONVEX_ACCELERATION"
+            why.append("Volatility Expansion validated: Suppression Collapse + Vol Edge Buy.")
+        else:
+            state = "MOMENTUM_DRIVE"
+            vol_regime = "NORMAL"
+            substate = "SUPPRESSED_MOMENTUM"
+            why.append("Directional drive present, but structural containment remains intact.")
 
-    # 4. TRANSITIONAL INSTABILITY (Falling Stability + High Transition Score)
-    elif stability < 40 and ctx.get("trans_score", {}).get("score", 0.0) > 0.6:
-        state = "TRANSITIONAL INSTABILITY"
-        vol_regime = "VOLATILE"
-        substate = "REGIME_UNCERTAINTY"
-        why.append("Structural stability collapse. High probability of regime transition.")
-
-    # 5. LIQUIDITY VACUUM (Short Gamma + Low Density + Drift Velocity)
-    elif gex_norm < -5.0 and local.get("gamma_density_score", 1.0) < 0.5:
+    # 4. LIQUIDITY VACUUM
+    elif gex_norm < -5.0 and gamma_density < 0.4:
         state = "LIQUIDITY VACUUM"
         vol_regime = "EXPANSIVE"
         substate = "AIR_POCKET"
         why.append("Severe negative Gamma concentration with poor structural support.")
 
-    # Fallback to legacy classification for compatibility if none of the above match
+    # 5. TRANSITIONAL INSTABILITY
+    elif stability < 40 and ctx.get("trans_score", {}).get("score", 0.0) > 0.7:
+        state = "TRANSITIONAL INSTABILITY"
+        vol_regime = "VOLATILE"
+        substate = "REGIME_UNCERTAINTY"
+        why.append("Structural stability collapse. High probability of regime transition.")
+
     if state == "NEUTRAL":
         if abs(drift) > 0.5:
             state = "MOMENTUM_DRIVE"
@@ -482,67 +497,89 @@ def classify_market_state(ctx: dict) -> dict:
         else:
             why.append("Standard macro environment.")
 
+    # --- ACTION DECISION (Moved from Narrative to Decision Engine) ---
+    confidence = 0.0 # Placeholder, will be filled by alignment engine
+    action = "WAIT"
+    # Action Logic Gate (Strict)
+    if state in ["PINNED RANGE", "SUPPRESSED TREND", "EXPANSIVE TREND", "LIQUIDITY VACUUM"]:
+        action = "ENTER"
+
     return {
         "state": state,
         "substate": substate,
         "direction": direction,
+        "action": action,
         "volatility_regime": vol_regime,
         "suppression_regime": suppression,
-        "confidence": 0.0, # Will be filled by alignment engine
+        "suppression_strength": round(suppression_strength, 2),
+        "is_collapse": is_collapse,
+        "vol_edge": vol_edge,
+        "confidence": 0.0,
         "transition_risk": ctx.get("trans_score", {}).get("score", 0.0),
         "why": why
     }
 
 def compute_signal_alignment(ctx: dict) -> dict:
     """
-    Institutional Signal Alignment Engine.
-    Measures coherence between positioning, drift, and volatility.
+    Institutional Agreement Engine (V3).
+    Measures coherence and penalizes structural conflicts.
     """
     flow = ctx.get("flow_metrics", {})
     auto = ctx.get("auto_metrics", {})
     rv = ctx.get("realized_metrics", {})
+    local = ctx.get("local_gamma", {})
     
     drift = auto.get("drift", 0.0)
     gex_norm = flow.get("gex_norm", 0.0)
-    rv_regime = rv.get("rv_regime", "NORMAL")
+    rv_accel = rv.get("rv_acceleration", 0.0)
+    suppression = local.get("suppression_strength", 0.0)
     
     agreements = []
     conflicts = []
     score = 0.0
     
-    # 1. Drift vs Gamma Regime
-    if (drift > 0.1 and gex_norm > 0) or (drift < -0.1 and gex_norm < 0):
-        # Bullish drift in Long Gamma is suppressed (Agreement on Suppression)
-        # Bearish drift in Short Gamma is expansive (Agreement on Momentum)
+    # --- AGREEMENT 1: Momentum vs Positioning ---
+    if (drift > 0 and gex_norm > 0) or (drift < 0 and gex_norm < 0):
         score += 0.25
-        agreements.append("Drift aligns with Gamma structural regime.")
+        agreements.append("Momentum aligns with structural Gamma regime.")
     else:
-        conflicts.append("Drift conflicts with Gamma structural regime.")
+        conflicts.append("Structural positioning conflicts with momentum direction.")
         
-    # 2. RV vs Gamma Regime
-    if (rv_regime == "EXPANSIVE" and gex_norm < 0) or (rv_regime == "SUPPRESSED" and gex_norm > 0):
+    # --- AGREEMENT 2: Volatility Velocity ---
+    if (rv_accel > 0 and gex_norm < 0) or (rv_accel < 0 and gex_norm > 0):
         score += 0.25
-        agreements.append("Realized movement validates Gamma positioning.")
+        agreements.append("Volatility velocity validates structural expectations.")
     else:
-        conflicts.append("Realized movement deviates from positioning expectations.")
+        conflicts.append("Volatility velocity deviates from structural regime.")
         
-    # 3. Vanna vs Direction
+    # --- CONFLICT 1: Structural Suppression vs Expansion Intent ---
+    if rv_accel > 0 and suppression > 0.6:
+        score -= 0.15 # Conflict Penalty
+        conflicts.append("CONFLICT: Accelerating RV fighting high suppression strength.")
+    elif rv_accel < 0 and suppression < 0.2:
+        score -= 0.15
+        conflicts.append("CONFLICT: Collapsing RV in a low suppression environment.")
+        
+    # --- AGREEMENT 3: Vanna Agreement ---
     vanna = flow.get("vanna_bias", "Neutral")
     if ("Bullish" in vanna and drift > 0) or ("Bearish" in vanna and drift < 0):
         score += 0.25
-        agreements.append("Vanna flow supports directional drift.")
+        agreements.append("Dealer flow (Vanna) supports directional drift.")
+    else:
+        conflicts.append("Dealer flow diverges from directional drift.")
         
-    # 4. Stability Alignment
-    if auto.get("stability", 50.0) > 60:
+    # --- AGREEMENT 4: Stability Integrity ---
+    if auto.get("stability", 50.0) > 65:
         score += 0.25
-        agreements.append("High structural stability increases signal trust.")
+        agreements.append("Signal integrity validated by regime stability.")
     
+    final_score = max(0.0, min(1.0, score))
     return {
-        "alignment_score": round(score, 2),
+        "alignment_score": round(final_score, 2),
         "agreement_count": len(agreements),
         "agreements": agreements,
         "conflicts": conflicts,
-        "confidence": round(score, 2)
+        "confidence": round(final_score, 2)
     }
 
 def get_market_state(flow_metrics: dict, auto_metrics: dict, vol_ctx: dict, trans_score: dict, atr: float = 250.0, spot: float = 22000.0) -> dict:
@@ -857,6 +894,70 @@ def evaluate_risk_prefilter(spot: float, gamma_flip: float, atr: float, state: s
     }
 
 
+
+
+def compute_vol_edge(iv_data: dict, rv_metrics: dict) -> dict:
+    """
+    Institutional Volatility Edge Engine.
+    Computes dislocation between Implied Volatility and Forward Realized Expectation.
+    """
+    iv = iv_data.get("atm_iv", 20.0)
+    forward_rv = rv_metrics.get("forward_rv_expectation", 15.0)
+    
+    edge = iv - forward_rv
+    
+    if edge > 5.0:
+        label = "SELL_VOL"
+        desc = "Implied Vol is significantly over-expensive relative to realized path."
+    elif edge < -2.0:
+        label = "BUY_VOL"
+        desc = "Implied Vol is cheap relative to realized acceleration."
+    else:
+        label = "NEUTRAL_VOL"
+        desc = "Volatility is fairly priced relative to structural movement."
+        
+    return {
+        "vol_edge": round(edge, 2),
+        "vol_edge_label": label,
+        "description": desc,
+        "iv": iv,
+        "forward_rv": forward_rv
+    }
+
+def detect_suppression_collapse(current_suppression: float, regime_history: list) -> bool:
+    """
+    Detects if structural suppression is failing (Collapse).
+    Failure = Suppression drops below 0.3 after being above 0.6 recently.
+    """
+    if not regime_history or len(regime_history) < 3:
+        return False
+        
+    recent_suppressions = [s.get("suppression_strength", 0.5) for s in regime_history[-5:]]
+    avg_recent = sum(recent_suppressions) / len(recent_suppressions)
+    
+    # Collapse: Current is low, but recent was high
+    return current_suppression < 0.3 and avg_recent > 0.5
+
+def compute_move_probabilities(spot: float, atr: float, iv_data: dict, rv_metrics: dict) -> dict:
+    """
+    Institutional Probability Engine.
+    Estimates likelihood of expected move breach vs realized volatility.
+    """
+    iv = iv_data.get("atm_iv", 20.0) / 100.0
+    rv = rv_metrics.get("rv_5d", 15.0) / 100.0
+    
+    # Simple normal distribution approximation for daily move
+    # 1 SD daily move ≈ spot * vol / sqrt(252)
+    daily_vol = rv / 15.87
+    em_breach_prob = round((iv / rv) * 0.16 if rv > 0 else 0.16, 2)
+    
+    return {
+        "em_breach_probability": min(em_breach_prob, 1.0),
+        "iv_rv_edge": round(iv - rv, 4),
+        "realized_daily_range": round(spot * daily_vol, 1),
+        "edge_label": "PREMIUM_EXPENSIVE" if iv > rv + 0.05 else "PREMIUM_CHEAP" if iv < rv - 0.02 else "FAIR_VALUE"
+    }
+
 def generate_engine_context(
     raw_chain: pd.DataFrame, spot: float, nifty_df: pd.DataFrame, used_expiry: str,
     regime_history: list, regime_snap: dict, vix_df: pd.DataFrame, meta: dict = None, mode: str = "Balanced",
@@ -1012,6 +1113,10 @@ def generate_engine_context(
     market_state = classify_market_state(ctx_pre)
     alignment = compute_signal_alignment(ctx_pre)
     market_state["confidence"] = alignment["confidence"]
+    
+    # NEW: Probabilistic Structural Analysis
+    probabilities = compute_move_probabilities(spot, atr, iv_data, realized_metrics)
+    market_state["probabilities"] = probabilities
     
     bias_obj = get_directional_conviction(
         regime_snap.get("current_regime") or regime_snap.get("regime_label", "Unknown"), 

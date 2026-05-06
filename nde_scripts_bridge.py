@@ -46,7 +46,10 @@ def run_ingestion_cycle(extra_dir=None):
         # Phase 37: Refresh Global Macro Regime BEFORE taking Strategy Snapshot
         # This ensures the NDE Engine sees the latest persistence-aware regime.
         nde_automation_logic.refresh_macro_regime()
-        nde_automation_logic.generate_auto_snapshot()
+        
+        # Phase 45: Generate snapshots for ALL indices to ensure UI toggle works immediately
+        for idx in ["NIFTY", "SENSEX", "BANKNIFTY"]:
+            nde_automation_logic.generate_auto_snapshot(index_name=idx)
         
     # Phase 45: Archive Garbage Collection
     clean_archive_folder()
@@ -61,8 +64,8 @@ def clean_archive_folder():
     archive_dir = _PROJECT_ROOT / "data" / "archive"
     stale_dir = archive_dir / "stale"
     
-    # Matches patterns like: NIFTY_2026-04-07_option_chain_...
-    date_pattern = re.compile(r"NIFTY_(\d{4}-\d{2}-\d{2})_")
+    # Matches patterns like: NIFTY_2026-04-07_option_chain_... or SENSEX_2026-05-14_...
+    date_pattern = re.compile(r"(?:NIFTY|SENSEX|BANKNIFTY)_(\d{4}-\d{2}-\d{2})_")
     today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     
     for d in [archive_dir, stale_dir]:
@@ -92,8 +95,13 @@ def list_raw_files():
     if not target.exists():
         return []
     
-    excel = list(target.glob("*NIFTY*.xlsx"))
-    csv = list(target.glob("*NIFTY*.csv"))
+    # Match any Excel/CSV with standard index names
+    patterns = ["*NIFTY*", "*SENSEX*", "*BANKNIFTY*"]
+    excel = []
+    csv = []
+    for p in patterns:
+        excel.extend(list(target.glob(f"{p}.xlsx")))
+        csv.extend(list(target.glob(f"{p}.csv")))
     
     # Filter out files that are already standard processed outputs
     raw = [f for f in excel + csv if not f.name.startswith("option-chain-ED-sensi-")]

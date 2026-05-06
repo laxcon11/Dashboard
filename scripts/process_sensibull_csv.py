@@ -71,8 +71,13 @@ def convert_sensibull_csv(src: Path) -> str | None:
     expiry_str = expiry_dt.strftime("%d-%b-%Y")       # "07-Apr-2026"
 
     # Avoid processing already-standard files to prevent loops
-    if src.name == f"option-chain-ED-sensi-NIFTY-{expiry_str}.csv":
+    if src.name.startswith("option-chain-ED-sensi-"):
         return None
+        
+    # Detect Index
+    index_name = "NIFTY"
+    if "SENSEX" in src.name.upper(): index_name = "SENSEX"
+    elif "BANKNIFTY" in src.name.upper(): index_name = "BANKNIFTY"
 
     try:
         df = pd.read_csv(src)
@@ -213,7 +218,7 @@ def convert_sensibull_csv(src: Path) -> str | None:
         return None
 
     # Write with NDE header format
-    out_name = f"option-chain-ED-sensi-NIFTY-{expiry_str}.csv"
+    out_name = f"option-chain-ED-sensi-{index_name}-{expiry_str}.csv"
     out_path  = OPTION_CHAIN_DIR / out_name
     header    = f"EXPIRY DATE: {expiry_str}\nVERSION: Sensibull High-Fidelity Greeks\n"
     out_path.write_text(header + out_df.to_csv(index=False))
@@ -255,9 +260,11 @@ def convert_all_sensibull_csvs() -> int:
     search_dirs = [OPTION_CHAIN_DIR, PROJECT_ROOT / "data" / "sensibull"]
     
     raw_files = []
+    patterns = ["NIFTY", "SENSEX", "BANKNIFTY"]
     for d in search_dirs:
         if d.exists():
-            raw_files.extend(sorted(d.glob("NIFTY_*_option_chain_*.csv")))
+            for p in patterns:
+                raw_files.extend(list(d.glob(f"{p}_*_option_chain_*.csv")))
             
     if not raw_files:
         return 0
@@ -265,7 +272,7 @@ def convert_all_sensibull_csvs() -> int:
     # If multiple files for same expiry exist, keep only the newest
     by_expiry = {}
     for f in raw_files:
-        m = re.search(r"NIFTY_(\d{4}-\d{2}-\d{2})_option_chain", f.name)
+        m = re.search(r"(?:NIFTY|SENSEX|BANKNIFTY)_(\d{4}-\d{2}-\d{2})_option_chain", f.name)
         if m:
             key = m.group(1)
             if key not in by_expiry or f.stat().st_mtime > by_expiry[key].stat().st_mtime:

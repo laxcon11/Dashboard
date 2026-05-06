@@ -718,6 +718,15 @@ try:
                 st.markdown(f"**Max Pain**: `{int(iq.get('max_pain', 0)):,}` | **PCR (OI)**: `{iq.get('pcr_oi', 'N/A')}`")
                 exp_r = iq.get("expected_move", {})
                 st.markdown(f"**Expected Move**: `{int(exp_r.get('low', 0))} - {int(exp_r.get('high', 0))}`")
+            
+            # --- PROBABILISTIC EDGE (NEW Phase 50) ---
+            probs = master_setup.get("market_state", {}).get("probabilities", {})
+            if probs:
+                st.markdown("---")
+                em_prob = probs.get("em_breach_probability", 0.16)
+                edge_val = probs.get("iv_rv_edge", 0.0)
+                edge_label = probs.get("edge_label", "FAIR")
+                st.markdown(f"**EM Breach Prob**: `{em_prob * 100:.0f}%` | **IV-RV Edge**: `{edge_val * 100:.1f}%` ({edge_label})")
 
         with d_cols[2]:
             if view_mode == "Full (Institutional)":

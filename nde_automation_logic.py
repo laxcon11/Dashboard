@@ -273,14 +273,16 @@ def write_daily_nde_snapshot(
         
     return fname
 
-def get_historical_snapshot_df(limit=30, daily_only=True):
+def get_historical_snapshot_df(limit=30, daily_only=True, index_name="NIFTY"):
     """
     Aggregates historical NDE snapshots into a single DataFrame for trend analysis.
     If daily_only=True, returns only the latest snapshot per unique date.
     Returns: DataFrame indexed by date.
     """
     path = Path(__file__).parent / "data" / "automation"
-    files = sorted(list(path.glob("nde_v12_*.json")), reverse=True)
+    # Use index-specific pattern (Phase 5 Isolation)
+    pattern = f"nde_v12_{index_name.upper()}_*.json"
+    files = sorted(list(path.glob(pattern)), reverse=True)
     
     rows = []
     seen_dates = set()
@@ -408,7 +410,7 @@ def refresh_macro_regime():
         logger.error(f"❌ Macro Regime Refresh Failed: {e}")
         return None
 
-def generate_auto_snapshot(force_file=None):
+def generate_auto_snapshot(force_file=None, index_name="NIFTY"):
     """
     Headless Analytical Runner (v1.5).
     Loads fresh data, calculates engine context, and saves a summary snapshot.
@@ -433,7 +435,7 @@ def generate_auto_snapshot(force_file=None):
             mtime = force_path.stat().st_mtime
             expiry = "UNKNOWN"
         else:
-            df, filename, mtime, expiry = nde_options_logic.load_latest_option_chain_csv()
+            df, filename, mtime, expiry = nde_options_logic.load_latest_option_chain_csv(index_name=index_name)
             
         if df.empty:
             logger.warning("Auto-Snapshot: No option chain data found. Skipping.")
@@ -486,16 +488,16 @@ def generate_auto_snapshot(force_file=None):
             except Exception as meta_e:
                 logger.warning(f"Failed to parse metadata sidecar: {meta_e}")
 
-        # Secondary: Try Live Spot (batch_download) IF AND ONLY IF we have NO spot and trust is HIGH
-        # We prefer a stale HIGH-TRUST spot (within 24h) over a LIVE spot if the live spot is not verified.
-        # This prevents 'Analytical Drift' where live price mismatches sensitive Sensibull-derived Greeks.
-        if not spot and is_high_trust:
+        # Secondary: Try Live Spot (batch_download) IF AND ONLY IF we have NO spot
+        if not spot:
             try:
                 from data_fetch import batch_download
-                m_data = batch_download(["^NSEI"], period="1d")
-                if not m_data.get("^NSEI").empty:
-                    spot = m_data.get("^NSEI")["Close"].iloc[-1]
-                    source_mode = "LIVE (Trusted)"
+                import NSE_Config
+                ticker = NSE_Config.MARKET_CONFIG.get(index_name, {}).get("ticker", "^NSEI")
+                m_data = batch_download([ticker], period="1d")
+                if not m_data.get(ticker).empty:
+                    spot = m_data.get(ticker)["Close"].iloc[-1]
+                    source_mode = f"LIVE ({index_name})"
             except Exception as live_e:
                 logger.warning(f"Live spot fallback failed: {live_e}")
 
@@ -511,24 +513,27 @@ def generate_auto_snapshot(force_file=None):
             logger.warning(f"⚠️ NDE Automation: Using DEGRADED spot ({spot:.0f}) for {filename}")
         
         # 3. Compute Metrics
-        metrics = nde_options_logic.compute_option_flow_exposures(spot, df)
+        import NSE_Config
+        s_interval = NSE_Config.MARKET_CONFIG.get(index_name, {}).get("strike_interval", 50.0)
+        metrics = nde_options_logic.compute_option_flow_exposures(spot, df, strike_interval=s_interval)
         
         # 4. Get Regime Context
-        regime_history = load_regime_history()
-        regime_snap = load_regime_snapshot()
+        regime_history = load_regime_history(index_name=index_name)
+        regime_snap = load_regime_snapshot(index_name=index_name)
         if regime_snap is None: regime_snap = {}
         
         # 5. Compute Automation Metrics (V5: Dynamic ATR)
         from nde_options_logic import calculate_atr_sma
         from data_fetch import batch_download
-        # Get 14-day ATR for Nifty via live fetch
+        # Get 14-day ATR for Index via live fetch
         try:
-            nsei_data = batch_download(["^NSEI"], period="3mo")
-            nsei_df = nsei_data.get("^NSEI")
-            calc_atr = calculate_atr_sma(nsei_df) if (nsei_df is not None and not nsei_df.empty) else 250.0
+            m_ticker = NSE_Config.MARKET_CONFIG.get(index_name, {}).get("ticker", "^NSEI")
+            m_data = batch_download([m_ticker], period="3mo")
+            m_df = m_data.get(m_ticker)
+            calc_atr = calculate_atr_sma(m_df) if (m_df is not None and not m_df.empty) else (250.0 if spot < 50000 else 800.0)
         except Exception as atr_e:
-            logger.warning(f"ATR calculation failed: {atr_e}. Using fallback 250.")
-            calc_atr = 250.0
+            logger.warning(f"ATR calculation failed: {atr_e}. Using fallback.")
+            calc_atr = 250.0 if spot < 50000 else 800.0
             
         if not calc_atr or calc_atr < 100: calc_atr = 250.0 # Safety floor
         

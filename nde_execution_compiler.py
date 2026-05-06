@@ -83,7 +83,6 @@ def resolve_strike(target: str, opt: str, spot: float, call_wall: float, put_wal
     if target in ("DELTA_0_25", "DELTA_0_50") and df_chain is not None:
         tgt = 0.25 if target == "DELTA_0_25" else 0.50
         strike = select_strike_by_delta(df_chain, opt, tgt, spot)
-        strike = select_strike_by_delta(df_chain, opt, tgt, spot)
         if strike:
             return resolve_safe_strike(strike, df_chain)
             
@@ -137,13 +136,15 @@ def build_execution(ctx: dict, narrative: dict) -> dict:
     dominant_action = narrative.get("dominant_action", "")
     dominant_state = narrative.get("dominant_state", "")
     
-    if confidence < 0.35 or dominant_action == "WAIT":
+    # Governance Gate: Final institutional risk check
+    trust_level = ctx.get("meta", {}).get("data_quality", "HIGH")
+    if confidence < 0.35 or dominant_action == "WAIT" or trust_level in ["DEGRADED", "LOW"]:
         return {
             "template": "No Trade",
             "legs": [],
             "size": "0R",
             "invalidation": "Low confidence or degraded data",
-            "notes": ["Execution suppressed due to low confidence or WAIT action."]
+            "notes": [f"Execution suppressed. Confidence: {confidence}, Data Trust: {trust_level}"]
         }
 
     # 1. Map strategy blueprint

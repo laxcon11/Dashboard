@@ -10,11 +10,16 @@ EOD_SNAPSHOT_DIR = Path("data/snapshots")
 logger = logging.getLogger(__name__)
 
 
-def save_regime_snapshot(payload: Dict[str, Any]) -> None:
+def save_regime_snapshot(payload: Dict[str, Any], index_name: str = "NIFTY") -> None:
     SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
     to_write = dict(payload or {})
     to_write["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    
+    # Save global for backward compat, and index-specific for hardening
     SNAPSHOT_FILE.write_text(json.dumps(to_write, indent=2))
+    if index_name != "NIFTY":
+        idx_snap = SNAPSHOT_FILE.parent / f"current_regime_snapshot_{index_name.upper()}.json"
+        idx_snap.write_text(json.dumps(to_write, indent=2))
 
 
 def _from_eod_snapshot(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -48,14 +53,20 @@ def _from_eod_snapshot(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     }
 
 
-def load_regime_snapshot() -> Dict[str, Any]:
-    if SNAPSHOT_FILE.exists():
+def load_regime_snapshot(index_name: str = "NIFTY") -> Dict[str, Any]:
+    target = SNAPSHOT_FILE
+    if index_name != "NIFTY":
+        idx_snap = SNAPSHOT_FILE.parent / f"current_regime_snapshot_{index_name.upper()}.json"
+        if idx_snap.exists():
+            target = idx_snap
+            
+    if target.exists():
         try:
-            payload = json.loads(SNAPSHOT_FILE.read_text())
+            payload = json.loads(target.read_text())
             if isinstance(payload, dict):
                 return payload
         except Exception as exc:
-            logger.warning("Failed to read current regime snapshot %s: %s", SNAPSHOT_FILE, exc)
+            logger.warning("Failed to read current regime snapshot %s: %s", target, exc)
     return _from_eod_snapshot()
 
 
@@ -90,12 +101,16 @@ def _regime_tag(regime_label: str) -> str:
     return "SELECTIVE"
 
 
-def append_regime_history(payload: Dict[str, Any]) -> None:
+def append_regime_history(payload: Dict[str, Any], index_name: str = "NIFTY") -> None:
     """Append today's regime result to the JSONL history file.
 
     Deduplicates by date — if today already has an entry, it is replaced
     with the latest computation.
     """
+    target_history = HISTORY_FILE
+    if index_name != "NIFTY":
+        target_history = HISTORY_FILE.parent / f"regime_history_{index_name.upper()}.jsonl"
+        
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     probs = payload.get("probabilities", {})
@@ -139,16 +154,22 @@ def append_regime_history(payload: Dict[str, Any]) -> None:
     if not replaced:
         existing.append(json.dumps(record, separators=(",", ":")))
 
-    HISTORY_FILE.write_text("\n".join(existing) + "\n")
+    target_history.write_text("\n".join(existing) + "\n")
 
 
-def load_regime_history(days: int = 90) -> list[Dict[str, Any]]:
+def load_regime_history(days: int = 90, index_name: str = "NIFTY") -> list[Dict[str, Any]]:
     """Load up to `days` most recent regime history entries from JSONL."""
-    if not HISTORY_FILE.exists():
+    target_history = HISTORY_FILE
+    if index_name != "NIFTY":
+        idx_hist = HISTORY_FILE.parent / f"regime_history_{index_name.upper()}.jsonl"
+        if idx_hist.exists():
+            target_history = idx_hist
+            
+    if not target_history.exists():
         return []
 
     rows: list[Dict[str, Any]] = []
-    for line in HISTORY_FILE.read_text().splitlines():
+    for line in target_history.read_text().splitlines():
         line = line.strip()
         if not line:
             continue

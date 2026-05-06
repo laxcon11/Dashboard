@@ -48,26 +48,32 @@ def compute_local_gamma_density(df_chain: pd.DataFrame, spot: float, atr: float)
         pos_gex = local_chain[local_chain['gex'] > 0]['gex'].sum()
         neg_gex = local_chain[local_chain['gex'] < 0]['gex'].sum()
         
-        # Density score (ratio of local gamma to window width)
+        # 1. Suppression Strength: High positive gamma near spot suppresses movement
+        # 2. Absorption Ratio: pos_gex vs absolute neg_gex
+        absorption_ratio = pos_gex / (abs(neg_gex) + 1.0)
+        suppression = min(1.0, absorption_ratio / 5.0) # Normalized 0-1
+        
+        # 3. Density Score: Structural density in local window
         density = (pos_gex + abs(neg_gex)) / (2.0 * atr)
         
-        # Suppression Strength: High positive gamma near spot suppresses movement
-        suppression = pos_gex / (abs(neg_gex) + 1.0) if abs(neg_gex) > 0 else pos_gex
+        # 4. Local Walls (Institutional Logic)
+        # Support = Strongest Positive GEX level BELOW spot
+        # Resistance = Strongest Positive GEX level ABOVE spot
+        below_spot = local_chain[(local_chain['strike'] < spot) & (local_chain['gex'] > 0)]
+        above_spot = local_chain[(local_chain['strike'] > spot) & (local_chain['gex'] > 0)]
         
-        # Local Walls
-        support = local_chain[local_chain['gex'] > 0].sort_values('gex', ascending=False).head(3)
-        resistance = local_chain[local_chain['gex'] > 0].sort_values('gex', ascending=False).head(3)
-        
-        nearest_support = support[support['strike'] < spot]['strike'].max() if not support[support['strike'] < spot].empty else spot - atr
-        nearest_resistance = resistance[resistance['strike'] > spot]['strike'].min() if not resistance[resistance['strike'] > spot].empty else spot + atr
+        nearest_support = below_spot.sort_values('gex', ascending=False).iloc[0]['strike'] if not below_spot.empty else spot - atr
+        nearest_resistance = above_spot.sort_values('gex', ascending=False).iloc[0]['strike'] if not above_spot.empty else spot + atr
 
         return {
             "local_pos_gex": float(pos_gex),
             "local_neg_gex": float(neg_gex),
+            "absorption_ratio": float(round(absorption_ratio, 2)),
             "gamma_density_score": float(round(density, 4)),
             "suppression_strength": float(round(suppression, 2)),
             "nearest_support": float(nearest_support),
-            "nearest_resistance": float(nearest_resistance)
+            "nearest_resistance": float(nearest_resistance),
+            "is_contained": suppression > 0.6
         }
     except Exception as e:
         logger.error(f"Local Gamma Engine Error: {e}")

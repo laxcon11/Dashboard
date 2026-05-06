@@ -49,11 +49,16 @@ def compute_realized_volatility_metrics(df: pd.DataFrame, spot: float, atr: floa
         else:
             rv_regime = "NORMAL"
 
+        # 6. Forward Expectation (Institutional Projection)
+        # We blend current RV with acceleration to project the "Forward Realized" path
+        forward_rv = rv_5d + (rv_accel * 0.5)
+        
         return {
             "rv_5d": float(round(rv_5d, 2)),
             "rv_intraday": float(round(rv_intraday, 2)),
             "rv_regime": rv_regime,
             "rv_acceleration": float(round(rv_accel, 2)),
+            "forward_rv_expectation": float(round(forward_rv, 2)),
             "atr_normalized_move": float(round(atr_norm, 2))
         }
     except Exception as e:

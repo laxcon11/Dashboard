@@ -28,26 +28,16 @@ def build_narrative(ctx: dict) -> dict:
     master_setup = ctx.get("master_setup", {})
     m_state = master_setup.get("market_state", {})
     
-    # 1. State Authority (Strict Canonical Source)
+    # 1. State & Action Authority (Strictly Consumer Only)
     state = m_state.get("state", "NEUTRAL")
     substate = m_state.get("substate", "NORMAL")
+    action = m_state.get("action", "WAIT")
+    confidence = m_state.get("confidence", 0.0)
     why_list = m_state.get("why", ["Standard market regime."])
     
-    decision_trail = [f"Canonical State: {state} ({substate})"]
+    decision_trail = [f"Canonical State: {state} ({substate})", f"Pre-Computed Action: {action}"]
     for w in why_list:
         decision_trail.append(f"Reason: {w}")
-
-    # 2. Action Logic
-    # Institutional Policy: Action is driven by confidence and alignment
-    confidence = m_state.get("confidence", 0.0)
-    action = "WAIT"
-    if confidence >= 0.5:
-        if state in ["PINNED RANGE", "SUPPRESSED TREND", "EXPANSIVE TREND", "LIQUIDITY VACUUM"]:
-            action = "ENTER"
-            decision_trail.append(f"Action Decided: ENTER (Signal Alignment: {confidence})")
-    
-    if action == "WAIT":
-        decision_trail.append("Action Decided: WAIT (Awaiting higher signal alignment)")
 
     # 3. Confidence Labeling
     if confidence >= 0.75: conf_label = "HIGH"
@@ -93,7 +83,7 @@ def build_narrative(ctx: dict) -> dict:
 
     # 8. Risk Parameters
     risk = {
-        "risk_type": "Volatility Expansion" if state == "PINNED RANGE" else "Mean Reversion / Noise",
+        "risk_type": "Volatility Compression / Theta Decay" if state == "PINNED RANGE" else "Volatility Expansion / Momentum Risk",
         "invalidation": "Spot sustains beyond key structural boundary (Wall/Flip)",
         "size": "0.5R" if confidence < 0.7 else "1R"
     }
