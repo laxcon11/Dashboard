@@ -53,8 +53,8 @@ OPTION_CHAIN_DIR.mkdir(parents=True, exist_ok=True)
 
 def calculate_synthetic_forward(df: pd.DataFrame, spot: float) -> float:
     """
-    Refines ATM anchoring using Put-Call Parity: F = Strike + Call - Put.
-    Removes cost-of-carry and dividend skew for cleaner Greeks.
+    OI-weighted synthetic forward using Put-Call Parity: F = Strike + Call - Put.
+    Uses the 5 nearest liquid strikes for robustness against stale LTPs.
     """
     try:
         spot = float(spot)
@@ -63,20 +63,42 @@ def calculate_synthetic_forward(df: pd.DataFrame, spot: float) -> float:
         spot = 24000.0
     if df.empty: return spot
     
-    # 1. Find the strike nearest to spot
+    # 1. Find the 5 nearest round-hundred strikes to spot
     df_copy = df.copy()
     df_copy["dist"] = (df_copy["strike"] - spot).abs()
-    nearest = df_copy.sort_values("dist").iloc[0]["strike"]
+    # Only consider liquid round-hundred strikes
+    round_strikes = df_copy[df_copy["strike"] % 100 == 0]["strike"].unique()
+    if len(round_strikes) == 0:
+        round_strikes = df_copy["strike"].unique()
+    nearest_strikes = sorted(round_strikes, key=lambda s: abs(s - spot))[:5]
     
-    # 2. Extract C and P for that strike
-    strike_data = df[df["strike"] == nearest]
-    c_price = strike_data[strike_data["type"] == "call"]["ltp"].mean()
-    p_price = strike_data[strike_data["type"] == "put"]["ltp"].mean()
+    # 2. Compute synthetic forward per strike, weighted by OI
+    synthetics = []
+    weights = []
+    for strike in nearest_strikes:
+        strike_data = df[df["strike"] == strike]
+        c_rows = strike_data[strike_data["type"] == "call"]
+        p_rows = strike_data[strike_data["type"] == "put"]
+        if c_rows.empty or p_rows.empty:
+            continue
+        c_price = c_rows["ltp"].mean()
+        p_price = p_rows["ltp"].mean()
+        if pd.isna(c_price) or pd.isna(p_price):
+            continue
+        c_oi = c_rows["oi"].sum() if "oi" in c_rows.columns else 1
+        p_oi = p_rows["oi"].sum() if "oi" in p_rows.columns else 1
+        weight = min(c_oi, p_oi)  # Bottleneck liquidity
+        if weight <= 0:
+            weight = 1
+        synthetics.append(strike + c_price - p_price)
+        weights.append(weight)
     
-    if pd.isna(c_price) or pd.isna(p_price):
-        return spot # Fallback to spot
-        
-    synthetic_f = nearest + c_price - p_price
+    if not synthetics:
+        return spot
+    
+    # OI-weighted average
+    total_weight = sum(weights)
+    synthetic_f = sum(s * w for s, w in zip(synthetics, weights)) / total_weight
     return float(round(synthetic_f, 2))
 
 
@@ -1981,41 +2003,71 @@ def compute_basis_metrics(spot: float, futures_price: float, t_days: float, r: f
         "score": score
     }
 
-def compute_pcp_violations(df: pd.DataFrame, futures_price: float, r: float = 0.07, t_days: float = 7.0) -> pd.DataFrame:
+def compute_pcp_violations(df: pd.DataFrame, futures_price: float, r: float = 0.07, t_days: float = 7.0, spot: float = 0.0) -> pd.DataFrame:
     """
-    Alpha 5.7: Put-Call Parity with Execution Confidence.
+    Alpha 5.8: Put-Call Parity with Institutional Liquidity Filters.
+    Only considers round-hundred strikes within ±3% of spot with adequate OI and volume.
     """
     if df.empty or futures_price <= 0: return pd.DataFrame()
+    if spot <= 0: spot = futures_price  # Fallback
 
     T = max(t_days, 0.5) / 365.0
     
-    if "type" in df.columns:
-        df_calls = df[df["type"] == "call"][["strike", "ltp", "oi", "volume"]].rename(columns={"ltp": "call_ltp", "oi": "call_oi", "volume": "call_vol"})
-        df_puts  = df[df["type"] == "put" ][["strike", "ltp", "oi", "volume"]].rename(columns={"ltp": "put_ltp", "oi": "put_oi", "volume": "put_vol"})
-    else:
+    if "type" not in df.columns:
         return pd.DataFrame()
+    
+    # ── Liquidity Gate: Round-hundred strikes only ──
+    df_liquid = df[df["strike"] % 100 == 0].copy()
+    
+    # ── Proximity Gate: ±3% from spot ──
+    proximity_pct = 0.03
+    lower_bound = spot * (1 - proximity_pct)
+    upper_bound = spot * (1 + proximity_pct)
+    df_liquid = df_liquid[(df_liquid["strike"] >= lower_bound) & (df_liquid["strike"] <= upper_bound)]
+    
+    if df_liquid.empty: return pd.DataFrame()
+
+    vol_col = "volume" if "volume" in df_liquid.columns else None
+    call_cols = ["strike", "ltp", "oi"] + (["volume"] if vol_col else [])
+    put_cols = call_cols
+    
+    df_calls = df_liquid[df_liquid["type"] == "call"][call_cols].rename(
+        columns={"ltp": "call_ltp", "oi": "call_oi", **(({"volume": "call_vol"}) if vol_col else {})}
+    )
+    df_puts = df_liquid[df_liquid["type"] == "put"][put_cols].rename(
+        columns={"ltp": "put_ltp", "oi": "put_oi", **(({"volume": "put_vol"}) if vol_col else {})}
+    )
 
     if df_calls.empty or df_puts.empty: return pd.DataFrame()
     
     merged = pd.merge(df_calls, df_puts, on="strike")
     if merged.empty: return pd.DataFrame()
+    
+    # ── OI Floor: 5,000 per leg ──
+    min_oi_leg = 5000
+    merged = merged[(merged["call_oi"] >= min_oi_leg) & (merged["put_oi"] >= min_oi_leg)]
+    
+    # ── Volume Filter: Both legs must have traded today ──
+    if vol_col:
+        merged = merged[(merged["call_vol"] > 0) & (merged["put_vol"] > 0)]
+    
+    if merged.empty: return pd.DataFrame()
         
     merged["synthetic"] = merged["call_ltp"] - merged["put_ltp"] + merged["strike"] * np.exp(-r * T)
     merged["deviation"] = merged["synthetic"] - futures_price
+    merged["dist_from_spot"] = (merged["strike"] - spot).abs()
     
     friction_pts = futures_price * 0.0005 
     merged["net_edge"] = merged["deviation"].abs() - friction_pts
     merged["flag"] = merged["net_edge"] > 0
     
-    # Execution Confidence (1-10)
-    # f(liquidity, net_edge)
-    min_oi = 500
-    merged["confidence"] = (np.clip((merged["call_oi"] + merged["put_oi"]) / 1000, 1, 5) + 
-                             np.clip(merged["net_edge"] / 2, 1, 5)).astype(int)
+    # Execution Confidence (1-10) — Recalibrated for institutional OI
+    merged["confidence"] = (np.clip((merged["call_oi"] + merged["put_oi"]) / 20000, 1, 5) + 
+                             np.clip(merged["net_edge"] / 3, 1, 5)).astype(int)
     merged["confidence_label"] = np.where(merged["confidence"] >= 8, "HIGH", 
                                           np.where(merged["confidence"] >= 5, "MEDIUM", "LOW"))
     
-    # Strategy 1 (Phase 5.8): Synthetic Futures Arb Action
+    # Strategy: Synthetic Futures Arb Action
     merged["arb_action"] = np.where(
         merged["synthetic"] < futures_price - friction_pts,
         "BUY SYNTHETIC + SELL FUTURES",
@@ -2026,7 +2078,8 @@ def compute_pcp_violations(df: pd.DataFrame, futures_price: float, r: float = 0.
         )
     )
     
-    return merged.sort_values("net_edge", ascending=False)
+    # Sort: best edge first, then nearest to spot
+    return merged.sort_values(["net_edge", "dist_from_spot"], ascending=[False, True])
 
 def compute_calendar_spread_opportunity(term_data: dict, historical_mean: float = 1.5) -> dict:
     """
@@ -2086,13 +2139,15 @@ def compute_implied_borrowing_rate(spot: float, futures: float, dte: float) -> f
 
 # ==================== STRATEGY 2: BOX SPREAD SCANNER (Phase 5.8) ====================
 
-def compute_box_spreads(df: pd.DataFrame, r: float = 0.07, t_days: float = 7.0, spread_width: int = 100) -> pd.DataFrame:
+def compute_box_spreads(df: pd.DataFrame, r: float = 0.07, t_days: float = 7.0, spread_width: int = 100, spot: float = 0.0) -> pd.DataFrame:
     """
     Scans adjacent strike pairs for riskless box spread arbitrage.
     Box = Bull Call Spread(K1,K2) + Bear Put Spread(K1,K2)
     Payoff at expiry = K2 - K1 (always).
     Fair value today = (K2 - K1) × exp(-rT).
     Edge = Fair - Cost - Friction.
+    
+    Filters: Round-hundred strikes only, ±3% from spot, OI >= 5000 per leg.
     """
     if df.empty: return pd.DataFrame()
     
@@ -2101,18 +2156,30 @@ def compute_box_spreads(df: pd.DataFrame, r: float = 0.07, t_days: float = 7.0, 
     # Build strike-level pivot
     if "type" not in df.columns: return pd.DataFrame()
     
-    calls = df[df["type"] == "call"][["strike", "ltp", "oi"]].rename(
+    # ── Liquidity Gate: Round-hundred strikes only ──
+    df_liquid = df[df["strike"] % 100 == 0].copy()
+    
+    # ── Proximity Gate: ±3% from spot ──
+    if spot > 0:
+        proximity_pct = 0.03
+        lower_bound = spot * (1 - proximity_pct)
+        upper_bound = spot * (1 + proximity_pct)
+        df_liquid = df_liquid[(df_liquid["strike"] >= lower_bound) & (df_liquid["strike"] <= upper_bound)]
+    
+    if df_liquid.empty: return pd.DataFrame()
+    
+    calls = df_liquid[df_liquid["type"] == "call"][["strike", "ltp", "oi"]].rename(
         columns={"ltp": "c_ltp", "oi": "c_oi"}
     )
-    puts = df[df["type"] == "put"][["strike", "ltp", "oi"]].rename(
+    puts = df_liquid[df_liquid["type"] == "put"][["strike", "ltp", "oi"]].rename(
         columns={"ltp": "p_ltp", "oi": "p_oi"}
     )
     pivot = pd.merge(calls, puts, on="strike").sort_values("strike").reset_index(drop=True)
     
     if len(pivot) < 2: return pd.DataFrame()
     
-    # Minimum OI per leg for liquidity
-    min_oi_leg = 500
+    # Minimum OI per leg for institutional liquidity
+    min_oi_leg = 5000
     
     # 4-leg friction: ~12 bps of notional
     friction_rate = 0.0012
@@ -2132,7 +2199,8 @@ def compute_box_spreads(df: pd.DataFrame, r: float = 0.07, t_days: float = 7.0, 
         k2_row = k2_rows.iloc[0]
         
         # Liquidity check: all 4 legs must have OI > min
-        if min(k1_row["c_oi"], k1_row["p_oi"], k2_row["c_oi"], k2_row["p_oi"]) < min_oi_leg:
+        leg_min_oi = min(k1_row["c_oi"], k1_row["p_oi"], k2_row["c_oi"], k2_row["p_oi"])
+        if leg_min_oi < min_oi_leg:
             continue
         
         # Box Cost = (C_K1 - C_K2) + (P_K2 - P_K1)
@@ -2141,15 +2209,30 @@ def compute_box_spreads(df: pd.DataFrame, r: float = 0.07, t_days: float = 7.0, 
         # Fair Box = (K2 - K1) × exp(-rT)
         fair_box = spread_width * np.exp(-r * T)
         
-        # Friction for 4 legs
-        avg_spot = (k1 + k2) / 2
-        friction = avg_spot * LOT * friction_rate
-        friction_pts = friction / LOT  # Convert back to per-share points
+        # Friction for 4 legs (User computed: ~20 points for execution)
+        friction_pts = 20.0
         
-        net_edge = fair_box - box_cost - friction_pts
+        # ── Edge Calculation ──
+        # Edge = Profit - Friction.
+        # BUY BOX: Pay `box_cost` now, receive `fair_box` at expiry.
+        buy_edge = fair_box - box_cost - friction_pts
         
-        action = "BUY BOX" if net_edge > 2.0 else ("SELL BOX" if net_edge < -2.0 else "FAIR")
+        # SELL BOX: Receive `box_cost` now, pay `fair_box` at expiry.
+        sell_edge = box_cost - fair_box - friction_pts
         
+        # Minimum clear profit threshold after the 20pt friction
+        EDGE_THRESHOLD = 2.0
+        
+        if buy_edge > EDGE_THRESHOLD:
+            action = "BUY BOX"
+            net_edge = buy_edge
+        elif sell_edge > EDGE_THRESHOLD:
+            action = "SELL BOX"
+            net_edge = sell_edge
+        else:
+            action = "FAIR"
+            # Display how far the best leg is from being actionable
+            net_edge = max(buy_edge, sell_edge)
         rows.append({
             "K1": int(k1),
             "K2": int(k2),
@@ -2158,7 +2241,7 @@ def compute_box_spreads(df: pd.DataFrame, r: float = 0.07, t_days: float = 7.0, 
             "friction": round(friction_pts, 2),
             "net_edge": round(net_edge, 2),
             "action": action,
-            "min_leg_oi": int(min(k1_row["c_oi"], k1_row["p_oi"], k2_row["c_oi"], k2_row["p_oi"]))
+            "min_leg_oi": int(leg_min_oi)
         })
     
     result = pd.DataFrame(rows)

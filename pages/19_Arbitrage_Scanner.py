@@ -27,16 +27,22 @@ def get_available_contracts():
     files = list(nde_options_logic.OPTION_CHAIN_DIR.glob(pattern))
     by_expiry = {}
     for f in files:
-        parts = f.name.split("-")
-        expiry_str = parts[-1].replace(".csv", "")
+        parts = f.name.replace(".csv", "").split("-")
+        # Filename: option-chain-ED-{source}-NIFTY-{DD}-{Mon}-{YYYY}
+        # The expiry date is the last 3 dash-separated parts: DD-Mon-YYYY
+        if len(parts) < 8:
+            continue
+        expiry_str = f"{parts[-3]}-{parts[-2]}-{parts[-1]}"
         source_tag = parts[3] if len(parts) > 3 else "UNKNOWN"
         priority = 0 if source_tag == "v3" else (1 if source_tag == "sensi" else 2)
+        expiry_type = nde_expiry_helper.get_expiry_type(expiry_str)
         if expiry_str not in by_expiry or priority < by_expiry[expiry_str]["priority"]:
             by_expiry[expiry_str] = {
-                "label": f"{expiry_str} ({nde_expiry_helper.get_expiry_type(expiry_str)})",
+                "label": f"{expiry_str} ({expiry_type})",
                 "expiry": expiry_str,
                 "filename": f.name,
-                "priority": priority
+                "priority": priority,
+                "type": expiry_type
             }
     contracts = list(by_expiry.values())
     try:
@@ -97,14 +103,38 @@ ctx = fetch_arbitrage_context(selected_contract["filename"])
 spot, futures_price, raw_chain = ctx["spot"], ctx["futures_price"], ctx["raw_chain"]
 dte, term_data, flow_metrics = ctx["dte"], ctx["term_data"], ctx["flow_metrics"]
 
+expiry_type = nde_expiry_helper.get_expiry_type(ctx["used_expiry"])
+expiry_label = ctx["used_expiry"]
+
 phase = compute_expiry_phase(dte)
 basis_data = nde_options_logic.compute_basis_metrics(spot, futures_price, dte, r=0.07)
-pcp_df = nde_options_logic.compute_pcp_violations(raw_chain, futures_price, r=0.07, t_days=dte)
+pcp_df = nde_options_logic.compute_pcp_violations(raw_chain, futures_price, r=0.07, t_days=dte, spot=spot)
 cal_data = nde_options_logic.compute_calendar_spread_opportunity(term_data)
-box_df = nde_options_logic.compute_box_spreads(raw_chain, r=0.07, t_days=dte)
+box_df = nde_options_logic.compute_box_spreads(raw_chain, r=0.07, t_days=dte, spot=spot)
 roll_data = nde_options_logic.compute_roll_arbitrage(term_data, spot, r=0.07)
 
 # ==================== MASTER DECISION PANEL ====================
+
+# Expiry Identity Badge
+_type_color = "#FF9500" if expiry_type == "MONTHLY" else "#007AFF"
+_type_icon = "📅" if expiry_type == "MONTHLY" else "⚡"
+st.markdown(
+    f'<div style="background: linear-gradient(135deg, {_type_color}22, {_type_color}08); '
+    f'border: 1px solid {_type_color}44; border-radius: 12px; padding: 14px 24px; '
+    f'margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">'
+    f'<div style="display: flex; align-items: center; gap: 12px;">'
+    f'<span style="font-size: 1.5em;">{_type_icon}</span>'
+    f'<div><span style="font-size: 0.7em; color: #8E8E93; text-transform: uppercase; font-weight: 800; letter-spacing: 1px;">Active Contract</span><br>'
+    f'<span style="font-size: 1.2em; font-weight: 900; color: {_type_color};">{expiry_label}</span></div></div>'
+    f'<div style="display: flex; gap: 20px; align-items: center;">'
+    f'<div style="text-align: center;"><span style="font-size: 0.65em; color: #8E8E93; text-transform: uppercase; font-weight: 700;">Type</span><br>'
+    f'<span style="background: {_type_color}; color: white; padding: 3px 12px; border-radius: 6px; font-weight: 800; font-size: 0.8em;">{expiry_type}</span></div>'
+    f'<div style="text-align: center;"><span style="font-size: 0.65em; color: #8E8E93; text-transform: uppercase; font-weight: 700;">DTE</span><br>'
+    f'<span style="font-size: 1.1em; font-weight: 900; color: white;">{dte}</span></div>'
+    f'<div style="text-align: center;"><span style="font-size: 0.65em; color: #8E8E93; text-transform: uppercase; font-weight: 700;">Phase</span><br>'
+    f'<span style="font-size: 0.85em; font-weight: 700; color: #E0E0E0;">{phase}</span></div>'
+    f'</div></div>', unsafe_allow_html=True
+)
 
 st.write("---")
 
@@ -156,9 +186,9 @@ with m3:
 # Context overlay
 gamma_regime = flow_metrics.gamma_regime
 _flip = flow_metrics.gamma_flip_level
-_atr_val = nde_options_logic.calculate_atr_sma(batch_download(["^NSEI"], period="3mo").get("^NSEI")) if _flip else 250.0
-dist_flip = abs(spot - _flip) / _atr_val if _atr_val and _atr_val > 0 else 0.0
-st.info(f"🧬 **{gamma_regime}** | Flip Distance: {dist_flip:.2f} ATR | Phase: {phase} | DTE: {dte}")
+_atr_val = nde_options_logic.calculate_atr_sma(batch_download(["^NSEI"], period="3mo").get("^NSEI")) if not ctx.get("flow_metrics") else 250.0
+dist_flip = abs(spot - _flip) / max(_atr_val, 1.0) if _flip else 0.0
+st.info(f"🧬 **{gamma_regime}** | Flip: {dist_flip:.2f} ATR | Source: {ctx['source']}")
 
 if phase in ("PRE_EXPIRY", "EXPIRY_RISK"):
     st.warning(f"⚠️ **{phase}**: PCF/Box deviations may be untradeable due to settlement averaging.")
@@ -278,19 +308,32 @@ with tab2:
             
             best_box = tradeable_boxes.iloc[0]
             with st.expander("📋 Box Spread Execution"):
-                st.markdown(f"""
-                **{best_box['action']} at {int(best_box['K1'])}/{int(best_box['K2'])}**:
-                1. **BUY** {int(best_box['K1'])} Call + **SELL** {int(best_box['K2'])} Call *(Bull Call Spread)*
-                2. **BUY** {int(best_box['K2'])} Put + **SELL** {int(best_box['K1'])} Put *(Bear Put Spread)*
-                
-                **Guaranteed Payoff**: `{int(best_box['K2']) - int(best_box['K1'])}` pts at expiry  
-                **Cost**: `{best_box['box_cost']:.2f}` pts | **Fair**: `{best_box['fair_box']:.2f}` pts  
-                **Net Edge**: `{best_box['net_edge']:.2f}` pts after 4-leg friction
-                
-                ⚠️ **Hold to expiry** — early exit requires unwinding all 4 legs simultaneously.
-                """)
+                if best_box['action'] == "BUY BOX":
+                    st.markdown(f"""
+                    **{best_box['action']} at {int(best_box['K1'])}/{int(best_box['K2'])}**:
+                    1. **BUY** {int(best_box['K1'])} Call + **SELL** {int(best_box['K2'])} Call *(Bull Call Spread)*
+                    2. **BUY** {int(best_box['K2'])} Put + **SELL** {int(best_box['K1'])} Put *(Bear Put Spread)*
+                    
+                    **Guaranteed Payoff**: `{int(best_box['K2']) - int(best_box['K1'])}` pts at expiry  
+                    **Cost**: `{best_box['box_cost']:.2f}` pts | **Fair**: `{best_box['fair_box']:.2f}` pts  
+                    **Net Edge**: `{best_box['net_edge']:.2f}` pts after 4-leg friction
+                    
+                    ⚠️ **Hold to expiry** — early exit requires unwinding all 4 legs simultaneously.
+                    """)
+                else:
+                    st.markdown(f"""
+                    **{best_box['action']} at {int(best_box['K1'])}/{int(best_box['K2'])}**:
+                    1. **SELL** {int(best_box['K1'])} Call + **BUY** {int(best_box['K2'])} Call *(Bear Call Spread)*
+                    2. **SELL** {int(best_box['K2'])} Put + **BUY** {int(best_box['K1'])} Put *(Bull Put Spread)*
+                    
+                    **Guaranteed Payout**: `{int(best_box['K2']) - int(best_box['K1'])}` pts at expiry  
+                    **Credit Received**: `{best_box['box_cost']:.2f}` pts | **Fair**: `{best_box['fair_box']:.2f}` pts  
+                    **Net Edge**: `{best_box['net_edge']:.2f}` pts after 4-leg friction
+                    
+                    ⚠️ **Hold to expiry** — early exit requires unwinding all 4 legs simultaneously.
+                    """)
         else:
-            st.info("No box spread opportunities exceed the 2-point net edge threshold.")
+            st.info("No box spread opportunities overcome the 20-point execution friction constraint.")
     else:
         st.info("Insufficient data for box spread analysis.")
 
