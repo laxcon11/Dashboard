@@ -99,11 +99,7 @@ def log_execution(ctx: dict, narrative: dict, execution_plan: dict):
         with open("logs/execution_audit_log.jsonl", "a") as f:
             f.write(json.dumps(entry, cls=CustomJsonEncoder) + "\n")
             
-        # Also track in position manager if action is ENTER
-        if narrative.get("dominant_action") == "ENTER":
-            import position_manager
-            pm = position_manager.PositionManager()
-            pm.open_position(ctx, narrative, execution_plan)
+        # Position Manager logic has been decoupled from the primary engine.
             
     except Exception as e:
         logger.error(f"Failed to log execution: {e}")

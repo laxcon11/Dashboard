@@ -40,7 +40,6 @@ def generate_engine_context(
     # 0. Cache Lookup
     snapshot_id = (meta or {}).get("timestamp", "LIVE")
     import nde_cache
-    nde_cache.invalidate_cache() # FORCE INVALIDATION FOR NEW METRICS
     cached_flow = nde_cache.get_cached_result(snapshot_id, "flow")
     
     # 1. Temporal & Flow Analysis
@@ -109,7 +108,7 @@ def generate_engine_context(
     exec_plan = nde_strategy_engine.compile_execution_plan(state, flow, spot, t_days=t_days, mode=mode)
     
     # 6. Execution Compilation (Strike Selection)
-    exec_plan = nde_execution_engine.hydrate_execution_plan(exec_plan, spot, flow, df_exp)
+    exec_plan = nde_execution_engine.hydrate_execution_plan(exec_plan, spot, flow, df_exp, atr=atr, strike_interval=strike_interval)
     t4 = datetime.now()
     
     # 7. Telemetry & Hashing

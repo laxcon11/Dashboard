@@ -33,44 +33,55 @@ class NDEReplayEngine:
     def replay_snapshot(self, snapshot):
         """
         Re-executes the analytical pipeline for a given historical context.
+        Uses the new typed schema and modular engines.
         """
-        ctx = snapshot.get("ctx_snapshot")
-        if not ctx: return None
+        if "state" not in snapshot or "flow" not in snapshot:
+            return None
             
-        # 1. Restore DataFrames
-        if "option_chain_df" in ctx and isinstance(ctx["option_chain_df"], list):
-            ctx["option_chain_df"] = pd.DataFrame(ctx["option_chain_df"])
+        import nde_state_engine
+        import nde_strategy_engine
+        import nde_ui_adapter
+        from nde_schema import FlowMetrics, RVMetrics, LocalGammaMetrics
         
-        # 2. Re-run Canonical State Engine
-        # We simulate the context hydration to verify logic consistency
-        from nde_strategy_logic import classify_market_state, select_master_strategy, compute_signal_alignment
-        
-        # Ensure ctx has all required nested metrics
-        m_state = classify_market_state(ctx)
-        alignment = compute_signal_alignment(ctx)
-        m_state["confidence"] = alignment["confidence"]
-        
-        # 3. Re-run Strategy Selection
-        ctx["master_setup"] = {"market_state": m_state} # Temporary injection
-        strategy_code = select_master_strategy(ctx)
-        
-        # 4. Re-run Narrative & Execution
-        narrative = nde_narrative_engine.build_narrative(ctx)
-        execution = build_execution(ctx, narrative)
-        
-        # 5. Validation Logic
-        is_state_consistent = snapshot.get("state") == m_state.get("state")
-        is_strategy_consistent = snapshot.get("template") == execution.get("template")
-        
-        return {
-            "timestamp": snapshot.get("timestamp"),
-            "original_state": snapshot.get("state"),
-            "replay_state": m_state.get("state"),
-            "original_strategy": snapshot.get("template"),
-            "replay_strategy": execution.get("template"),
-            "is_consistent": is_state_consistent and is_strategy_consistent,
-            "confidence_diff": round(m_state.get("confidence", 0.0) - snapshot.get("confidence", 0.0), 2)
-        }
+        try:
+            # 1. Hydrate dependencies
+            flow = FlowMetrics(**snapshot["flow"])
+            rv = RVMetrics(**snapshot["rv"])
+            gamma_local = LocalGammaMetrics(**snapshot["gamma_local"])
+            meta = snapshot.get("meta", {})
+            
+            # 2. Re-run Canonical State Engine
+            m_state = nde_state_engine.classify_market_state(
+                flow=flow, rv=rv, gamma_local=gamma_local, 
+                drift=meta.get("drift", 0.0), stability_20d=meta.get("stability", 50.0)
+            )
+            
+            # 3. Re-run Strategy Selection
+            execution = nde_strategy_engine.compile_execution_plan(
+                state=m_state, flow=flow, rv=rv, gamma_local=gamma_local,
+                t_days=snapshot.get("t_days", 3.0), spot=snapshot.get("spot", 0.0),
+                mode=meta.get("mode", "Balanced")
+            )
+            
+            # 5. Validation Logic
+            orig_state = snapshot["state"].get("state")
+            orig_template = snapshot["execution"].get("strategy_code")
+            
+            is_state_consistent = orig_state == m_state.state
+            is_strategy_consistent = orig_template == execution.strategy_code
+            
+            return {
+                "timestamp": snapshot.get("timestamp"),
+                "original_state": orig_state,
+                "replay_state": m_state.state,
+                "original_strategy": orig_template,
+                "replay_strategy": execution.strategy_code,
+                "is_consistent": is_state_consistent and is_strategy_consistent,
+                "confidence_diff": round(m_state.confidence - snapshot["state"].get("confidence", 0.0), 2)
+            }
+        except Exception as e:
+            logger.warning(f"Replay failed for {snapshot.get('timestamp')}: {e}")
+            return None
 
     def run_full_audit(self):
         snapshots = self.load_snapshots()

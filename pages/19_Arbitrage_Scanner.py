@@ -154,8 +154,10 @@ with m3:
     st.metric("Confidence", conf)
 
 # Context overlay
-gamma_regime = flow_metrics.get("gamma_regime", "Unknown")
-dist_flip = flow_metrics.get("dist_to_flip_atr", 0)
+gamma_regime = flow_metrics.gamma_regime
+_flip = flow_metrics.gamma_flip_level
+_atr_val = nde_options_logic.calculate_atr_sma(batch_download(["^NSEI"], period="3mo").get("^NSEI")) if _flip else 250.0
+dist_flip = abs(spot - _flip) / _atr_val if _atr_val and _atr_val > 0 else 0.0
 st.info(f"🧬 **{gamma_regime}** | Flip Distance: {dist_flip:.2f} ATR | Phase: {phase} | DTE: {dte}")
 
 if phase in ("PRE_EXPIRY", "EXPIRY_RISK"):

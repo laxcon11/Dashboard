@@ -90,7 +90,7 @@ def compute_all_greeks(
         "delta": delta, "gamma": gamma, "vega": vega, "theta": theta, 
         "vanna": vanna, "charm": charm,
         "gex": gex_net, "dex": dex_net, "vex": vex_net, "tex": tex_net,
-        "van": van_net, "cha": cha_net
+        "van": van_net, "cha": cha_net, "t_days": T * 365.0
     })
 
 def compute_max_pain_vectorized(df: pd.DataFrame) -> float:
@@ -226,14 +226,61 @@ def calculate_flow_metrics(df_exp: pd.DataFrame, spot: float) -> FlowMetrics:
     if not df_exp.empty:
         atm_iv = float(df_exp.loc[(df_exp["strike"] - spot).abs().idxmin(), "iv"])
     
+    total_vex = df_exp["van"].sum()
+    total_cex = df_exp["cha"].sum()
+    
+    # ── Flow Classifications (P0-1 Fix) ──
+    gamma_regime = "LONG GAMMA" if total_gex > 0 else "SHORT GAMMA"
+    vanna_bias = (
+        "Strong Bullish" if total_vex > 500 else
+        "Mild Bullish" if total_vex > 0 else
+        "Mild Bearish" if total_vex > -500 else
+        "Strong Bearish"
+    )
+    charm_flow = (
+        "Strong Bullish Drift" if total_cex > 500 else
+        "Mild Bullish Drift" if total_cex > 0 else
+        "Mild Bearish Pressure" if total_cex > -500 else
+        "Strong Bearish Pressure"
+    )
+    
+    flow_regime = "Passive"
+    if not df_exp.empty and "volume" in df_exp.columns:
+        mask = (df_exp["strike"] >= spot * 0.985) & (df_exp["strike"] <= spot * 1.015)
+        atm_df = df_exp[mask]
+        if atm_df.empty:
+            df_exp["dist"] = (df_exp["strike"] - spot).abs()
+            atm_df = df_exp.sort_values("dist").head(4)
+        atm_vol = atm_df["volume"].sum()
+        atm_oi = atm_df["oi"].sum()
+        ratio = atm_vol / max(atm_oi, 1.0)
+        atm_oi_chng = atm_df["oi_chng"].sum() if "oi_chng" in atm_df.columns else 0.0
+        
+        if ratio > 0.4:
+            flow_regime = "Institutional Churn"
+        elif ratio > 0.25:
+            if abs(atm_oi_chng) / max(atm_oi, 1.0) > 0.05:
+                flow_regime = "Active Accumulation" if atm_oi_chng > 0 else "Active Liquidation"
+            else:
+                flow_regime = "Directional Engagement"
+        elif ratio > 0.1:
+            if abs(atm_oi_chng) > (atm_oi * 0.02):
+                flow_regime = "Directional Engagement"
+            else:
+                flow_regime = "Tactical Positioning"
+        elif ratio < 0.05:
+            flow_regime = "Passive / Stale"
+        else:
+            flow_regime = "Neutral"
+
     metrics = FlowMetrics(
         total_gex=total_gex,
         total_gex_abs=total_gex_abs,
         total_delta=df_exp["dex"].sum(),
         total_vega=total_vega,
         total_theta=total_theta,
-        total_vanna=df_exp["van"].sum(),
-        total_charm=df_exp["cha"].sum(),
+        total_vanna=total_vex,
+        total_charm=total_cex,
         gamma_flip_level=float(round(flip_level, 2)),
         atm_iv_current=atm_iv,
         call_wall=c_wall,
@@ -244,9 +291,12 @@ def calculate_flow_metrics(df_exp: pd.DataFrame, spot: float) -> FlowMetrics:
         atm_oi_share=float(atm_oi_share),
         tv_ratio=float(tv_ratio),
         tv_label=tv_label,
+        gamma_regime=gamma_regime,
+        vanna_bias=vanna_bias,
+        charm_flow=charm_flow,
+        flow_regime_label=flow_regime,
         raw_exposures=df_exp
     )
-
     
     # Inject intelligence
     from dataclasses import replace

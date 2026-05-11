@@ -15,7 +15,9 @@ def generate_tactical_legs(
     strategy_code: str, 
     spot: float, 
     flow: FlowMetrics, 
-    raw_exp: pd.DataFrame
+    raw_exp: pd.DataFrame,
+    atr: float,
+    strike_interval: float
 ) -> Dict[str, Any]:
     """Generates the strike-specific legs for the selected strategy."""
     c_wall = flow.call_wall
@@ -24,12 +26,23 @@ def generate_tactical_legs(
     if strategy_code == "MEAN_REVERSION":
         sell_c = snap_to_nearest_strike(c_wall, raw_exp)
         sell_p = snap_to_nearest_strike(p_wall, raw_exp)
+        
+        # Adaptive wings based on ATR and Strike Interval
+        wing_width = max(strike_interval * 2.0, atr * 0.5)
+        # Snap wing width to nearest strike interval multiplier
+        wing_width = round(wing_width / strike_interval) * strike_interval
+        if wing_width < strike_interval:
+            wing_width = strike_interval
+            
+        buy_c = snap_to_nearest_strike(sell_c + wing_width, raw_exp)
+        buy_p = snap_to_nearest_strike(sell_p - wing_width, raw_exp)
+        
         return {
             "template": "IRON_CONDOR",
             "sell_ce": sell_c,
             "sell_pe": sell_p,
-            "buy_ce": sell_c + 100,
-            "buy_pe": sell_p - 100
+            "buy_ce": buy_c,
+            "buy_pe": buy_p
         }
     
     if strategy_code == "TREND_ACCELERATION":
@@ -46,10 +59,12 @@ def hydrate_execution_plan(
     plan: ExecutionPlan, 
     spot: float, 
     flow: FlowMetrics, 
-    raw_exp: pd.DataFrame
+    raw_exp: pd.DataFrame,
+    atr: float = 250.0,
+    strike_interval: float = 50.0
 ) -> ExecutionPlan:
     """Updates the execution plan with specific strikes and legs."""
-    template = generate_tactical_legs(plan.strategy_code, spot, flow, raw_exp)
+    template = generate_tactical_legs(plan.strategy_code, spot, flow, raw_exp, atr, strike_interval)
     
     # Extract legs for canonical format
     legs = []
