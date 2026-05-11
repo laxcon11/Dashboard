@@ -58,9 +58,8 @@ class NDEReplayEngine:
             
             # 3. Re-run Strategy Selection
             execution = nde_strategy_engine.compile_execution_plan(
-                state=m_state, flow=flow, rv=rv, gamma_local=gamma_local,
-                t_days=snapshot.get("t_days", 3.0), spot=snapshot.get("spot", 0.0),
-                mode=meta.get("mode", "Balanced")
+                state=m_state, flow=flow, spot=snapshot.get("spot", 0.0),
+                t_days=snapshot.get("t_days", 3.0), mode=meta.get("mode", "Balanced")
             )
             
             # 5. Validation Logic
