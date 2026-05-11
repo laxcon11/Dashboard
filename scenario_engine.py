@@ -48,6 +48,51 @@ class ScenarioEngine:
         spot_range = np.linspace(spot - 2.5 * atr, spot + 2.5 * atr, 60)
         
         # 3. Compute Surfaces
+        pnl_t0 = []
+        pnl_theta = []
+        pnl_vega_plus = []
+        pnl_vega_minus = []
+        
+        for s in spot_range:
+            val_t0 = 0
+            val_theta = 0
+            val_vega_plus = 0
+            val_vega_minus = 0
+            
+            for leg in legs:
+                side = 1 if leg["side"] == "buy" else -1
+                k = leg["strike"]
+                opt_type = leg["type"]
+                qty = leg.get("qty", 1)
+                
+                # BS Prices
+                price_t0 = ScenarioEngine.black_scholes(s, k, T_curr, r, sigma, opt_type)
+                price_theta = ScenarioEngine.black_scholes(s, k, T_future, r, sigma, opt_type)
+                price_vega_plus = ScenarioEngine.black_scholes(s, k, T_curr, r, sigma + 0.02, opt_type)
+                price_vega_minus = ScenarioEngine.black_scholes(s, k, T_curr, r, max(0.01, sigma - 0.02), opt_type)
+                
+                # Entry price fallback
+                entry = leg.get("entry_price", price_t0)
+                
+                val_t0 += (price_t0 - entry) * side * qty
+                val_theta += (price_theta - entry) * side * qty
+                val_vega_plus += (price_vega_plus - entry) * side * qty
+                val_vega_minus += (price_vega_minus - entry) * side * qty
+                
+            pnl_t0.append(val_t0)
+            pnl_theta.append(val_theta)
+            pnl_vega_plus.append(val_vega_plus)
+            pnl_vega_minus.append(val_vega_minus)
+            
+        return {
+            "spot_range": spot_range.tolist(),
+            "payoffs": {
+                "current": pnl_t0,
+                "theta_1d": pnl_theta,
+                "vega_plus_2": pnl_vega_plus,
+                "vega_minus_2": pnl_vega_minus
+            }
+        }
         payoff_t0 = [] # Current Value
         payoff_t1 = [] # Value after 1 day decay (Theta simulation)
         payoff_v_up = [] # Value after +20% Vega shock

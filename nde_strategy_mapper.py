@@ -41,8 +41,11 @@ def map_strategy(ctx: dict, narrative: dict) -> dict:
         execution_plan["notes"] = ["Institutional directional grind. Movement suppressed by dealer positioning."]
         
         direction = narrative.get("dominant_state_direction", "BULLISH")
-        auto = ctx.get("auto_metrics", {})
-        drift = auto.get("drift", 0.0)
+        if hasattr(ctx, "meta"):
+            drift = ctx.meta.get("drift", 0.0)
+        else:
+            auto = ctx.get("auto_metrics", {})
+            drift = auto.get("drift", 0.0)
         opt_type = "CE" if drift > 0 else "PE"
         
         execution_plan["legs"] = [
@@ -66,8 +69,11 @@ def map_strategy(ctx: dict, narrative: dict) -> dict:
         execution_plan["invalidation"] = "Velocity reversal or Wall recapture."
         execution_plan["notes"] = ["Directional vacuum. Air-pocket movement expected. High momentum."]
         
-        auto = ctx.get("auto_metrics", {})
-        drift = auto.get("drift", 0.0)
+        if hasattr(ctx, "meta"):
+            drift = ctx.meta.get("drift", 0.0)
+        else:
+            auto = ctx.get("auto_metrics", {})
+            drift = auto.get("drift", 0.0)
         opt_type = "CE" if drift > 0 else "PE"
         
         # More aggressive target for vacuum

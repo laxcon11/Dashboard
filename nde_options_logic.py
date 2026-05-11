@@ -43,6 +43,7 @@ import data_fetch
 import nde_expiry_helper
 from nse_v3_client import NSEv3Client, parse_v3_chain, clean_chain
 import json
+from nde_schema import FlowMetrics
 LOT = NSE_Config.NIFTY_LOT_SIZE
 RISK_FREE_RATE = NSE_Config.RISK_FREE_RATE
 DIVIDEND_YIELD = NSE_Config.DIVIDEND_YIELD
@@ -359,16 +360,7 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
     except (ValueError, TypeError):
         spot = 24000.0
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return {
-            "total_gex": 0.0, "total_gex_abs": 0.0, "total_vega": 0.0, 
-            "total_theta": 0.0, "total_delta": 0.0, "total_volume": 0.0, "total_oi_chng": 0.0,
-            "gex_norm": 0.0, "gex_tw_norm": 0.0, "vega_norm": 0.0, "theta_norm": 0.0,
-            "vex_norm": 0.0, "vex_tw_norm": 0.0, "cex_norm": 0.0, "cex_tw_norm": 0.0,
-            "tv_ratio": 0.0, "tv_label": "N/A", "flow_regime_label": "Unknown",
-            "gamma_flip_level": 0.0, "gamma_regime": "NEUTRAL",
-            "vanna_bias": "Neutral", "charm_flow": "Neutral",
-            "intelligence": {}, "institutional_iq": {}, "raw_exposures": pd.DataFrame()
-        }
+        return FlowMetrics()
         
     # Phase 41: Vectorized Greeks computation with stability guards
     K_arr = df["strike"].values.astype(float)
@@ -600,12 +592,9 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
         exposure_sum = df.groupby("strike")[exp_col].sum().abs().sort_values(ascending=False).head(top_n)
         return [{"strike": float(s), "exposure": float(e)} for s, e in exposure_sum.items()]
 
-    vega_clusters = calculate_greek_clusters(df_exp, "vega")
-    theta_clusters = calculate_greek_clusters(df_exp, "theta")
-    intelligence = analyze_strike_intelligence(df_exp, spot)
+    max_pain = calculate_max_pain(df_exp)
 
     # Phase 45: Institutional IQ Ingestion
-    max_pain = calculate_max_pain(df_exp)
     pcr = calculate_pcr(df_exp)
     v_profile = calculate_volume_profile(df_exp)
     exp_move = calculate_straddle_expected_move(df_exp, spot)
@@ -633,6 +622,12 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
         "synthetic_forward": calculate_synthetic_forward(df_exp, spot),
         "strike_interval": float(strike_interval)
     }
+    
+    vega_clusters = calculate_greek_clusters(df_exp, "vega")
+    theta_clusters = calculate_greek_clusters(df_exp, "theta")
+    # Intelligence requires inst_iq for PCR/MaxPain mapping
+    intelligence = analyze_strike_intelligence(df_exp, spot, flow_metrics={"institutional_iq": inst_iq})
+    intelligence["max_pain"] = max_pain
 
     # Phase 37: Continuous Entry Gate (Theta/Vega Carry Ratio)
     t_days = df_exp["t_days"].iloc[0] if "t_days" in df_exp.columns else 3.0
@@ -673,54 +668,49 @@ def compute_option_flow_exposures(spot: float, df: pd.DataFrame, r: float = RISK
     # classify_flow_regime (Phase 42)
     flow_regime = classify_flow_regime(df_exp, spot, total_volume, total_oi_chng)
 
-    return {
-        "total_gex": float(round(total_gex_net, 4)), 
-        "total_gex_abs": float(round(total_gex_abs, 4)),
-        "total_vex": float(round(total_vex, 4)),
-        "total_cex": float(round(total_cex, 4)),
-        "total_vega": float(round(total_vega, 4)),
-        "total_theta": float(round(total_theta, 4)),
-        "total_delta": float(round(total_delta, 4)),
-        "total_volume": float(total_volume),
-        "total_oi_chng": float(total_oi_chng),
-        
-        "gex_norm": float(round(total_gex_norm, 4)),
-        "gex_tw_norm": float(round(gex_tw_norm, 4)),
-        "vega_norm": float(round(total_vega_norm, 4)),
-        "theta_norm": float(round(total_theta_norm, 4)),
-        "vex_norm": float(round(total_vex_norm, 4)),
-        "vex_tw_norm": float(round(vex_tw_norm, 4)),
-        "cex_norm": float(round(total_cex_norm, 4)),
-        "cex_tw_norm": float(round(cex_tw_norm, 4)),
-        
-        "tv_ratio": float(round(tv_ratio, 4)),
-        "tv_label": tv_label,
-        "flow_regime_label": flow_regime,
-        "gamma_flip_level": float(round(flip_level, 2)),
-        "gamma_flip_strength": float(round(flip_strength_norm, 4)),
-        "dist_to_flip_atr": float(round(dist_to_flip_atr, 2)),
-        "gex_skew": float(round(gex_skew, 3)),
-        "gamma_regime": "LONG GAMMA (Supportive)" if total_gex_net > 0 else "SHORT GAMMA (Volatile)",
-        "vanna_bias": (
-            "Strong Bullish (Put-Writing Flow)" if total_vex > 500 else
-            "Mild Bullish (Supportive)" if total_vex > 0 else
-            "Mild Bearish (Headwind)" if total_vex > -500 else
-            "Strong Bearish (Destabilizing)"
+    # ATM IV Extraction
+    idx_atm = np.abs(K_arr - spot).argmin()
+    atm_iv_current = float(iv_arr[idx_atm] * 100.0)
+
+    return FlowMetrics(
+        total_gex=float(round(total_gex_net, 4)), 
+        total_gex_abs=float(round(total_gex_abs, 4)),
+        total_delta=float(round(total_delta, 4)),
+        total_vega=float(round(total_vega, 4)),
+        total_theta=float(round(total_theta, 4)),
+        total_vanna=float(round(vanna_exp.sum() / MILLION, 4)),
+        total_charm=float(round(cex.sum() / MILLION, 4)),
+        gamma_flip_level=float(round(flip_level, 2)),
+        atm_iv_current=atm_iv_current,
+        call_wall=float(c_wall),
+        put_wall=float(p_wall),
+        sec_call_wall=float(sec_c),
+        sec_put_wall=float(sec_p),
+        atm_oi_share=float(round(atm_oi_share, 2)),
+        tv_ratio=float(round(tv_ratio, 4)),
+        tv_label=tv_label,
+        flow_regime_label=flow_regime,
+        gamma_regime="LONG GAMMA" if total_gex_net > 0 else "SHORT GAMMA",
+        vanna_bias=(
+            "Strong Bullish" if total_vex > 500 else
+            "Mild Bullish" if total_vex > 0 else
+            "Mild Bearish" if total_vex > -500 else
+            "Strong Bearish"
         ),
-        "charm_flow": (
+        charm_flow=(
             "Strong Bullish Drift" if total_cex > 500 else
             "Mild Bullish Drift" if total_cex > 0 else
             "Mild Bearish Pressure" if total_cex > -500 else
             "Strong Bearish Pressure"
         ),
-        "vega_clusters": vega_clusters,
-        "theta_clusters": theta_clusters,
-        "intelligence": intelligence,
-        "institutional_iq": inst_iq,
-        "call_wall": float(c_wall),
-        "put_wall": float(p_wall),
-        "raw_exposures": df_exp
-    }
+        tv_ema_fast=_tv_ema_fast,
+        tv_ema_slow=_tv_ema_slow,
+        gex_tw_norm=float(round(gex_tw_norm, 4)),
+        vex_tw_norm=float(round(vex_tw_norm, 4)),
+        cex_tw_norm=float(round(cex_tw_norm, 4)),
+        intelligence=intelligence,
+        raw_exposures=df_exp
+    )
 
 def classify_flow_regime(df: pd.DataFrame, spot: float, total_vol: float, total_oi_chng: float) -> str:
     """
@@ -782,7 +772,10 @@ def analyze_strike_intelligence(df: pd.DataFrame, spot: float, flow_metrics: dic
     
     return {
         "dns_zones": high_risk_zones,  # Preserving downstream dict key for UI compatibility
-        "optimal_strikes": optimal
+        "optimal_strikes": optimal,
+        "max_pain": (flow_metrics.intelligence.get("max_pain", 0.0) if hasattr(flow_metrics, "intelligence") else flow_metrics.get("institutional_iq", {}).get("max_pain", 0.0)) if flow_metrics else 0.0,
+        "pcr_oi": (flow_metrics.intelligence.get("pcr_oi", 0.0) if hasattr(flow_metrics, "intelligence") else flow_metrics.get("institutional_iq", {}).get("pcr_oi", 0.0)) if flow_metrics else 0.0,
+        "pcr_vol": (flow_metrics.intelligence.get("pcr_vol", 0.0) if hasattr(flow_metrics, "intelligence") else flow_metrics.get("institutional_iq", {}).get("pcr_vol", 0.0)) if flow_metrics else 0.0
     }
 
 def detect_high_risk_zones(df: pd.DataFrame):
@@ -899,8 +892,8 @@ def select_optimal_strikes(df: pd.DataFrame, spot: float, flow_metrics: dict = N
     
     # 3. REGIME CONDITIONING (Phase 28)
     if flow_metrics:
-        gex = flow_metrics.get("total_gex", 0)
-        vega_total = flow_metrics.get("total_vega", 0)
+        gex = flow_metrics.total_gex if hasattr(flow_metrics, "total_gex") else flow_metrics.get("total_gex", 0)
+        vega_total = flow_metrics.total_vega if hasattr(flow_metrics, "total_vega") else flow_metrics.get("total_vega", 0)
         
         # negative gamma / trending -> penalize closeness (low v_norm strikes)
         if gex < 0:
@@ -978,10 +971,11 @@ def classify_greek_market_state(metrics):
     """
     Classify market state based on Million INR (M) units.
     """
-    gamma_net = metrics.get("total_gex", 0)
-    gamma_abs = metrics.get("total_gex_abs", 0)
-    theta = metrics.get("total_theta", 0)
-    vega = metrics.get("total_vega", 0)
+    is_obj = hasattr(metrics, "total_gex")
+    gamma_net = metrics.total_gex if is_obj else metrics.get("total_gex", 0)
+    gamma_abs = metrics.total_gex_abs if is_obj else metrics.get("total_gex_abs", 0)
+    theta = metrics.total_theta if is_obj else metrics.get("total_theta", 0)
+    vega = metrics.total_vega if is_obj else metrics.get("total_vega", 0)
     
     # Thresholds in INR Million (M)
     # GEX > 5000M (5B INR) is strongly supportive
@@ -1328,7 +1322,9 @@ def parse_nse_option_chain_csv(file_path: Path) -> tuple[pd.DataFrame, str]:
                     if pd.isna(val_raw): return 0.0
                     v = str(val_raw).replace(",", "").replace("-", "0").strip()
                     try: return float(v) if v else 0.0
-                    except: return 0.0
+                    except Exception as e:
+                        logger.debug(f"Volatility proxy fallback: {e}")
+                        return 0.0
 
                 # Check for Sensibull columns in the original CSV row
                 if "CE_GAMMA" in cols: c_data["sensi_gamma"] = _safe_float(row.iloc[cols.index("CE_GAMMA")])
@@ -1437,13 +1433,14 @@ def list_available_option_chains(index_name: str = None) -> list[dict]:
     # Only include files that have the NDE header format (not raw Sensibull downloads)
     by_expiry: dict[str, dict] = {}
 
-    for f in OPTION_CHAIN_DIR.glob("*.csv"):
+    pattern = f"*{index_name.upper()}*.csv" if index_name else "*.csv"
+    for f in OPTION_CHAIN_DIR.glob(pattern):
         # If filtering by index, skip files that don't match
         if index_name and index_name.upper() not in f.name.upper():
             continue
             
         # Skip raw Sensibull downloads — they haven't been converted yet
-        if re.match(r"NIFTY_\d{4}-\d{2}-\d{2}_option_chain", f.name):
+        if re.match(rf"{index_name.upper() if index_name else '[A-Z]+'}_\d{{4}}-\d{{2}}-\d{{2}}_option_chain", f.name):
             continue
         # Skip metadata json / DS_Store etc
         if not f.suffix == ".csv":
@@ -1717,7 +1714,7 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
     3. Calculates Flip Velocity and Delta Migrations (Snap-Persistence).
     4. Normalizes metrics by LOT and scales thresholds by IV regime.
     """
-    chains = list_available_option_chains()
+    chains = list_available_option_chains(index_name=symbol)
     if not chains:
         return {}
     
@@ -1787,14 +1784,14 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
             atm_iv = 15.0 # Fallback
             
         # V2: Flip Context
-        flip = metrics.get("gamma_flip_level")
+        flip = metrics.gamma_flip_level
         flip_dist = abs(spot - flip) / spot * 100 if flip else 0.0
         
         # Migration Delta Tracking
         delta_gex = 0.0
         delta_flip = 0.0
         if expiry in old_snap:
-            delta_gex = metrics["total_gex"] - old_snap[expiry].get("gex_net", metrics["total_gex"])
+            delta_gex = metrics.total_gex - old_snap[expiry].get("gex_net", metrics.total_gex)
             old_flip = old_snap[expiry].get("flip")
             if old_flip and flip:
                 delta_flip = flip - old_flip
@@ -1804,8 +1801,8 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
         
         # UI Hydration (Phase 41 Consistency)
         ui_display = {
-            "gex_net": format_institutional_metric(metrics["total_gex"], "Cr"),
-            "gex_net_norm": f"{metrics['total_gex']/LOT:.1f} M/lot",
+            "gex_net": format_institutional_metric(metrics.total_gex, "Cr"),
+            "gex_net_norm": f"{metrics.total_gex/LOT:.1f} M/lot",
             "delta_gex": f"({'+' if delta_gex > 0 else ''}{format_institutional_metric(delta_gex, 'Cr')})" if abs(delta_gex) > 100_000 else ""
         }
         
@@ -1818,29 +1815,29 @@ def compute_term_structure(symbol: str = "NIFTY", spot: float = None) -> dict:
             "ui_display": ui_display,
             
             # Raw Metrics
-            "gex_abs": metrics["total_gex_abs"],
-            "gex_net": metrics["total_gex"],
-            "vega": metrics["total_vega"],
-            "theta": metrics["total_theta"],
+            "gex_abs": metrics.total_gex_abs,
+            "gex_net": metrics.total_gex,
+            "vega": metrics.total_vega,
+            "theta": metrics.total_theta,
             
             # Migration Deltas
             "delta_gex": delta_gex,
             "delta_flip": delta_flip,
             
             # Lot-Normalized (Logic Invariant)
-            "gex_abs_norm": metrics["total_gex_abs"] / LOT,
-            "gex_net_norm": metrics["total_gex"] / LOT,
-            "gex_tw_norm": metrics["gex_tw_norm"],
-            "vega_norm": metrics["total_vega"] / LOT,
-            "theta_norm": metrics["total_theta"] / LOT,
-            "vex_tw_norm": metrics["vex_tw_norm"],
-            "cex_tw_norm": metrics["cex_tw_norm"],
+            "gex_abs_norm": metrics.total_gex_abs / LOT,
+            "gex_net_norm": metrics.total_gex / LOT,
+            "gex_tw_norm": metrics.gex_tw_norm,
+            "vega_norm": metrics.total_vega / LOT,
+            "theta_norm": metrics.total_theta / LOT,
+            "vex_tw_norm": metrics.vex_tw_norm,
+            "cex_tw_norm": metrics.cex_tw_norm,
             
             "flip": flip,
             "flip_dist": round(flip_dist, 2),
             "state": "Unknown",
             "filename": filename,
-            "raw_exposures": metrics["raw_exposures"]
+            "raw_exposures": metrics.raw_exposures
         }
         
         # Apply State Classification (Adaptive)

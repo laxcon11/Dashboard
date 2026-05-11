@@ -25,7 +25,9 @@ class NDEReplayEngine:
             for line in f:
                 try:
                     snapshots.append(json.loads(line))
-                except: continue
+                except Exception as e:
+                    logger.warning(f"Failed to parse replay snapshot: {e}")
+                    continue
         return snapshots
 
     def replay_snapshot(self, snapshot):

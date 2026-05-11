@@ -60,7 +60,7 @@ def resolve_strike(target: str, opt: str, spot: float, call_wall: float, put_wal
     Resolves symbolic targets into concrete strike prices based on structural and volatility rules.
     """
     # Phase 6.3: Multi-Index Strike Snapping
-    index_name = ctx.get("index_name", "NIFTY")
+    index_name = ctx.index_name if hasattr(ctx, "index_name") else ctx.get("index_name", "NIFTY")
     s_interval = NSE_Config.MARKET_CONFIG.get(index_name, {}).get("strike_interval", 50.0)
     
     def resolve_safe_strike(val, chain):
@@ -137,7 +137,8 @@ def build_execution(ctx: dict, narrative: dict) -> dict:
     dominant_state = narrative.get("dominant_state", "")
     
     # Governance Gate: Final institutional risk check
-    trust_level = ctx.get("meta", {}).get("data_quality", "HIGH")
+    meta = ctx.meta if hasattr(ctx, "meta") else ctx.get("meta", {})
+    trust_level = meta.get("data_quality", "HIGH")
     if confidence < 0.35 or dominant_action == "WAIT" or trust_level in ["DEGRADED", "LOW"]:
         return {
             "template": "No Trade",
@@ -155,20 +156,29 @@ def build_execution(ctx: dict, narrative: dict) -> dict:
         execution_plan = {"template": "No Trade", "legs": [], "size": "0R", "invalidation": "N/A", "notes": ["Invalid mapping output"]}
         
     # Extract Context
-    spot = ctx.get("spot", 0)
+    is_obj = hasattr(ctx, "spot")
+    spot = ctx.spot if is_obj else ctx.get("spot", 0)
     if not isinstance(spot, (int, float)) or math.isnan(float(spot)) or spot <= 0:
         spot = 24000.0
 
-    walls = ctx.get("walls", (None, None))
+    if is_obj:
+        walls = (ctx.flow.call_wall, ctx.flow.put_wall)
+    else:
+        walls = ctx.get("walls", (None, None))
+        
     call_wall, put_wall = walls[0], walls[1]
     
-    auto = ctx.get("auto_metrics", {})
-    atr = auto.get("atr_proxy", 250.0)
+    if is_obj:
+        atr = ctx.atr
+    else:
+        auto = ctx.get("auto_metrics", {})
+        atr = auto.get("atr_proxy", 250.0)
+        
     if atr is None or math.isnan(float(atr)) or atr <= 0:
         atr = 250.0
 
     # 👉 NEW: pass chain
-    df_chain = ctx.get("option_chain_df")  # IMPORTANT: attach this in engine
+    df_chain = getattr(ctx, "option_chain_df", None) if is_obj else ctx.get("option_chain_df")
     
     # Filter by specific expiry if available to avoid snapping to wrong contract strikes
     used_expiry = ctx.get("meta", {}).get("expiry")

@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from typing import Any, List
 import json
 import pandas as pd
 try:
@@ -186,7 +187,8 @@ def write_daily_nde_snapshot(
     convergence_score=0.0, strategy_code="NO_TRADE",
     inst_iq=None, # Enriched IQ metrics (Phase 46)
     atm_iv=None,  # Phase 47: Enriched Vol Persistence
-    requires_warning=False # System Warning Banner Trigger
+    requires_warning=False, # System Warning Banner Trigger
+    index_name="NIFTY"
 ):
     """Save the finalized daily NDE snapshot with expiry-aware lifecycle."""
     AUTOMATION_OUTPUT_DIR = Path(__file__).parent / "data" / "automation"
@@ -240,8 +242,8 @@ def write_daily_nde_snapshot(
         "config_hash": config_hash
     }
     
-    # Save Dated Immutable Snapshot
-    fname = AUTOMATION_OUTPUT_DIR / f"nde_v12_{datetime.now().strftime('%Y%m%d')}.json"
+    # Save Dated Immutable Snapshot (Phase 5: Index Isolation)
+    fname = AUTOMATION_OUTPUT_DIR / f"nde_v12_{index_name.upper()}_{datetime.now().strftime('%Y%m%d')}.json"
     fname.write_text(json.dumps(snapshot, indent=2))
     
     # Save 'Latest' Alias for easy linkage
@@ -282,7 +284,19 @@ def get_historical_snapshot_df(limit=30, daily_only=True, index_name="NIFTY"):
     path = Path(__file__).parent / "data" / "automation"
     # Use index-specific pattern (Phase 5 Isolation)
     pattern = f"nde_v12_{index_name.upper()}_*.json"
-    files = sorted(list(path.glob(pattern)), reverse=True)
+    files = list(path.glob(pattern))
+    
+    # Backward compatibility: If NIFTY, also look for old non-index-prefixed files (e.g. nde_v12_20260506.json)
+    if index_name.upper() == "NIFTY":
+        # We only want files that DO NOT have an index name in them
+        all_olds = list(path.glob("nde_v12_202*.json"))
+        # Filter: If it has any of the other index names, skip it
+        for old_f in all_olds:
+            if any(idx in old_f.name for idx in ["BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"]):
+                continue
+            files.append(old_f)
+        
+    files = sorted(list(set(files)), reverse=True)
     
     rows = []
     seen_dates = set()
@@ -565,7 +579,7 @@ def generate_auto_snapshot(force_file=None, index_name="NIFTY"):
             raise
         
         # 6. Strategy Engine (Phase 46 Hardening: Call select_master_strategy to get REAL code)
-        walls = nde_options_logic.calculate_option_walls(df)
+        walls = (metrics.call_wall, metrics.put_wall, metrics.sec_call_wall, metrics.sec_put_wall)
         
         # Identify the correct core logic first
         dte_val = get_dte_from_string(expiry) if isinstance(expiry, str) else expiry.get("dte", 7)
@@ -587,7 +601,6 @@ def generate_auto_snapshot(force_file=None, index_name="NIFTY"):
         )
         
         # 7. Write Snapshot
-        from NSE_Config import CONFIG_VERSION
         fname = write_daily_nde_snapshot(
             curr_regime=curr_reg,
             persistence=pers,
@@ -599,21 +612,21 @@ def generate_auto_snapshot(force_file=None, index_name="NIFTY"):
             probs=probs,
             escalation=escalation,
             used_expiry=expiry,
-            gamma_regime=metrics.get("gamma_regime", "UNKNOWN"),
-            flip=metrics.get("gamma_flip_level", 0),
-            vanna=metrics.get("vanna_bias", "UNKNOWN"),
-            charm=metrics.get("charm_flow", "UNKNOWN"),
-            flow_regime=metrics.get("flow_regime_label", "UNKNOWN"),
-            total_gex=metrics.get("total_gex", 0),
+            gamma_regime=metrics.gamma_regime,
+            flip=metrics.gamma_flip_level,
+            vanna=metrics.vanna_bias,
+            charm=metrics.charm_flow,
+            flow_regime=metrics.flow_regime_label,
+            total_gex=metrics.total_gex,
             t_bias="NEUTRAL", s_bias="NEUTRAL",
             spot=spot, atr=calc_atr, config_hash=CONFIG_VERSION,
             source_mode=source_mode,
             data_quality_score=1.0,
-            tv_label=metrics.get("tv_label", "UNKNOWN"),
+            tv_label=metrics.tv_label,
             convergence_score=master_setup.get("quality_score", 0),
             strategy_code=real_code,
-            inst_iq=metrics.get("institutional_iq"),
-            atm_iv=metrics.get("atm_iv_current"),
+            inst_iq=metrics.intelligence.get("institutional_iq", {}),
+            atm_iv=metrics.atm_iv_current,
             requires_warning=requires_warning
         )
         
@@ -626,3 +639,83 @@ def generate_auto_snapshot(force_file=None, index_name="NIFTY"):
         logger.error(error_msg)
         return None
 
+
+def save_snapshot_from_ctx(ctx: Any):
+    """Orchestrator helper to persist full context state."""
+    from nde_schema import EngineContext
+    
+    if isinstance(ctx, EngineContext):
+        flow = ctx.flow
+        m_state = ctx.state
+        auto = {"stability": ctx.state.coherence_score * 100.0, "drift": 0.0} # Fallback mapping
+        master = {"confidence": ctx.ui.quality_score}
+        meta = ctx.meta
+        used_expiry = ctx.raw_chain_timestamp or "N/A"
+        strategy_code = ctx.execution.strategy_code
+        spot = ctx.spot
+        atr = ctx.atr
+        index_name = ctx.index_name
+        current_atm_iv = ctx.flow.atm_iv_current
+    else:
+        # Legacy dict support
+        flow = ctx.get("flow_metrics", {})
+        auto = ctx.get("auto_metrics", {})
+        m_state = ctx.get("market_state", {})
+        master = ctx.get("master_setup", {})
+        meta = ctx.get("meta", {})
+        used_expiry = ctx.get("used_expiry", "N/A")
+        strategy_code = ctx.get("strategy_code", "NO_TRADE")
+        spot = ctx.get("spot", 0.0)
+        atr = ctx.get("atr", 250.0)
+        index_name = ctx.get("index_name", "NIFTY")
+        current_atm_iv = ctx.get("current_atm_iv", 15.0)
+    
+    write_daily_nde_snapshot(
+        curr_regime=m_state.state if hasattr(m_state, "state") else m_state.get("state", "NEUTRAL"),
+        persistence=m_state.persistence if hasattr(m_state, "persistence") else m_state.get("persistence", 1),
+        stability_20d=auto.get("stability", 50.0),
+        stability_5d=auto.get("stability_5d", 50.0),
+        drift=auto.get("drift", 0.0),
+        drift_accel=auto.get("drift_acceleration", 0.0),
+        fragility=m_state.fragility_flag if hasattr(m_state, "fragility_flag") else m_state.get("fragility_flag", False),
+        probs={}, # Optional
+        escalation=m_state.transition_risk if hasattr(m_state, "transition_risk") else m_state.get("transition_risk", 0.0),
+        used_expiry=used_expiry,
+        gamma_regime=flow.gamma_regime if hasattr(flow, "gamma_regime") else flow.get("gamma_regime", "NEUTRAL"),
+        flip=flow.gamma_flip_level if hasattr(flow, "gamma_flip_level") else flow.get("gamma_flip_level", 0.0),
+        vanna=flow.vanna_bias if hasattr(flow, "vanna_bias") else flow.get("vanna_bias", "NEUTRAL"),
+        charm=flow.charm_flow if hasattr(flow, "charm_flow") else flow.get("charm_flow", "NEUTRAL"),
+        flow_regime=flow.flow_regime_label if hasattr(flow, "flow_regime_label") else flow.get("flow_regime_label", "NORMAL"),
+        total_gex=flow.total_gex if hasattr(flow, "total_gex") else flow.get("total_gex", 0.0),
+        t_bias="NEUTRAL",
+        s_bias="NEUTRAL",
+        spot=spot,
+        atr=atr,
+        config_hash="V12",
+        source_mode=ctx.source if isinstance(ctx, EngineContext) else ctx.get("source", "TRUSTED"),
+        data_quality_score=1.0 if (meta.get("data_quality") if isinstance(meta, dict) else True) else 0.5,
+        tv_label=flow.tv_label if hasattr(flow, "tv_label") else flow.get("tv_label", "NORMAL"),
+        convergence_score=master.get("confidence", 0.0) if isinstance(master, dict) else master["confidence"],
+        strategy_code=strategy_code,
+        inst_iq=flow.intelligence.get("institutional_iq", {}) if hasattr(flow, "intelligence") else flow.get("institutional_iq", {}),
+        atm_iv=current_atm_iv,
+        requires_warning=False,
+        index_name=index_name
+    )
+    
+    # Phase 5: Cross-Sync with Regime Engine (Hardening for UI Staleness)
+    try:
+        from regime_state import save_regime_snapshot
+        regime_payload = {
+            "regime_label": m_state.get("state", "NEUTRAL"),
+            "current_regime": m_state.get("state", "NEUTRAL"),
+            "confidence": m_state.get("confidence", 0.5),
+            "final_score": master.get("confidence", 0.5),
+            "drift_score": auto.get("drift", 0.0),
+            "drift_accel": auto.get("drift_acceleration", 0.0),
+            "stability_20d": auto.get("stability", 50.0),
+            "source": "nde_orchestrator_v12"
+        }
+        save_regime_snapshot(regime_payload, index_name=ctx.get("index_name", "NIFTY"))
+    except Exception:
+        pass

@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Any
+from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
 
@@ -14,26 +15,34 @@ def system_health_check(ctx: dict) -> list:
         issues.append("Missing delta")
     return issues
 
-def build_narrative(ctx: dict) -> dict:
+def build_narrative(ctx: Any) -> dict:
     """
     Deterministic Institutional Narrative Engine (V3).
     Consumes canonical market state and signal alignment from the Decision Engine.
     """
-    # Safe extraction
-    flow = ctx.get("flow_metrics") or {}
-    auto = ctx.get("auto_metrics") or {}
-    walls = ctx.get("walls") or (None, None)
-    iv = ctx.get("iv_data") or {}
-    spot = ctx.get("spot", 0)
-    master_setup = ctx.get("master_setup", {})
-    m_state = master_setup.get("market_state", {})
+    # Safe extraction (Polymorphic Support for EngineContext)
+    is_ctx = hasattr(ctx, "flow")
     
-    # 1. State & Action Authority (Strictly Consumer Only)
-    state = m_state.get("state", "NEUTRAL")
-    substate = m_state.get("substate", "NORMAL")
-    action = m_state.get("action", "WAIT")
-    confidence = m_state.get("confidence", 0.0)
-    why_list = m_state.get("why", ["Standard market regime."])
+    flow = ctx.flow if is_ctx else (ctx.get("flow_metrics") or {})
+    auto = ctx.meta if is_ctx else (ctx.get("auto_metrics") or {})
+    walls = (flow.call_wall, flow.put_wall) if is_ctx else (ctx.get("walls") or (None, None))
+    iv = flow if is_ctx else (ctx.get("iv_data") or {})
+    spot = ctx.spot if is_ctx else ctx.get("spot", 0)
+    
+    if is_ctx:
+        state = ctx.state.state
+        substate = ctx.state.substate
+        action = ctx.state.bias_tactical
+        confidence = ctx.state.confidence
+        why_list = ctx.state.why
+    else:
+        master_setup = ctx.get("master_setup", {})
+        m_state = master_setup.get("market_state", {})
+        state = m_state.get("state", "NEUTRAL")
+        substate = m_state.get("substate", "NORMAL")
+        action = m_state.get("action", "WAIT")
+        confidence = m_state.get("confidence", 0.0)
+        why_list = m_state.get("why", ["Standard market regime."])
     
     decision_trail = [f"Canonical State: {state} ({substate})", f"Pre-Computed Action: {action}"]
     for w in why_list:
@@ -45,17 +54,22 @@ def build_narrative(ctx: dict) -> dict:
     else: conf_label = "LOW"
 
     # 4. Reasoning (Contextualized)
+    gamma_regime = flow.gamma_regime if is_ctx else flow.get('gamma_regime', 'UNKNOWN')
+    drift = auto.get('drift', 0.0) if not is_ctx else auto.get('drift', 0.0) # meta is a dict
+
     reasons = [
         f"Institutional regime classified as {state} ({substate}).",
         f"Signal alignment score is {confidence * 100:.0f}%.",
-        f"Gamma regime: {flow.get('gamma_regime', 'UNKNOWN')}.",
-        f"Drift velocity: {auto.get('drift', 0.0):.2f}."
+        f"Gamma regime: {gamma_regime}.",
+        f"Drift velocity: {drift:.2f}."
     ]
 
     # 5. Data Quality & Gating
-    meta = ctx.get("meta", {})
+    meta = ctx.meta if is_ctx else ctx.get("meta", {})
     trust_level = meta.get("data_quality", "HIGH")
-    issues = system_health_check(ctx)
+    
+    # Health check handles dict or object internally if we update it
+    issues = system_health_check(ctx if not is_ctx else asdict(ctx) if hasattr(ctx, "__dataclass_fields__") else {})
     
     if trust_level in ["DEGRADED", "LOW"]:
         action = "WAIT"
@@ -74,7 +88,7 @@ def build_narrative(ctx: dict) -> dict:
 
     # 7. Triggers
     call_wall, put_wall = walls
-    flip = flow.get("gamma_flip_level")
+    flip = flow.gamma_flip_level if is_ctx else flow.get("gamma_flip_level")
     triggers = []
     if call_wall: triggers.append(f"Break above Call Wall ({int(call_wall)})")
     if put_wall: triggers.append(f"Break below Put Wall ({int(put_wall)})")
